@@ -1,0 +1,1 @@
+{"main-window":{"identifier":"main-window","description":"Minimal permissions for the local ZoSpeak window.","local":true,"windows":["main"],"permissions":["core:default"]}}

@@ -1,0 +1,45 @@
+mod application;
+pub mod domain;
+pub mod error;
+pub mod infrastructure;
+mod ipc;
+mod telemetry;
+
+use std::sync::Arc;
+
+use application::AppService;
+use infrastructure::{database::Database, engines::engine_from_environment};
+use ipc::AppState;
+use tauri::Manager;
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .setup(|app| {
+            let data_dir = app.path().app_data_dir()?;
+            let packaged_engine_root = app
+                .path()
+                .resource_dir()
+                .ok()
+                .map(|directory| directory.join("engines"));
+            std::fs::create_dir_all(&data_dir)?;
+            let database = Database::open(&data_dir.join("zospeak-poc.sqlite3"))?;
+            app.manage(AppState(Arc::new(AppService::new(
+                database,
+                engine_from_environment(packaged_engine_root),
+            ))));
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            ipc::bootstrap,
+            ipc::save_learner,
+            ipc::start_session,
+            ipc::get_session,
+            ipc::send_text_turn,
+            ipc::send_voice_turn,
+            ipc::complete_session,
+            ipc::reset_demo_data,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running ZoSpeak");
+}

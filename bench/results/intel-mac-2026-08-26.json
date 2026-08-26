@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "host": "Intel Mac development host",
+  "fixture": "bench/fixtures/jfk.wav",
+  "fixture_source": "https://github.com/ggerganov/whisper.cpp/blob/master/samples/jfk.wav",
+  "audio_duration_ms": 4214.0,
+  "warmup": 1,
+  "iterations": 5,
+  "canary": {
+    "engine": "canary-180m-flash-q8_0",
+    "backend": "CPU",
+    "warmup_ms": 237.3,
+    "latencies_ms": [208.0, 210.2, 210.8, 214.1, 215.8],
+    "median_ms": 210.8,
+    "transcript": "And so, my fellow Americans, ask not to."
+  },
+  "whisper_live": {
+    "engine": "whisper-small-live",
+    "backend": "http-sidecar",
+    "warmup_ms": 3266.8,
+    "latencies_ms": [3093.1, 3600.1, 3750.7, 3823.5, 4758.2],
+    "median_ms": 3750.7,
+    "transcript": "And so my fellow Americans, ask not to be seen."
+  },
+  "whisper_fixed_baseline_ms": 3387.0,
+  "canary_delta_vs_fixed_baseline_ms": -3176.2,
+  "canary_speedup_vs_fixed_baseline": 16.1,
+  "note": "The original baseline recording was not in the checkout; this uses an exact-duration same-input fixture and compares Canary latency with the supplied fixed baseline."
+}

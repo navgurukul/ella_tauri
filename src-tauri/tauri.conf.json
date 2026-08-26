@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ZoSpeak POC",
+  "version": "0.1.0",
+  "identifier": "org.navgurukul.zospeak.poc",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "ZoSpeak — Talk with Zoe",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 900,
+        "minHeight": 640,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; font-src 'self'; media-src 'self' blob: data:; connect-src ipc: http://ipc.localhost http://localhost:* ws://localhost:*"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": {
+      "resources/engines/": "engines/",
+      "transcribe-libs/*": "."
+    },
+    "category": "Education",
+    "shortDescription": "Voice-first English practice with Zoe",
+    "longDescription": "A local-first desktop proof of concept for ZoSpeak, NavGurukul's voice-first English learning companion.",
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    }
+  }
+}

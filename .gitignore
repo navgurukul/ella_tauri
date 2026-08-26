@@ -1,0 +1,10 @@
+node_modules/
+dist/
+src-tauri/target/
+*.log
+.DS_Store
+.env.local
+src-tauri/resources/engines/*
+!src-tauri/resources/engines/.gitkeep
+src-tauri/transcribe-libs/*
+!src-tauri/transcribe-libs/.gitkeep
