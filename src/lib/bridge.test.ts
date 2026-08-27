@@ -16,8 +16,8 @@ describe("browser proof-of-concept bridge", () => {
     expect((await bridge.bootstrap()).learner).toBeUndefined();
 
     await bridge.saveLearner("Asha");
-    const session = await bridge.startSession("school-life");
-    expect(session.messages[0].speaker).toBe("zoe");
+    const session = await bridge.startSession("street-food");
+    expect(session.messages[0].speaker).toBe("ella");
 
     for (const text of [
       "I played football with my best friend",
@@ -40,7 +40,7 @@ describe("browser proof-of-concept bridge", () => {
   it("requires an actual transcript in demo voice mode", async () => {
     const bridge = createBrowserBridge(memoryStorage());
     await bridge.saveLearner("Riya");
-    const session = await bridge.startSession("my-dreams");
+    const session = await bridge.startSession("job-interview");
 
     await expect(
       bridge.sendVoiceTurn({
@@ -54,7 +54,7 @@ describe("browser proof-of-concept bridge", () => {
   it("does not allow turns after a conversation ends", async () => {
     const bridge = createBrowserBridge(memoryStorage());
     await bridge.saveLearner("Neha");
-    const session = await bridge.startSession("food-i-love");
+    const session = await bridge.startSession("restaurant-order");
     await bridge.completeSession(session.id);
     await expect(bridge.sendTextTurn(session.id, "I also like rice")).rejects.toThrow(
       /already ended/i,

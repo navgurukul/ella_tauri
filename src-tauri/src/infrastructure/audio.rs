@@ -87,6 +87,36 @@ fn rms(samples: &[i16]) -> f64 {
     (energy / samples.len() as f64).sqrt()
 }
 
+/// Best index to split a streaming STT chunk: the start of the quietest 20 ms
+/// frame inside `[search_from, search_to)`, so a cut lands between words
+/// rather than through one. Falls back to `search_to` when the window is
+/// degenerate.
+pub fn quietest_cut_index(
+    samples: &[i16],
+    sample_rate: u32,
+    search_from: usize,
+    search_to: usize,
+) -> usize {
+    let search_to = search_to.min(samples.len());
+    let frame_len = ((sample_rate as usize * FRAME_MS) / 1_000).max(1);
+    if search_from + frame_len >= search_to {
+        return search_to;
+    }
+    let mut best_index = search_to - frame_len;
+    let mut best_rms = f64::MAX;
+    let mut index = search_from;
+    while index + frame_len <= search_to {
+        let level = rms(&samples[index..index + frame_len]);
+        if level < best_rms {
+            best_rms = level;
+            best_index = index;
+        }
+        index += frame_len;
+    }
+    // Cut in the middle of the quiet frame.
+    best_index + frame_len / 2
+}
+
 pub fn pcm16_wav(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {
     let mut pcm = Vec::with_capacity(samples.len() * 2);
     for sample in samples {

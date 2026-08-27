@@ -1,9 +1,10 @@
 use std::{
+    env,
     fs::File,
     io::Read,
     path::{Path, PathBuf},
     sync::Mutex,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use reqwest::blocking::{multipart, Client};
@@ -180,7 +181,7 @@ impl SpeechToTextEngine for CanaryStt {
                 name: "Canary-180M-Flash Q8_0".into(),
                 ready: false,
                 detail: format!(
-                    "{error}. Install/repair: python ../fetch_models.py --dest ../../ella_app/build/engines --only stt"
+                    "{error}. Install/repair: npm run models:install"
                 ),
             },
         }
@@ -193,18 +194,29 @@ impl SpeechToTextEngine for CanaryStt {
             ))
         })?;
         let resample_started = Instant::now();
-        let pcm = pcm16_to_16k_f32(samples, sample_rate)?;
+        let mut pcm = pcm16_to_16k_f32(samples, sample_rate)?;
         eprintln!(
             "[LATENCY]     stt> canary resample to 16k f32 took {:.1}ms ({} samples, ~{:.0} ms audio)",
             resample_started.elapsed().as_secs_f64() * 1_000.0,
             pcm.len(),
             pcm.len() as f64 / 16.0
         );
+        let peak = pcm.iter().fold(0.0_f32, |max, value| max.max(value.abs()));
+        let rms = (pcm.iter().map(|value| value * value).sum::<f32>()
+            / pcm.len().max(1) as f32)
+            .sqrt();
+        eprintln!("[LATENCY]     stt> canary input stats: peak={peak:.3} rms={rms:.4}");
         if pcm.len() < 4_000 {
             return Err(EllaError::Validation(
                 "I did not hear enough speech. Please speak for at least a quarter second.".into(),
             ));
         }
+        // Canary's attention decoder emits an instant EOS ("no words") when
+        // speech starts or ends flush at the utterance boundary, which the
+        // tight VAD trim produces (verified against captured failure WAVs).
+        // Half a second of real silence at both ends makes decoding reliable
+        // and costs only ~60 ms of extra encode time.
+        pad_with_silence(&mut pcm, CANARY_EDGE_SILENCE_SAMPLES);
         let started = Instant::now();
         let options = RunOptions {
             language: Some("en".into()),
@@ -217,7 +229,13 @@ impl SpeechToTextEngine for CanaryStt {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .run(&pcm, &options)
-            .map_err(|error| EllaError::Engine(format!("Canary transcription failed: {error}")))?;
+            .map_err(|error| {
+                let dump = dump_canary_failure(samples, sample_rate);
+                EllaError::Engine(format!(
+                    "Canary transcription failed: {error}{}",
+                    dump_note(&dump)
+                ))
+            })?;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
         eprintln!(
             "[LATENCY]     stt> canary inference took {:.1}ms (mel={:.1}ms encode={:.1}ms decode={:.1}ms, backend={})",
@@ -229,6 +247,11 @@ impl SpeechToTextEngine for CanaryStt {
         );
         let text = result.text.trim().to_owned();
         if text.is_empty() {
+            let dump = dump_canary_failure(samples, sample_rate);
+            eprintln!(
+                "[LATENCY]     stt> canary heard no words (peak={peak:.3} rms={rms:.4}){}",
+                dump_note(&dump)
+            );
             return Err(EllaError::Validation(
                 "Canary received audio but found no words. Move closer to the microphone and try again."
                     .into(),
@@ -400,6 +423,39 @@ pub fn validate_canary_model(path: &Path, verify_sha256: bool) -> Result<(), Str
     Ok(())
 }
 
+/// 500 ms at 16 kHz, applied to both ends of the audio Canary decodes.
+const CANARY_EDGE_SILENCE_SAMPLES: usize = 8_000;
+
+fn pad_with_silence(pcm: &mut Vec<f32>, samples_each_side: usize) {
+    let mut padded = Vec::with_capacity(pcm.len() + samples_each_side * 2);
+    padded.extend(std::iter::repeat(0.0_f32).take(samples_each_side));
+    padded.append(pcm);
+    padded.extend(std::iter::repeat(0.0_f32).take(samples_each_side));
+    *pcm = padded;
+}
+
+/// Save the exact audio that made Canary fail so it can be replayed offline
+/// with `stt-benchmark --audio <file>`. Best-effort; never fails the turn.
+fn dump_canary_failure(samples: &[i16], sample_rate: u32) -> Option<PathBuf> {
+    let dir = env::var("ELLA_STT_DEBUG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| env::temp_dir().join("ella-stt-failures"));
+    std::fs::create_dir_all(&dir).ok()?;
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let path = dir.join(format!("canary-fail-{millis}.wav"));
+    std::fs::write(&path, pcm16_wav(samples, sample_rate, 1)).ok()?;
+    Some(path)
+}
+
+fn dump_note(dump: &Option<PathBuf>) -> String {
+    dump.as_ref()
+        .map(|path| format!(" [failing audio saved to {}]", path.display()))
+        .unwrap_or_default()
+}
+
 fn pcm16_to_16k_f32(samples: &[i16], sample_rate: u32) -> EllaResult<Vec<f32>> {
     if sample_rate == 0 {
         return Err(EllaError::Validation("Invalid audio sample rate.".into()));
@@ -462,6 +518,16 @@ mod tests {
                 decode_ms: None,
             })
         }
+    }
+
+    #[test]
+    fn canary_audio_is_padded_with_edge_silence() {
+        let mut pcm = vec![0.5_f32; 1_000];
+        pad_with_silence(&mut pcm, 8_000);
+        assert_eq!(pcm.len(), 17_000);
+        assert_eq!(pcm[..8_000], vec![0.0; 8_000][..]);
+        assert_eq!(pcm[16_000..], vec![0.0; 1_000][..]);
+        assert_eq!(pcm[8_000], 0.5);
     }
 
     #[test]

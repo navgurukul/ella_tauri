@@ -39,7 +39,7 @@ React presentation
 - The Windows x86-64 build uses transcribe.cpp dynamic CPU and Vulkan modules.
   Runtime backend discovery prefers available acceleration and leaves CPU as the
   compatibility path.
-- A learner turn and Zoe reply are committed to SQLite together. A partial turn is never visible.
+- A learner turn and Ella reply are committed to SQLite together. A partial turn is never visible.
 - TTS is non-fatal: a valid text turn remains usable if speech synthesis fails.
 - One structured `ella_turn_latency` record is emitted for every turn, including
   failures. It correlates VAD, STT and native-stage timing, LLM TTFT/completion,
@@ -60,7 +60,7 @@ React presentation
 
 ## Exit criteria for the POC
 
-- A learner can create a local profile, choose a topic, complete a multi-turn conversation, hear Zoe, end the session, and see garden growth.
+- A learner can create a local profile, choose a topic, complete a multi-turn conversation, hear Ella, end the session, and see garden growth.
 - The same React journey works against both the browser preview adapter and Tauri/Rust adapter.
 - Rust persistence and browser preview behavior have automated tests.
 - A local integration test exercises VAD -> Canary -> llama.cpp -> persistence

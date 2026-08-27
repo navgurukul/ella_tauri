@@ -8,3 +8,7 @@ src-tauri/resources/engines/*
 !src-tauri/resources/engines/.gitkeep
 src-tauri/transcribe-libs/*
 !src-tauri/transcribe-libs/.gitkeep
+
+# local engine tree (symlink or staged binaries + models)
+engines
+.vite/

@@ -1,0 +1,35 @@
+<svg width="612" height="594" viewBox="0 0 612 594" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <pattern id="ella-grid" x="36" y="11" width="88" height="88" patternUnits="userSpaceOnUse">
+      <path
+        d="M12 0H76C82.63 0 88 5.37 88 12V76C88 82.63 82.63 88 76 88H12C5.37 88 0 82.63 0 76V12C0 5.37 5.37 0 12 0Z"
+        stroke="#9AB62B"
+        stroke-width="1.6"
+      />
+    </pattern>
+  </defs>
+
+  <rect width="612" height="594" fill="#F8FAF0" />
+  <rect width="612" height="594" fill="url(#ella-grid)" />
+
+  <path
+    d="M400 86C366 73 334 63 299 63C153 63 35 175 35 316C35 453 151 563 297 563C443 563 559 453 559 317C559 261 541 211 505 168C522 155 538 137 545 121C555 98 541 77 518 76C499 75 483 87 466 110C471 90 474 70 468 57C461 39 441 34 423 41C405 49 398 67 400 86Z"
+    fill="#9347DD"
+    stroke="#FFFFFF"
+    stroke-width="8"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <ellipse cx="187.5" cy="236" rx="38.5" ry="47.5" transform="rotate(10 187.5 236)" fill="#000000" />
+  <ellipse cx="313.5" cy="260.5" rx="38.5" ry="47.5" transform="rotate(10 313.5 260.5)" fill="#000000" />
+
+  <path
+    d="M204 216C207 229 211 233 220 236C211 239 207 245 204 258C201 245 197 239 188 236C197 233 201 229 204 216Z"
+    fill="#FFFFFF"
+  />
+  <path
+    d="M329 240C332 253 336 257 345 260C336 263 332 269 329 282C326 269 322 263 313 260C322 257 326 253 329 240Z"
+    fill="#FFFFFF"
+  />
+</svg>

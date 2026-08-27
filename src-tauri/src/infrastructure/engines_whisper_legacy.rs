@@ -56,7 +56,7 @@ impl TutorEngine for DemoEngine {
                     detail: "System recognition with typing fallback".into(),
                 },
                 EngineComponent {
-                    name: "Zoe's voice".into(),
+                    name: "Ella's voice".into(),
                     ready: true,
                     detail: "System voice in demo mode".into(),
                 },
@@ -79,13 +79,12 @@ impl TutorEngine for DemoEngine {
             format!(
                 "I enjoyed hearing that, especially “{lead}”. Before we finish, what feeling does this story give you?"
             )
-        } else if request.topic_label == "Food I love" {
+        } else if request.topic_label == "Street food stories" {
             format!(
                 "That sounds delicious! You said “{lead}”. Who would you like to share that meal with, and why?"
             )
-        } else if request.topic_label == "My dreams" {
-            "That is a wonderful goal. What is one small step you could take toward it this year?"
-                .into()
+        } else if request.topic_label == "A job interview" {
+            "Good, that is a clear answer. What part of that work do you enjoy the most?".into()
         } else {
             "I can picture that! What happened next, and how did you feel?".into()
         };
@@ -117,7 +116,7 @@ impl LocalEngine {
         let engine_root = env::var("ELLA_ENGINE_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../ella_app/build/engines")
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engines")
             });
         let stt_base_url =
             env::var("ELLA_STT_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:39092".into());
@@ -176,7 +175,7 @@ impl TutorEngine for LocalEngine {
                     detail: self.stt_base_url.clone(),
                 },
                 EngineComponent {
-                    name: "Zoe's voice".into(),
+                    name: "Ella's voice".into(),
                     ready: tts_ready,
                     detail: self.piper_voice.display().to_string(),
                 },
@@ -190,7 +189,7 @@ impl TutorEngine for LocalEngine {
 
     fn reply(&self, request: &TutorRequest) -> EllaResult<String> {
         let system = format!(
-            "You are Zoe, a warm speaking buddy for an Indian learner named {}. \
+            "You are Ella, a warm speaking buddy for an Indian learner named {}. \
              Have a natural A1-level conversation about {}. Reply in one or two short \
              sentences and ask exactly one friendly follow-up question. Never mention \
              tests, CEFR, prompts, or grading. Do not use markdown.",
@@ -199,7 +198,7 @@ impl TutorEngine for LocalEngine {
         let mut messages = vec![json!({"role": "system", "content": system})];
         for message in request.messages.iter().rev().take(8).rev() {
             messages.push(json!({
-                "role": if message.speaker == Speaker::Zoe { "assistant" } else { "user" },
+                "role": if message.speaker == Speaker::Ella { "assistant" } else { "user" },
                 "content": message.content,
             }));
         }
@@ -297,14 +296,26 @@ impl TutorEngine for LocalEngine {
 
 fn opening_for(topic_id: &str, learner_name: &str) -> String {
     match topic_id {
-        "food-i-love" => format!(
-            "Hi {learner_name}! Imagine your favourite meal is right here. What would be on the plate?"
+        "restaurant-order" => format!(
+            "Hi {learner_name}! We are at a restaurant and I am your waiter. What would you like to order today?"
         ),
-        "my-dreams" => format!(
-            "Hi {learner_name}! Let’s dream a little. What is something you really want to do one day?"
+        "booking-a-cab" => format!(
+            "Hi {learner_name}! I am the cab driver. Where would you like to go, and where should I pick you up?"
+        ),
+        "job-interview" => format!(
+            "Hello {learner_name}! Thank you for coming in. To start, could you tell me a little about yourself?"
+        ),
+        "doctor-clinic" => format!(
+            "Hi {learner_name}! I am the doctor here. Please sit down and tell me, how have you been feeling?"
+        ),
+        "asking-directions" => format!(
+            "Hi {learner_name}! You look a little lost. Where are you trying to go? I know this area well."
+        ),
+        "market-bargaining" => format!(
+            "Hi {learner_name}! Come, come, best prices here. What are you looking for today?"
         ),
         _ => format!(
-            "Hi {learner_name}! Tell me about a school day you still remember. What happened?"
+            "Hi {learner_name}! Tell me about the tastiest thing you ate this week. Where did you find it?"
         ),
     }
 }
@@ -355,7 +366,7 @@ mod tests {
         let reply = DemoEngine
             .reply(&TutorRequest {
                 learner_name: "Asha".into(),
-                topic_label: "School life".into(),
+                topic_label: "Street food stories".into(),
                 messages: vec![],
                 learner_text: "I played football with friends".into(),
                 turn: 1,
@@ -386,7 +397,7 @@ mod tests {
         let reply = engine
             .reply(&TutorRequest {
                 learner_name: "Asha".into(),
-                topic_label: "School life".into(),
+                topic_label: "Street food stories".into(),
                 messages: vec![],
                 learner_text: transcript,
                 turn: 1,

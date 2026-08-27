@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ProjectDir = Split-Path -Parent $PSScriptRoot
 if (-not $EngineRoot) {
-  $EngineRoot = [IO.Path]::GetFullPath((Join-Path $ProjectDir "..\..\ella_app\build\engines"))
+  $EngineRoot = [IO.Path]::GetFullPath((Join-Path $ProjectDir "engines"))
 }
 
 $Llama = Join-Path $EngineRoot "bin\llama\llama-server.exe"
@@ -18,7 +18,7 @@ $CanaryModel = Join-Path $EngineRoot "models\stt\canary-180m-flash-Q8_0.gguf"
 
 foreach ($Required in @($Llama, $Whisper, $LlmModel, $WhisperModel, $CanaryModel)) {
   if (-not (Test-Path -PathType Leaf $Required)) {
-    throw "Missing engine asset: $Required. Install STT models with: py -3 ..\fetch_models.py --dest ..\..\ella_app\build\engines --only stt,stt_fallback"
+    throw "Missing engine asset: $Required. Install STT models with: npm run models:install"
   }
 }
 $Header = New-Object byte[] 4

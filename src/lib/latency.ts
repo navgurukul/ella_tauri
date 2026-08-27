@@ -4,12 +4,10 @@
 import type { TurnTimings } from "../types";
 
 let turnStartedAt = 0;
-let turnLabel = "";
 
 /** Mark the start of a user-visible turn (mic stop pressed / text submitted). */
 export function markTurnStart(label: string): number {
   turnStartedAt = performance.now();
-  turnLabel = label;
   console.log(
     `[LATENCY] ================= ${label} started (${new Date().toISOString()}) =================`,
   );
@@ -58,8 +56,4 @@ export function logServerTimings(timings?: TurnTimings | null): void {
 /** Elapsed ms since the turn started (for summary lines). */
 export function turnElapsed(): number {
   return turnStartedAt ? performance.now() - turnStartedAt : 0;
-}
-
-export function currentTurnLabel(): string {
-  return turnLabel;
 }

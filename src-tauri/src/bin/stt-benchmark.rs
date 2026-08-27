@@ -183,7 +183,7 @@ fn parse_args() -> Result<Config, String> {
     let engine_root = env::var("ELLA_ENGINE_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../ella_app/build/engines")
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engines")
         });
     let mut audio = None;
     let mut canary_model = engine_root.join("models/stt").join(CANARY_FILE_NAME);

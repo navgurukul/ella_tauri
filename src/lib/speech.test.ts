@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { downsampleToPcm16 } from "./speech";
+import { describe, expect, it, vi } from "vitest";
+import { downsampleToPcm16, speakText } from "./speech";
 
 describe("audio conversion", () => {
   it("downsamples float microphone frames to bounded PCM16", () => {
@@ -15,5 +15,32 @@ describe("audio conversion", () => {
 
   it("rejects an unsupported upsample request", () => {
     expect(downsampleToPcm16(new Float32Array([0.5]), 8_000, 16_000)).toEqual([]);
+  });
+
+  it("tracks browser speech from its real playback lifecycle", () => {
+    const original = window.speechSynthesis;
+    const onStart = vi.fn();
+    const onEnd = vi.fn();
+    const cancel = vi.fn();
+    Object.defineProperty(window, "speechSynthesis", {
+      configurable: true,
+      value: {
+        cancel,
+        speak: (utterance: SpeechSynthesisUtterance) => {
+          utterance.onstart?.({} as SpeechSynthesisEvent);
+          utterance.onend?.({} as SpeechSynthesisEvent);
+        },
+      },
+    });
+
+    try {
+      const stop = speakText("Hello", null, { onStart, onEnd });
+      expect(onStart).toHaveBeenCalledOnce();
+      expect(onEnd).toHaveBeenCalledOnce();
+      stop();
+      expect(cancel).toHaveBeenCalledTimes(2);
+    } finally {
+      Object.defineProperty(window, "speechSynthesis", { configurable: true, value: original });
+    }
   });
 });

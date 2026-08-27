@@ -46,6 +46,7 @@ impl Database {
              CREATE TABLE IF NOT EXISTS learner (
                id INTEGER PRIMARY KEY CHECK (id = 1),
                name TEXT NOT NULL,
+               age INTEGER,
                level_name TEXT NOT NULL,
                created_at TEXT NOT NULL
              );
@@ -60,7 +61,7 @@ impl Database {
              CREATE TABLE IF NOT EXISTS messages (
                id TEXT PRIMARY KEY,
                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-               speaker TEXT NOT NULL CHECK (speaker IN ('learner', 'zoe')),
+               speaker TEXT NOT NULL CHECK (speaker IN ('learner', 'ella')),
                content TEXT NOT NULL,
                turn_number INTEGER NOT NULL,
                created_at TEXT NOT NULL
@@ -76,6 +77,8 @@ impl Database {
                updated_at TEXT NOT NULL
              );",
         )?;
+        rename_legacy_speaker(&connection)?;
+        add_learner_age(&connection)?;
         seed_skills(&connection)?;
         Ok(())
     }
@@ -84,13 +87,14 @@ impl Database {
         let connection = self.connection()?;
         connection
             .query_row(
-                "SELECT name, level_name, created_at FROM learner WHERE id = 1",
+                "SELECT name, age, level_name, created_at FROM learner WHERE id = 1",
                 [],
                 |row| {
                     Ok(Learner {
                         name: row.get(0)?,
-                        level_name: row.get(1)?,
-                        created_at: row.get(2)?,
+                        age: row.get(1)?,
+                        level_name: row.get(2)?,
+                        created_at: row.get(3)?,
                     })
                 },
             )
@@ -100,10 +104,18 @@ impl Database {
 
     pub fn save_learner(&self, learner: &Learner) -> EllaResult<()> {
         self.connection()?.execute(
-            "INSERT INTO learner(id, name, level_name, created_at)
-             VALUES(1, ?1, ?2, ?3)
-             ON CONFLICT(id) DO UPDATE SET name = excluded.name, level_name = excluded.level_name",
-            params![learner.name, learner.level_name, learner.created_at],
+            "INSERT INTO learner(id, name, age, level_name, created_at)
+             VALUES(1, ?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+               name = excluded.name,
+               age = COALESCE(excluded.age, learner.age),
+               level_name = excluded.level_name",
+            params![
+                learner.name,
+                learner.age,
+                learner.level_name,
+                learner.created_at
+            ],
         )?;
         Ok(())
     }
@@ -170,17 +182,18 @@ impl Database {
     pub fn recent_sessions(&self, limit: u32) -> EllaResult<Vec<SessionListItem>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT s.id, s.topic_label, s.status, s.started_at, COUNT(m.id)
+            "SELECT s.id, s.topic_id, s.topic_label, s.status, s.started_at, COUNT(m.id)
              FROM sessions s LEFT JOIN messages m ON m.session_id = s.id
              GROUP BY s.id ORDER BY s.started_at DESC LIMIT ?1",
         )?;
         let rows = statement.query_map([limit], |row| {
             Ok(SessionListItem {
                 id: row.get(0)?,
-                topic_label: row.get(1)?,
-                status: row.get(2)?,
-                started_at: row.get(3)?,
-                message_count: row.get(4)?,
+                topic_id: row.get(1)?,
+                topic_label: row.get(2)?,
+                status: row.get(3)?,
+                started_at: row.get(4)?,
+                message_count: row.get(5)?,
             })
         })?;
         let sessions = rows.collect::<Result<Vec<_>, _>>()?;
@@ -191,7 +204,7 @@ impl Database {
         &self,
         session_id: &str,
         learner: &Message,
-        zoe: &Message,
+        ella: &Message,
         skill_id: &str,
         evidence: &str,
         now: &str,
@@ -199,7 +212,7 @@ impl Database {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         insert_message(&transaction, session_id, learner)?;
-        insert_message(&transaction, session_id, zoe)?;
+        insert_message(&transaction, session_id, ella)?;
         transaction.execute(
             "UPDATE skill_progress
              SET evidence_count = evidence_count + 1, last_evidence = ?2, updated_at = ?3
@@ -257,6 +270,60 @@ impl Database {
         transaction.commit()?;
         Ok(())
     }
+}
+
+/// Databases written before the Zoe -> Ella rename store `speaker = 'zoe'` and
+/// carry a CHECK constraint that rejects `'ella'`. SQLite cannot alter a CHECK
+/// in place, so rebuild the table once and copy the rows across.
+fn rename_legacy_speaker(connection: &Connection) -> EllaResult<()> {
+    let legacy: bool = connection.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sqlite_master
+           WHERE type = 'table' AND name = 'messages' AND sql LIKE '%''zoe''%'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !legacy {
+        return Ok(());
+    }
+    connection.execute_batch(
+        "PRAGMA foreign_keys = OFF;
+         BEGIN IMMEDIATE;
+         CREATE TABLE messages_migrated (
+           id TEXT PRIMARY KEY,
+           session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+           speaker TEXT NOT NULL CHECK (speaker IN ('learner', 'ella')),
+           content TEXT NOT NULL,
+           turn_number INTEGER NOT NULL,
+           created_at TEXT NOT NULL
+         );
+         INSERT INTO messages_migrated(id, session_id, speaker, content, turn_number, created_at)
+           SELECT id, session_id,
+                  CASE speaker WHEN 'zoe' THEN 'ella' ELSE speaker END,
+                  content, turn_number, created_at
+           FROM messages;
+         DROP TABLE messages;
+         ALTER TABLE messages_migrated RENAME TO messages;
+         CREATE INDEX IF NOT EXISTS idx_messages_session_turn
+           ON messages(session_id, turn_number, created_at);
+         COMMIT;
+         PRAGMA foreign_keys = ON;",
+    )?;
+    Ok(())
+}
+
+/// `age` arrived with the v6 onboarding flow; older databases predate the column.
+fn add_learner_age(connection: &Connection) -> EllaResult<()> {
+    let present: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('learner') WHERE name = 'age')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !present {
+        connection.execute_batch("ALTER TABLE learner ADD COLUMN age INTEGER;")?;
+    }
+    Ok(())
 }
 
 fn seed_skills(connection: &Connection) -> EllaResult<()> {

@@ -3,8 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-REPO_DIR="$(cd "$PROJECT_DIR/../.." && pwd)"
-ENGINE_ROOT="${ELLA_ENGINE_ROOT:-$REPO_DIR/ella_app/build/engines}"
+# engines live at <repo>/engines (symlink or staged tree)
+ENGINE_ROOT="${ELLA_ENGINE_ROOT:-$PROJECT_DIR/engines}"
 LLM_PORT="${ELLA_LLM_PORT:-39091}"
 STT_PORT="${ELLA_STT_PORT:-39092}"
 

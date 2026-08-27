@@ -15,14 +15,14 @@ checkout; compare transcript quality only within this same-input run.
 Start the Whisper small fallback server first:
 
 ```bash
-cd desktop/ella_tauri
+cd /path/to/ella_tauri
 npm run engines:local
 ```
 
 In a second terminal:
 
 ```bash
-ELLA_ENGINE_ROOT=/absolute/path/to/ella_app/build/engines \
+ELLA_ENGINE_ROOT="$PWD/engines" \
 npm run benchmark:stt -- \
   --audio bench/fixtures/jfk.wav \
   --duration-ms 4214 \

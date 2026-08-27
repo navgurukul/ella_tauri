@@ -36,16 +36,31 @@ declare global {
 
 export interface VoiceCaptureResult {
   samples: number[];
+  /** Samples not yet emitted through the live streaming callback. */
+  streamTailSamples: number[];
   sampleRate: number;
   transcript: string;
 }
 
 export interface VoiceCapture {
   supported: boolean;
-  start(onTranscript: (text: string) => void, onLevel: (level: number) => void): Promise<void>;
+  start(
+    onTranscript: (text: string) => void,
+    onLevel: (level: number) => void,
+    onChunk?: (samples: number[], sampleRate: number) => void,
+  ): Promise<void>;
   stop(): Promise<VoiceCaptureResult>;
   cancel(): Promise<void>;
 }
+
+export interface SpeechPlaybackCallbacks {
+  onStart?: () => void;
+  onEnd?: () => void;
+  onError?: (reason: unknown) => void;
+}
+
+/** How often accumulated audio is downsampled and handed to onChunk. */
+const CHUNK_PUSH_INTERVAL_MS = 1000;
 
 export function createVoiceCapture(): VoiceCapture {
   let stream: MediaStream | null = null;
@@ -55,17 +70,53 @@ export function createVoiceCapture(): VoiceCapture {
   let recognition: SpeechRecognitionLike | null = null;
   let transcript = "";
   let chunks: Float32Array[] = [];
+  let streamChunks: Float32Array[] = [];
   let inputRate = 48_000;
+  let pushTimer: number | null = null;
 
   const recognitionCtor = window.SpeechRecognition ?? window.webkitSpeechRecognition;
 
+  // Downsample everything accumulated so far and hand it to onChunk. A few
+  // input samples stay behind so each flush consumes a whole number of
+  // output windows (keeps windows aligned across flushes).
+  function flushChunks(onChunk: (samples: number[], sampleRate: number) => void) {
+    const joined = joinFloat32(streamChunks);
+    const ratio = inputRate / 16_000;
+    const outputLength = Math.floor(joined.length / ratio);
+    if (outputLength === 0) return;
+    const consumed = Math.floor(outputLength * ratio);
+    const samples = downsampleToPcm16(joined.subarray(0, consumed), inputRate, 16_000);
+    streamChunks = joined.length > consumed ? [joined.subarray(consumed).slice()] : [];
+    if (samples.length) onChunk(samples, 16_000);
+  }
+
   async function cleanup() {
-    recognition?.stop();
+    if (pushTimer !== null) window.clearInterval(pushTimer);
+    pushTimer = null;
+    try {
+      recognition?.stop();
+    } catch {
+      // Some engines throw when stop follows an abort or a failed start.
+    }
     recognition = null;
-    processor?.disconnect();
-    source?.disconnect();
+    try {
+      processor?.disconnect();
+    } catch {
+      // The audio graph may only have been partially connected.
+    }
+    try {
+      source?.disconnect();
+    } catch {
+      // The audio graph may only have been partially connected.
+    }
     stream?.getTracks().forEach((track) => track.stop());
-    if (context && context.state !== "closed") await context.close();
+    if (context && context.state !== "closed") {
+      try {
+        await context.close();
+      } catch {
+        // Tracks still need to be released even if the context rejects close.
+      }
+    }
     stream = null;
     context = null;
     processor = null;
@@ -75,8 +126,9 @@ export function createVoiceCapture(): VoiceCapture {
   return {
     supported: Boolean(navigator.mediaDevices?.getUserMedia),
 
-    async start(onTranscript, onLevel) {
+    async start(onTranscript, onLevel, onChunk) {
       chunks = [];
+      streamChunks = [];
       transcript = "";
       const micStarted = performance.now();
       llogAbsolute("mic:start", "requesting getUserMedia");
@@ -99,7 +151,9 @@ export function createVoiceCapture(): VoiceCapture {
       processor = context.createScriptProcessor(2048, 1, 1);
       processor.onaudioprocess = (event) => {
         const input = event.inputBuffer.getChannelData(0);
-        chunks.push(new Float32Array(input));
+        const frame = new Float32Array(input);
+        chunks.push(frame);
+        if (onChunk) streamChunks.push(frame);
         let sum = 0;
         for (const sample of input) sum += sample * sample;
         onLevel(Math.min(1, Math.sqrt(sum / input.length) * 6));
@@ -110,6 +164,14 @@ export function createVoiceCapture(): VoiceCapture {
         "mic:recording",
         `audio graph live after ${(performance.now() - micStarted).toFixed(1)}ms (input rate ${inputRate} Hz)`,
       );
+
+      if (onChunk) {
+        pushTimer = window.setInterval(() => flushChunks(onChunk), CHUNK_PUSH_INTERVAL_MS);
+        llogAbsolute(
+          "mic:streaming",
+          `live STT streaming on: pushing audio to Rust every ${CHUNK_PUSH_INTERVAL_MS}ms`,
+        );
+      }
 
       if (recognitionCtor) {
         recognition = new recognitionCtor();
@@ -133,6 +195,7 @@ export function createVoiceCapture(): VoiceCapture {
       const stopStarted = performance.now();
       const joined = joinFloat32(chunks);
       const samples = downsampleToPcm16(joined, inputRate, 16_000);
+      const streamTailSamples = downsampleToPcm16(joinFloat32(streamChunks), inputRate, 16_000);
       llog(
         "capture:downsampled",
         `join+downsample ${inputRate}->16000 Hz took ${(performance.now() - stopStarted).toFixed(1)}ms ` +
@@ -145,13 +208,18 @@ export function createVoiceCapture(): VoiceCapture {
         "capture:cleanup",
         `mic/AudioContext teardown took ${(performance.now() - cleanupStarted).toFixed(1)}ms`,
       );
-      return { samples, sampleRate: 16_000, transcript: finalTranscript };
+      return { samples, streamTailSamples, sampleRate: 16_000, transcript: finalTranscript };
     },
 
     async cancel() {
       chunks = [];
+      streamChunks = [];
       transcript = "";
-      recognition?.abort();
+      try {
+        recognition?.abort();
+      } catch {
+        // Abort can throw if recognition never reached the running state.
+      }
       await cleanup();
     },
   };
@@ -190,37 +258,109 @@ export function downsampleToPcm16(
   return output;
 }
 
-export function speakText(text: string, audio?: AudioPayload | null): () => void {
+export function speakText(
+  text: string,
+  audio?: AudioPayload | null,
+  callbacks: SpeechPlaybackCallbacks = {},
+): () => void {
   if (audio) {
     const playbackRequested = performance.now();
     llog("playback:decode-start", `creating Audio element from ${audio.base64.length} base64 chars`);
     const player = new Audio(`data:${audio.mime_type};base64,${audio.base64}`);
-    player.addEventListener(
-      "playing",
-      () => {
-        llog(
-          "playback:playing",
-          `audio is audible; element setup->playing took ${(performance.now() - playbackRequested).toFixed(1)}ms`,
-        );
-      },
-      { once: true },
-    );
-    player.addEventListener(
-      "ended",
-      () => llog("playback:ended", `Zoe finished speaking`),
-      { once: true },
-    );
-    void player.play();
-    return () => player.pause();
+    let cancelled = false;
+    let settled = false;
+
+    const onPlaying = () => {
+      if (cancelled) return;
+      llog(
+        "playback:playing",
+        `audio is audible; element setup->playing took ${(performance.now() - playbackRequested).toFixed(1)}ms`,
+      );
+      callbacks.onStart?.();
+    };
+    const onEnded = () => {
+      if (cancelled || settled) return;
+      settled = true;
+      cleanup();
+      llog("playback:ended", "Ella finished speaking");
+      callbacks.onEnd?.();
+    };
+    const onError = (reason: unknown) => {
+      if (cancelled || settled) return;
+      settled = true;
+      cleanup();
+      llog("playback:error", reason instanceof Error ? reason.message : "audio playback failed");
+      callbacks.onError?.(reason);
+    };
+    const cleanup = () => {
+      player.removeEventListener("playing", onPlaying);
+      player.removeEventListener("ended", onEnded);
+      player.removeEventListener("error", onError);
+    };
+
+    player.addEventListener("playing", onPlaying, { once: true });
+    player.addEventListener("ended", onEnded, { once: true });
+    player.addEventListener("error", onError, { once: true });
+    try {
+      const playback = player.play();
+      if (playback) void playback.catch(onError);
+    } catch (reason) {
+      onError(reason);
+    }
+    return () => {
+      cancelled = true;
+      cleanup();
+      player.pause();
+    };
   }
 
-  if (!("speechSynthesis" in window)) return () => undefined;
+  if (!("speechSynthesis" in window)) {
+    queueMicrotask(() => callbacks.onError?.(new Error("Speech playback is unavailable")));
+    return () => undefined;
+  }
   llog("playback:system-tts", `no Piper audio; using browser speechSynthesis (${text.length} chars)`);
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
+  let cancelled = false;
+  let settled = false;
+  let utterance: SpeechSynthesisUtterance;
+  try {
+    window.speechSynthesis.cancel();
+    utterance = new SpeechSynthesisUtterance(text);
+  } catch (reason) {
+    queueMicrotask(() => {
+      if (!cancelled) callbacks.onError?.(reason);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }
   utterance.lang = "en-IN";
   utterance.rate = 0.92;
   utterance.pitch = 1.05;
-  window.speechSynthesis.speak(utterance);
-  return () => window.speechSynthesis.cancel();
+  utterance.onstart = () => {
+    if (!cancelled) callbacks.onStart?.();
+  };
+  utterance.onend = () => {
+    if (cancelled || settled) return;
+    settled = true;
+    callbacks.onEnd?.();
+  };
+  utterance.onerror = (event) => {
+    if (cancelled || settled) return;
+    settled = true;
+    callbacks.onError?.(event);
+  };
+  try {
+    window.speechSynthesis.speak(utterance);
+  } catch (reason) {
+    queueMicrotask(() => {
+      if (!cancelled && !settled) {
+        settled = true;
+        callbacks.onError?.(reason);
+      }
+    });
+  }
+  return () => {
+    cancelled = true;
+    window.speechSynthesis.cancel();
+  };
 }

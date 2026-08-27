@@ -1,8 +1,10 @@
-export type Speaker = "learner" | "zoe";
+export type Speaker = "learner" | "ella";
 export type SkillStrand = "vocabulary" | "grammar" | "fluency";
 
 export interface Learner {
   name: string;
+  /** Collected during onboarding so Ella can pick age-appropriate topics. */
+  age?: number | null;
   level_name: string;
   created_at: string;
 }
@@ -12,7 +14,8 @@ export interface Topic {
   label: string;
   prompt: string;
   emoji: string;
-  color: "berry" | "green" | "blue";
+  /** Palette hint from the backend; the home bento uses `Tone` from below. */
+  color: string;
 }
 
 export interface Message {
@@ -35,6 +38,7 @@ export interface Session {
 
 export interface SessionListItem {
   id: string;
+  topic_id: string;
   topic_label: string;
   status: "active" | "complete";
   started_at: string;
@@ -94,7 +98,7 @@ export interface SkillEvidence {
 
 export interface TurnResult {
   learner_message: Message;
-  zoe_message: Message;
+  ella_message: Message;
   correction?: string | null;
   evidence?: SkillEvidence | null;
   suggested_complete: boolean;
@@ -139,13 +143,102 @@ export interface VoiceTurnInput {
   browserTranscript?: string;
 }
 
+export interface VoiceStreamFinishInput {
+  streamId: string;
+  tailSamples: number[];
+  sampleRate: number;
+  browserTranscript?: string;
+}
+
 export interface EllaBridge {
   bootstrap(): Promise<AppSnapshot>;
-  saveLearner(name: string): Promise<Learner>;
+  saveLearner(name: string, age?: number | null): Promise<Learner>;
   startSession(topicId: string): Promise<Session>;
   getSession(sessionId: string): Promise<Session>;
   sendTextTurn(sessionId: string, text: string): Promise<TurnResult>;
   sendVoiceTurn(input: VoiceTurnInput): Promise<TurnResult>;
+  /** Live chunked STT while recording; only implemented by the Tauri bridge. */
+  beginVoiceStream?(sessionId: string): Promise<string>;
+  pushVoiceStream?(streamId: string, samples: number[], sampleRate: number): Promise<void>;
+  cancelVoiceStream?(streamId: string): Promise<void>;
+  finishVoiceStreamTurn?(input: VoiceStreamFinishInput): Promise<TurnResult>;
   completeSession(sessionId: string): Promise<SessionSummary>;
   resetDemoData(): Promise<AppSnapshot>;
+}
+
+/* ------------------------------------------------------------------ *
+ * Presentation layer
+ *
+ * The Ella v5 design shows curriculum framing the Rust backend does not
+ * model yet: a CEFR level, a talking streak, named garden units on a path,
+ * per-topic category + duration, and a weekly digest. Everything below is
+ * derived from `AppSnapshot` where the data exists and filled from the
+ * placeholders in `lib/presentation.ts` where it does not.
+ * ------------------------------------------------------------------ */
+
+export type TopicCategory = "role-play" | "vocabulary" | "grammar" | "fluency";
+
+/** How a topic renders in the home bento grid. */
+export type TopicSlot = "wide" | "wave" | "framed" | "inset" | "chat" | "quote";
+
+export type Tone = "violet" | "pink" | "green" | "orange" | "lilac" | "ink";
+
+export interface TopicPresentation {
+  category: TopicCategory;
+  minutes: number;
+  tone: Tone;
+  /** Longer line used by the "Ella recommends" hero. */
+  blurb: string;
+  /** Sample exchange printed on the framed/chat/quote cards. */
+  sample: string;
+  reply: string;
+}
+
+export type StreakDayState = "done" | "today" | "future";
+
+export interface StreakDay {
+  label: string;
+  state: StreakDayState;
+}
+
+export interface Streak {
+  days: number;
+  week: StreakDay[];
+}
+
+export type UnitState = "bloom" | "young" | "seedling" | "bare" | "locked";
+
+export interface UnitNode {
+  num: number;
+  name: string;
+  state: UnitState;
+  /** The conversation this unit opens when it is tapped. */
+  topicId: string | null;
+  /** Coordinates on the 1110x600 garden stage. */
+  x: number;
+  y: number;
+  tint: string;
+  done: boolean;
+  current: boolean;
+}
+
+export interface WeeklyDigest {
+  talks: number;
+  newWords: number;
+  blooms: number;
+}
+
+/** What the onboarding placement talk hands back once it has really run. */
+export interface PlacementResult {
+  level: string;
+  transcript: string;
+}
+
+export interface LevelInfo {
+  /** CEFR band shown next to the learner's name. */
+  code: string;
+  skillsDone: number;
+  skillsTotal: number;
+  /** 0-1, for the garden progress bars. */
+  ratio: number;
 }

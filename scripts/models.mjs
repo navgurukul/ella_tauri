@@ -12,9 +12,9 @@ if (mode !== "install" && mode !== "validate") {
 const command = process.platform === "win32" ? "py" : "python3";
 const args = process.platform === "win32" ? ["-3"] : [];
 args.push(
-  path.resolve(projectDir, "../fetch_models.py"),
+  path.resolve(projectDir, "tooling/fetch_models.py"),
   "--dest",
-  path.resolve(projectDir, "../../ella_app/build/engines"),
+  path.resolve(projectDir, "engines"),
   "--only",
   "stt,stt_fallback",
 );

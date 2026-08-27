@@ -1,6 +1,6 @@
-# ZoSpeak desktop POC
+# Ella desktop
 
-A usable Ella/ZoSpeak vertical slice built with Tauri 2, React/TypeScript, Rust,
+A usable Ella vertical slice built with Tauri 2, React/TypeScript, Rust,
 SQLite, and local AI engines. In local mode, the primary speech recognizer is
 Canary-180M-Flash Q8_0 running in-process through `transcribe.cpp`; Whisper small
 remains an HTTP fallback.
@@ -18,12 +18,18 @@ stop-time VAD and optimizes the interval from microphone stop to final transcrip
   Vulkan acceleration. The packaged native runtime tries the Vulkan module
   automatically and retains the CPU module when Vulkan is unavailable.
 
-The default development engine root is `../../ella_app/build/engines` relative
-to this directory. Set `ELLA_ENGINE_ROOT` to use another location.
+The default development engine root is `engines/` in this repository — a symlink
+or a staged copy of a built engine tree (`bin/`, `models/`, `piper-venv/`). Set
+`ELLA_ENGINE_ROOT` to use another location. If you already have the tree that
+`ella_flutter` builds, point at it once:
+
+```bash
+ln -s /path/to/ella_flutter/ella_app/build/engines engines
+```
 
 ## Install and validate the STT models
 
-From `desktop/ella_tauri`:
+From the repository root:
 
 ```bash
 npm install
@@ -32,7 +38,7 @@ npm run models:validate
 ```
 
 `models:install` downloads the pinned Canary Q8_0 GGUF plus Whisper small from
-`../models.json`; `models:validate` checks the files' sizes and Canary SHA-256.
+`tooling/models.json`; `models:validate` checks the files' sizes and Canary SHA-256.
 Native startup additionally checks the GGUF header, architecture, English/16 kHz
 capabilities, and session creation. Failures name the bad file and print a repair
 command. The model can also be checked without starting Ella:
@@ -42,12 +48,43 @@ cargo run --release --manifest-path src-tauri/Cargo.toml --bin stt-benchmark -- 
   --audio bench/fixtures/jfk.wav --duration-ms 4214 --iterations 1 --warmup 0
 ```
 
+## User interface
+
+The UI implements the **Ella v6** design system (Claude Design project
+`549e2295-3339-4b07-9009-1ac4475aad21`, file `Ella v6.dc.html`).
+
+- Tokens, type and geometry live in [`src/styles.css`](src/styles.css). Fonts are
+  bundled under `public/assets/fonts` because the Tauri CSP is `font-src 'self'`
+  — nothing is fetched from Google Fonts at runtime.
+- Ella herself is drawn in CSS, not illustrated: see
+  [`src/components/EllaMascot.tsx`](src/components/EllaMascot.tsx). One 660x450
+  blob is the single source of truth for her face; every other size is that blob
+  under a CSS scale.
+- Onboarding is the five-step flow from v6 — welcome, name, age, mic check,
+  placement talk — in
+  [`src/components/OnboardingFlow.tsx`](src/components/OnboardingFlow.tsx). The
+  mic check and the placement talk open the real microphone; the level the
+  placement talk reports is still the placeholder band, because nothing scores
+  the recording yet.
+- Then four screens: home, talk, summary and garden. The design file covers
+  home, talk and garden; the post-conversation summary is built from the same
+  parts. A conversation hides the sidebar and fills the window.
+- The design shows curriculum framing the Rust backend does not model yet — a
+  CEFR band, a talking streak, named garden units, per-topic category and
+  duration, a weekly digest. All of it is resolved in
+  [`src/lib/presentation.ts`](src/lib/presentation.ts), which derives what it can
+  from `AppSnapshot` and marks the rest `PLACEHOLDER`. When the backend grows a
+  field, delete the constant and read the snapshot instead.
+
+The intended window is 1440x900. Below 1280px wide the home bento reflows from
+the design's four columns to two.
+
 ## Run the complete local voice POC
 
 macOS development host:
 
 ```bash
-cd /Users/sama/Desktop/ella_flutter/desktop/ella_tauri
+cd /path/to/ella_tauri
 npm run local
 ```
 
@@ -59,18 +96,18 @@ npm run engines:local
 
 # Terminal 2
 ELLA_ENGINE_MODE=local \
-ELLA_ENGINE_ROOT=/Users/sama/Desktop/ella_flutter/ella_app/build/engines \
+ELLA_ENGINE_ROOT="$PWD/engines" \
 npm run desktop:dev
 ```
 
 Windows x86-64 development host (PowerShell):
 
 ```powershell
-cd C:\path\to\ella_flutter\desktop\ella_tauri
+cd C:\path\to\ella_tauri
 npm install
 npm run models:install
 npm run models:validate
-.\scripts\run-local-poc.ps1 -EngineRoot C:\path\to\ella_flutter\ella_app\build\engines
+.\scripts\run-local-poc.ps1 -EngineRoot C:\path\to\ella_tauri\engines
 ```
 
 The native voice route is:
@@ -111,7 +148,7 @@ npm run engines:local
 ```
 
 ```bash
-ELLA_ENGINE_ROOT=/Users/sama/Desktop/ella_flutter/ella_app/build/engines \
+ELLA_ENGINE_ROOT="$PWD/engines" \
 npm run benchmark:stt -- \
   --audio bench/fixtures/jfk.wav \
   --duration-ms 4214 \
@@ -132,7 +169,7 @@ npm run check
 
 # Full local voice path: VAD -> native Canary -> llama.cpp -> SQLite -> Piper
 ELLA_ENGINE_MODE=local \
-ELLA_ENGINE_ROOT=/Users/sama/Desktop/ella_flutter/ella_app/build/engines \
+ELLA_ENGINE_ROOT="$PWD/engines" \
 cargo test --release --manifest-path src-tauri/Cargo.toml \
   application::tests::complete_local_voice_turn_uses_canary_and_returns_playable_audio \
   -- --ignored --nocapture

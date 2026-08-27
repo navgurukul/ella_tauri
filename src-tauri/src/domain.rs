@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Learner {
     pub name: String,
+    /// Collected during onboarding so Ella can pick age-appropriate topics.
+    pub age: Option<u8>,
     pub level_name: String,
     pub created_at: String,
 }
@@ -20,21 +22,21 @@ pub struct Topic {
 #[serde(rename_all = "lowercase")]
 pub enum Speaker {
     Learner,
-    Zoe,
+    Ella,
 }
 
 impl Speaker {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Learner => "learner",
-            Self::Zoe => "zoe",
+            Self::Ella => "ella",
         }
     }
 
     pub fn from_db(value: &str) -> Self {
         match value {
             "learner" => Self::Learner,
-            _ => Self::Zoe,
+            _ => Self::Ella,
         }
     }
 }
@@ -62,6 +64,7 @@ pub struct Session {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionListItem {
     pub id: String,
+    pub topic_id: String,
     pub topic_label: String,
     pub status: String,
     pub started_at: String,
@@ -163,7 +166,7 @@ pub struct TurnTimings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnResult {
     pub learner_message: Message,
-    pub zoe_message: Message,
+    pub ella_message: Message,
     pub correction: Option<String>,
     pub evidence: Option<SkillEvidence>,
     pub suggested_complete: bool,
@@ -194,27 +197,77 @@ pub struct TutorRequest {
 pub fn topics() -> Vec<Topic> {
     vec![
         Topic {
-            id: "school-life".into(),
-            label: "School life".into(),
-            prompt: "Tell Zoe about a memorable day at school.".into(),
-            emoji: "🎒".into(),
-            color: "blue".into(),
+            id: "street-food".into(),
+            label: "Street food stories".into(),
+            prompt: "Describe tastes, smells and your favourite stall.".into(),
+            emoji: "\u{1F35B}".into(),
+            color: "violet".into(),
         },
         Topic {
-            id: "food-i-love".into(),
-            label: "Food I love".into(),
-            prompt: "Describe a meal you would happily eat again.".into(),
-            emoji: "🥭".into(),
+            id: "restaurant-order".into(),
+            label: "Ordering at a restaurant".into(),
+            prompt: "Order a meal, ask about the menu, and settle the bill.".into(),
+            emoji: "\u{1F37D}".into(),
+            color: "pink".into(),
+        },
+        Topic {
+            id: "booking-a-cab".into(),
+            label: "Booking a cab".into(),
+            prompt: "Give an address, agree a fare, and ask how long it takes.".into(),
+            emoji: "\u{1F695}".into(),
             color: "green".into(),
         },
         Topic {
-            id: "my-dreams".into(),
-            label: "My dreams".into(),
-            prompt: "Share something you hope to do in the future.".into(),
-            emoji: "✨".into(),
-            color: "berry".into(),
+            id: "job-interview".into(),
+            label: "A job interview".into(),
+            prompt: "Introduce yourself and answer questions about your work.".into(),
+            emoji: "\u{1F4BC}".into(),
+            color: "lilac".into(),
+        },
+        Topic {
+            id: "doctor-clinic".into(),
+            label: "At the doctor's clinic".into(),
+            prompt: "Explain how you feel and understand what to do next.".into(),
+            emoji: "\u{1FA7A}".into(),
+            color: "violet".into(),
+        },
+        Topic {
+            id: "asking-directions".into(),
+            label: "Asking for directions".into(),
+            prompt: "Find your way and repeat the directions back.".into(),
+            emoji: "\u{1F5FA}".into(),
+            color: "ink".into(),
+        },
+        Topic {
+            id: "market-bargaining".into(),
+            label: "Bargaining at the market".into(),
+            prompt: "Ask the price, bargain kindly, and agree a deal.".into(),
+            emoji: "\u{1F6D2}".into(),
+            color: "orange".into(),
         },
     ]
+}
+
+/// Onboarding promises that "Ella picks topics that fit your age", so the
+/// grown-up scenarios sink below the everyday ones for younger learners. They
+/// are ordered, not removed: a 12-year-old can still choose an interview, it
+/// simply stops being what Ella leads with.
+pub fn topics_for_age(age: Option<u8>) -> Vec<Topic> {
+    let mut all = topics();
+    let Some(age) = age else {
+        return all;
+    };
+    // Stable sort, so the authored order survives inside each group.
+    all.sort_by_key(|topic| u8::from(min_age(&topic.id) > age));
+    all
+}
+
+fn min_age(topic_id: &str) -> u8 {
+    match topic_id {
+        "job-interview" => 14,
+        "market-bargaining" => 10,
+        _ => 0,
+    }
 }
 
 pub fn skill_seeds() -> [(&'static str, &'static str, &'static str); 3] {

@@ -1,0 +1,101 @@
+{
+  "_comment": [
+    "Model manifest for the offline desktop build. See docs/desktop-architecture.md §3.",
+    "Roughly 3.7 GB total with Canary and the Whisper fallback. fetch_models.py",
+    "reads this and lays the files out where",
+    "EllaDesktop (ella_app/lib/desktop/desktop_env.dart) expects to find them.",
+    "",
+    "The LLM entry is the one real open question (§11). Two 3B candidates are listed;",
+    "qwen2.5-3b is the default because it holds a JSON schema better than",
+    "llama-3.2-3b in our experience, and grading is the harder half of the job.",
+    "Run bench/measure_grading_tokens.py against both before committing."
+  ],
+  "models": {
+    "llm": {
+      "default": "qwen2.5-3b",
+      "target": "models/llm/model.gguf",
+      "variants": {
+        "qwen2.5-3b": {
+          "repo": "Qwen/Qwen2.5-3B-Instruct-GGUF",
+          "file": "qwen2.5-3b-instruct-q4_k_m.gguf",
+          "size_mb": 2100,
+          "note": "Stronger on structured output and Hindi code-switching."
+        },
+        "llama-3.2-3b": {
+          "repo": "bartowski/Llama-3.2-3B-Instruct-GGUF",
+          "file": "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+          "size_mb": 2020,
+          "note": "Warmer conversational register; weaker at long JSON."
+        }
+      }
+    },
+    "stt": {
+      "default": "canary-180m-flash-q8_0",
+      "target": "models/stt/canary-180m-flash-Q8_0.gguf",
+      "variants": {
+        "canary-180m-flash-q8_0": {
+          "repo": "handy-computer/canary-180m-flash-gguf",
+          "file": "canary-180m-flash-Q8_0.gguf",
+          "size_mb": 208,
+          "sha256": "e13c7f5d0952b056a027cfffec13e3a3a134d1608babed24f983568f141e297c",
+          "note": "Primary stop-to-final STT model. Native transcribe.cpp batch inference; not a streaming model."
+        }
+      }
+    },
+    "stt_fallback": {
+      "default": "whisper-small",
+      "target": "models/stt/ggml-small.bin",
+      "variants": {
+        "whisper-small": {
+          "repo": "ggerganov/whisper.cpp",
+          "file": "ggml-small.bin",
+          "size_mb": 488,
+          "note": "Existing HTTP whisper.cpp fallback for Canary load or inference failures."
+        },
+        "whisper-base": {
+          "repo": "ggerganov/whisper.cpp",
+          "file": "ggml-base.bin",
+          "size_mb": 148,
+          "note": "Smaller emergency fallback if Whisper small does not fit the target machine."
+        }
+      }
+    },
+    "tts": {
+      "default": "en_IN-navgurukul-medium",
+      "target": "models/tts/en_IN-navgurukul-medium.onnx",
+      "variants": {
+        "en_IN-navgurukul-medium": {
+          "source": "local",
+          "note": "Custom NavGurukul voice from origin/feature/navgurukul-piper (commit bd348be). The .onnx and its .onnx.json carry over; the Kotlin plumbing does not. Copy both files.",
+          "size_mb": 65,
+          "requires_sidecar": ".json"
+        }
+      }
+    },
+    "vad": {
+      "default": "silero-v5",
+      "target": "models/vad/silero_vad.onnx",
+      "variants": {
+        "silero-v5": {
+          "repo": "snakers4/silero-vad",
+          "file": "silero_vad.onnx",
+          "size_mb": 2,
+          "note": "Optional. Missing it falls back to the energy VAD, which works but is worse in a noisy classroom."
+        }
+      }
+    },
+    "scorer": {
+      "default": "wav2vec2-phoneme",
+      "target": "models/scorer/wav2vec2-phoneme.onnx",
+      "variants": {
+        "wav2vec2-phoneme": {
+          "repo": "facebook/wav2vec2-lv-60-espeak-cv-ft",
+          "file": "model.onnx",
+          "size_mb": 400,
+          "note": "Optional, off the critical path. Needs vocab.json beside it.",
+          "requires_sidecar": ".vocab.json"
+        }
+      }
+    }
+  }
+}
