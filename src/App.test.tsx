@@ -179,9 +179,10 @@ describe("Ella learner flow", () => {
       // Every word is its own element so one of them can be marked.
       expect(document.querySelectorAll(".talk-prompt .talk-word")).toHaveLength(3);
 
-      // The second sentence arrives while the first is still being spoken. It
-      // must land on its own line: sharing one centred paragraph is what made
-      // "Sounds nice." jump sideways mid-read.
+      // The second sentence arrives while the first is still being spoken, and
+      // joins the same left-aligned paragraph. What matters is that the first
+      // sentence is untouched by it — a centred paragraph re-centred instead,
+      // which is what made "Sounds nice." jump sideways mid-read.
       const first = document.querySelector(".talk-sentence")?.textContent;
       emit?.({
         session_id: turnSession,
@@ -205,6 +206,8 @@ describe("Ella learner flow", () => {
       const blocks = document.querySelectorAll(".talk-prompt .talk-sentence");
       expect(blocks[0].textContent).toBe(first);
       expect(blocks[1].textContent).toBe("What did you like about it?");
+      // Sentences flow together, so a real space has to join them.
+      expect(promptText()).toContain("delicious! What did you like about it?");
       // Word numbering continues across the sentence break, because the
       // highlight counts words through the whole reply.
       expect(document.querySelectorAll(".talk-prompt .talk-word")).toHaveLength(9);

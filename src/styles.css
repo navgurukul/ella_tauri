@@ -1335,33 +1335,35 @@ button { font-family: inherit; }
   line-height: 1;
 }
 
-/* One line per sentence, stacked.
-   Ella's sentences arrive one at a time while she is still talking, and the
-   reply used to be a single centred paragraph — so the moment the second
-   sentence landed, the line re-centred and "Sounds nice." jumped ~170px to the
-   left while the learner was reading it. Each sentence is its own centred
-   block, so an arriving sentence appears below and moves nothing.
-   The reserved height covers the usual one-to-three sentence reply, and the
-   content is top-anchored inside it, so growing from one line to two does not
-   shift the lines already on screen either. */
+/* One flowing paragraph, ragged right, that only ever grows at its end.
+   Ella's sentences arrive one at a time while she is still talking, so the
+   reply has to be able to gain text without moving what is already on screen.
+   Centring cannot: a centred line sits where its own content puts it, so
+   "Sounds nice." jumped ~170px left mid-read the moment "What did you like
+   about it?" joined its line. Balancing is worse again — it re-breaks every
+   line in the paragraph. Left-aligned with ordinary greedy wrapping, each line
+   is decided by what came before it and nothing else, so appended text lands at
+   the end and every word already placed stays exactly where it is.
+   Giving each sentence its own line was also stable, but it wrapped each one
+   separately: a reply that fills two wide lines here stacked into three short
+   ones, and the column read narrow.
+   The reserved height covers the usual one-to-two line reply, so gaining a line
+   does not push the paragraph up out of the vertically centred column. */
 .talk-prompt {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 1px;
   width: 100%;
   max-width: 640px;
-  min-height: calc(3 * 1.42em);
+  min-height: calc(2 * 1.42em);
   margin: 0;
-  text-align: center;
+  text-align: left;
+  text-wrap: wrap;
   font-size: clamp(23px, 2.25vw, 29px);
   font-weight: 400;
   line-height: 1.42;
 }
+/* Inline, so sentences share lines instead of each claiming one. Only opacity
+   is animated: transforms do not apply to a non-replaced inline element. */
 .talk-sentence {
-  display: block;
-  text-wrap: balance;
+  display: inline;
 }
 
 /* Ella's reply is drawn a word at a time so the one being spoken can be
@@ -1378,8 +1380,8 @@ button { font-family: inherit; }
   animation: talk-sentence-in 300ms ease-out both;
 }
 @keyframes talk-sentence-in {
-  from { opacity: 0; transform: translateY(-2px); }
-  to { opacity: 1; transform: none; }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 /* Words Ella has not reached yet hold their place so the line never re-wraps
    mid-sentence, and stay readable enough to be read ahead of the voice. */
@@ -2188,7 +2190,7 @@ button { font-family: inherit; }
   .talk-stage { padding: 8px 0 84px; scroll-padding-bottom: 84px; }
   .talk-copy { gap: 10px; }
   .talk-state-indicator { height: 24px; }
-  .talk-prompt { font-size: 22px; line-height: 1.34; min-height: calc(3 * 1.34em); }
+  .talk-prompt { font-size: 22px; line-height: 1.34; min-height: calc(2 * 1.34em); }
   .talk-feedback__item { padding: 9px 13px 10px; }
   .talk-copy .btn--replay { min-height: 44px; height: 44px; }
   .ella--stage-talk {

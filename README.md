@@ -146,10 +146,13 @@ screen as it is spoken rather than arriving whole when the turn returns. Words
 Ella has not reached yet are dimmed rather than hidden: they hold their place so
 the line never re-wraps mid-sentence, they can be read ahead of the voice, and a
 sentence that Piper finishes mid-reply fades in faint instead of appearing at
-full contrast. Each sentence is drawn as its own centred line inside a
-height-reserved block, because a single centred paragraph re-centres itself when
-a sentence lands — "Sounds nice." jumped some 170px left mid-read as "What did
-you like about it?" joined its line. `sentenceGroups` in `lib/speech.ts` mirrors
+full contrast. The reply is one left-aligned paragraph
+with ordinary greedy wrapping inside a height-reserved block, because that is
+the only arrangement that can gain text without moving what is on screen: a
+centred line sits where its own content puts it, so "Sounds nice." jumped some
+170px left mid-read as "What did you like about it?" joined it, and balancing
+re-breaks every line in the paragraph. Giving each sentence its own line was
+stable too, but wrapped each one separately and read narrow. `sentenceGroups` in `lib/speech.ts` mirrors
 the backend splitter so a reply is already in its spoken shape before the audio
 reaches it; the two are kept in step by matching test cases on both sides, and
 where they disagree the cost is one reflow. Ella's opening goes through the same pipeline — `speak_opening`

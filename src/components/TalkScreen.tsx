@@ -654,18 +654,21 @@ export function TalkScreen({
                 .slice(0, sentence)
                 .reduce((total, earlier) => total + earlier.length, 0);
               return (
-                <span className="talk-sentence" key={`${sentence}-${words[0] ?? ""}`}>
-                  {words.map((word, index) => (
-                    <Fragment key={`${index}-${word}`}>
-                      <span
-                        className={wordClass(offset + index, spokenIndex, followingWords)}
-                      >
-                        {word}
-                      </span>
-                      {index < words.length - 1 ? " " : ""}
-                    </Fragment>
-                  ))}
-                </span>
+                <Fragment key={`${sentence}-${words[0] ?? ""}`}>
+                  <span className="talk-sentence">
+                    {words.map((word, index) => (
+                      <Fragment key={`${index}-${word}`}>
+                        <span className={wordClass(offset + index, spokenIndex, followingWords)}>
+                          {word}
+                        </span>
+                        {index < words.length - 1 ? " " : ""}
+                      </Fragment>
+                    ))}
+                  </span>
+                  {/* Sentences flow together on a line, so the gap between two
+                      of them is a real space, exactly as between two words. */}
+                  {sentence < promptSentences.length - 1 ? " " : ""}
+                </Fragment>
               );
             })}
           </p>
