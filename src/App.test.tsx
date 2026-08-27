@@ -179,6 +179,36 @@ describe("Ella learner flow", () => {
       // Every word is its own element so one of them can be marked.
       expect(document.querySelectorAll(".talk-prompt .talk-word")).toHaveLength(3);
 
+      // The second sentence arrives while the first is still being spoken. It
+      // must land on its own line: sharing one centred paragraph is what made
+      // "Sounds nice." jump sideways mid-read.
+      const first = document.querySelector(".talk-sentence")?.textContent;
+      emit?.({
+        session_id: turnSession,
+        turn: 1,
+        index: 1,
+        text: "What did you like about it?",
+        audio: { mime_type: "audio/wav", base64: "AAAA" },
+        ready_ms: 1600,
+        words: [
+          { text: "What", start_ms: 0, end_ms: 200 },
+          { text: "did", start_ms: 200, end_ms: 400 },
+          { text: "you", start_ms: 400, end_ms: 600 },
+          { text: "like", start_ms: 600, end_ms: 800 },
+          { text: "about", start_ms: 800, end_ms: 1000 },
+          { text: "it?", start_ms: 1000, end_ms: 1400 },
+        ],
+      });
+      await waitFor(() =>
+        expect(document.querySelectorAll(".talk-prompt .talk-sentence")).toHaveLength(2),
+      );
+      const blocks = document.querySelectorAll(".talk-prompt .talk-sentence");
+      expect(blocks[0].textContent).toBe(first);
+      expect(blocks[1].textContent).toBe("What did you like about it?");
+      // Word numbering continues across the sentence break, because the
+      // highlight counts words through the whole reply.
+      expect(document.querySelectorAll(".talk-prompt .talk-word")).toHaveLength(9);
+
       release?.({} as TurnResult);
       await waitFor(() => expect(held).toHaveResolved());
     } finally {

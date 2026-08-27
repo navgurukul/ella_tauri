@@ -146,7 +146,10 @@ screen as it is spoken rather than arriving whole when the turn returns. Words
 Ella has not reached yet are dimmed rather than hidden: they hold their place so
 the line never re-wraps mid-sentence, they can be read ahead of the voice, and a
 sentence that Piper finishes mid-reply fades in faint instead of appearing at
-full contrast. Ella's opening goes through the same pipeline — `speak_opening`
+full contrast. Each sentence is drawn as its own centred line inside a
+height-reserved block, because a single centred paragraph re-centres itself when
+a sentence lands — "Sounds nice." jumped some 170px left mid-read as "What did
+you like about it?" joined its line. Ella's opening goes through the same pipeline — `speak_opening`
 is a separate command from `start_session` so the conversation is on screen
 before Piper is asked for anything. Piper hands back audio without timings;
 `infrastructure/speech_timing.rs` estimates them from syllables, characters and

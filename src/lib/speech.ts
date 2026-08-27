@@ -60,10 +60,14 @@ export interface SpeechPlaybackCallbacks {
 }
 
 export interface SpeechQueueCallbacks extends SpeechPlaybackCallbacks {
-  /** The words queued so far, in the order they will be spoken. Called as each
-   * sentence lands, so the screen can show the reply while it is still being
-   * written rather than waiting for the turn to return. */
-  onWords?: (words: string[]) => void;
+  /** The reply so far, grouped by sentence, in the order it will be spoken.
+   * Called as each sentence lands, so the screen can show the reply while it is
+   * still being written rather than waiting for the turn to return.
+   *
+   * Grouped rather than flat because a sentence is the unit that arrives whole:
+   * drawn as its own line, an arriving sentence cannot re-wrap the ones already
+   * on screen, which is what made them jump. */
+  onSentences?: (sentences: string[][]) => void;
   /** Index into those words of the one being spoken now, or -1 for none. */
   onSpokenWord?: (index: number) => void;
 }
@@ -285,6 +289,8 @@ export interface SpeechQueue {
   readonly received: number;
   /** Every word queued so far, in speaking order. */
   readonly words: string[];
+  /** The same words grouped by the sentence they arrived in. */
+  readonly sentences: string[][];
   /** No more segments are coming beyond `expected` in total. */
   finish(expected: number): void;
   /** Stop immediately and drop anything still queued. */
@@ -316,6 +322,7 @@ export function createSpeechQueue(callbacks: SpeechQueueCallbacks = {}): SpeechQ
   // reads one clock rather than tracking each sentence separately.
   const schedule: { start: number; end: number }[] = [];
   const words: string[] = [];
+  const sentences: string[][] = [];
   let spoken = -1;
   let frame: number | null = null;
 
@@ -370,8 +377,10 @@ export function createSpeechQueue(callbacks: SpeechQueueCallbacks = {}): SpeechQ
     const index = received;
     received += 1;
     if (wordSpans.length > 0) {
-      words.push(...wordSpans.map((span) => span.text));
-      callbacks.onWords?.([...words]);
+      const spoken = wordSpans.map((span) => span.text);
+      words.push(...spoken);
+      sentences.push(spoken);
+      callbacks.onSentences?.(sentences.map((sentence) => [...sentence]));
     }
     if (graceTimer !== null) {
       window.clearTimeout(graceTimer);
@@ -436,6 +445,9 @@ export function createSpeechQueue(callbacks: SpeechQueueCallbacks = {}): SpeechQ
     },
     get words() {
       return [...words];
+    },
+    get sentences() {
+      return sentences.map((sentence) => [...sentence]);
     },
     finish(total: number) {
       expected = total;

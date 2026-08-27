@@ -59,7 +59,10 @@ export function TalkScreen({
   // Ella's words in speaking order, and which one she is on. Both arrive with
   // the audio, sentence by sentence, so the reply appears as it is spoken
   // instead of all at once when the turn returns.
-  const [spokenWords, setSpokenWords] = useState<string[]>([]);
+  // Ella's reply grouped by sentence, and which word she is on. Sentences are
+  // kept apart because each one arrives whole: given its own line, an arriving
+  // sentence cannot re-centre the ones already on screen.
+  const [spokenSentences, setSpokenSentences] = useState<string[][]>([]);
   const [spokenIndex, setSpokenIndex] = useState(-1);
   // Ella's opening, kept so "Hear it again" can replay it with its timings
   // instead of dropping to the system voice.
@@ -167,7 +170,7 @@ export function TalkScreen({
       return;
     }
     stopPlayback();
-    setSpokenWords([]);
+    setSpokenSentences([]);
     setSpokenIndex(-1);
     setError(null);
     setState("speaking");
@@ -205,7 +208,7 @@ export function TalkScreen({
       setSpokenIndex(-1);
     };
     return {
-      onWords: (words) => live() && setSpokenWords(words),
+      onSentences: (sentences) => live() && setSpokenSentences(sentences),
       onSpokenWord: (index) => live() && setSpokenIndex(index),
       onStart: () => {
         if (!live()) return;
@@ -234,7 +237,7 @@ export function TalkScreen({
     stopPlayback();
     // Clear last turn's words now, not when the new ones arrive, so the screen
     // never shows the previous reply with this reply's highlight on it.
-    setSpokenWords([]);
+    setSpokenSentences([]);
     setSpokenIndex(-1);
     const generation = playbackGeneration.current;
     speechQueue.current = {
@@ -572,13 +575,15 @@ export function TalkScreen({
   // While a reply is streaming, the words come from the audio, because the
   // turn's text has not arrived yet. Afterwards the two are the same sentence,
   // so which one renders is invisible.
-  const promptWords =
-    spokenWords.length > 0 ? spokenWords : prompt.split(/\s+/).filter(Boolean);
+  const promptSentences =
+    spokenSentences.length > 0
+      ? spokenSentences
+      : [prompt.split(/\s+/).filter(Boolean)].filter((words) => words.length > 0);
   // Words are only dimmed while a clip with timings is actually playing. There
   // is a beat of silence before Piper's first word, and treating that as "not
   // playing" would show the reply at full contrast and then dim it the instant
   // she starts, which reads as a flicker.
-  const followingWords = spokenWords.length > 0 && state === "speaking";
+  const followingWords = spokenSentences.length > 0 && state === "speaking";
   const interactionLocked = sending || micStarting || state === "thinking";
   // Ella now starts talking while the turn is still committing, so for a moment
   // she is speaking and the microphone is not yet available. Promising an
@@ -641,12 +646,27 @@ export function TalkScreen({
           </div>
 
           <p className="talk-prompt">
-            {promptWords.map((word, index) => (
-              <Fragment key={`${index}-${word}`}>
-                <span className={wordClass(index, spokenIndex, followingWords)}>{word}</span>
-                {index < promptWords.length - 1 ? " " : ""}
-              </Fragment>
-            ))}
+            {promptSentences.map((words, sentence) => {
+              // Where this sentence's words sit in the reply, because the
+              // highlight counts words across the whole thing.
+              const offset = promptSentences
+                .slice(0, sentence)
+                .reduce((total, earlier) => total + earlier.length, 0);
+              return (
+                <span className="talk-sentence" key={`${sentence}-${words[0] ?? ""}`}>
+                  {words.map((word, index) => (
+                    <Fragment key={`${index}-${word}`}>
+                      <span
+                        className={wordClass(offset + index, spokenIndex, followingWords)}
+                      >
+                        {word}
+                      </span>
+                      {index < words.length - 1 ? " " : ""}
+                    </Fragment>
+                  ))}
+                </span>
+              );
+            })}
           </p>
 
           {/* Only Ella's side of the talk is on screen: the learner's own words

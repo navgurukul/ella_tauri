@@ -1335,13 +1335,32 @@ button { font-family: inherit; }
   line-height: 1;
 }
 
+/* One line per sentence, stacked.
+   Ella's sentences arrive one at a time while she is still talking, and the
+   reply used to be a single centred paragraph — so the moment the second
+   sentence landed, the line re-centred and "Sounds nice." jumped ~170px to the
+   left while the learner was reading it. Each sentence is its own centred
+   block, so an arriving sentence appears below and moves nothing.
+   The reserved height covers the usual one-to-three sentence reply, and the
+   content is top-anchored inside it, so growing from one line to two does not
+   shift the lines already on screen either. */
 .talk-prompt {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 1px;
+  width: 100%;
   max-width: 640px;
+  min-height: calc(3 * 1.42em);
   margin: 0;
   text-align: center;
   font-size: clamp(23px, 2.25vw, 29px);
   font-weight: 400;
   line-height: 1.42;
+}
+.talk-sentence {
+  display: block;
   text-wrap: balance;
 }
 
@@ -1353,13 +1372,14 @@ button { font-family: inherit; }
   transition: color 90ms linear;
 }
 /* A sentence Piper has finished arrives while the previous one is still being
-   spoken. Fading it in faint is what keeps that from reading as a glitch. */
-.talk-word {
-  animation: talk-word-in 320ms ease-out both;
+   spoken. Fading it in as one line is what keeps that from reading as a glitch;
+   fading each word separately made a sentence that arrives whole shimmer. */
+.talk-sentence {
+  animation: talk-sentence-in 300ms ease-out both;
 }
-@keyframes talk-word-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
+@keyframes talk-sentence-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: none; }
 }
 /* Words Ella has not reached yet hold their place so the line never re-wraps
    mid-sentence, and stay readable enough to be read ahead of the voice. */
@@ -1383,6 +1403,8 @@ button { font-family: inherit; }
 @media (prefers-reduced-motion: reduce) {
   .talk-word {
     transition: none;
+  }
+  .talk-sentence {
     animation: none;
   }
 }
@@ -2166,7 +2188,7 @@ button { font-family: inherit; }
   .talk-stage { padding: 8px 0 84px; scroll-padding-bottom: 84px; }
   .talk-copy { gap: 10px; }
   .talk-state-indicator { height: 24px; }
-  .talk-prompt { font-size: 22px; line-height: 1.34; }
+  .talk-prompt { font-size: 22px; line-height: 1.34; min-height: calc(3 * 1.34em); }
   .talk-feedback__item { padding: 9px 13px 10px; }
   .talk-copy .btn--replay { min-height: 44px; height: 44px; }
   .ella--stage-talk {

@@ -155,15 +155,16 @@ describe("streamed sentence playback", () => {
    * whole point of streaming is that the turn returns seconds later. */
   it("reports each sentence's words as it is queued", async () => {
     install();
-    const seen: string[][] = [];
-    const queue = createSpeechQueue({ onWords: (words) => seen.push(words) });
+    const seen: string[][][] = [];
+    const queue = createSpeechQueue({ onSentences: (sentences) => seen.push(sentences) });
     queue.push(audio(2), [
       { text: "Oh,", start_ms: 0, end_ms: 300 },
       { text: "yummy!", start_ms: 300, end_ms: 900 },
     ]);
-    expect(seen.at(-1)).toEqual(["Oh,", "yummy!"]);
+    expect(seen.at(-1)).toEqual([["Oh,", "yummy!"]]);
     queue.push(audio(2), [{ text: "Really?", start_ms: 0, end_ms: 500 }]);
-    expect(seen.at(-1)).toEqual(["Oh,", "yummy!", "Really?"]);
+    // Grouped by sentence, so a new one cannot re-wrap the one on screen.
+    expect(seen.at(-1)).toEqual([["Oh,", "yummy!"], ["Really?"]]);
     expect(queue.words).toEqual(["Oh,", "yummy!", "Really?"]);
     await settle();
   });
