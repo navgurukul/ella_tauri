@@ -231,7 +231,6 @@ export interface WeeklyDigest {
 /** What the onboarding placement talk hands back once it has really run. */
 export interface PlacementResult {
   level: string;
-  transcript: string;
 }
 
 export interface LevelInfo {

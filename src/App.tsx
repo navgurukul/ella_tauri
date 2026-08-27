@@ -90,7 +90,7 @@ export default function App() {
     try {
       const created = await bridge.startSession(recommendedTopicId(snapshot));
       startedId = created.id;
-      const turn = await bridge.sendVoiceTurn({
+      await bridge.sendVoiceTurn({
         sessionId: created.id,
         samples: capture.samples,
         sampleRate: capture.sampleRate,
@@ -109,10 +109,7 @@ export default function App() {
             }
           : current,
       );
-      return {
-        level: levelInfo(result.garden, snapshot.learner?.level_name).code,
-        transcript: turn.learner_message.content,
-      };
+      return { level: levelInfo(result.garden, snapshot.learner?.level_name).code };
     } catch {
       // Never leave a half-open placement talk waiting on the home screen.
       if (startedId) await bridge.completeSession(startedId).catch(() => undefined);

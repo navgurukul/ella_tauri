@@ -260,6 +260,15 @@ impl AppService {
                 "This conversation has already ended.".into(),
             ));
         }
+        // Live chunked transcription only exists for the native STT route.
+        // Without it the buffered turn is the working path -- it carries the
+        // whole recording instead of the streaming tail -- so refuse here and
+        // let the caller fall back to `send_voice_turn`.
+        if !self.engine.uses_native_stt() {
+            return Err(EllaError::Conflict(
+                "Live chunked transcription needs the native speech engine.".into(),
+            ));
+        }
         let stream_id = Uuid::new_v4().to_string();
         let mut streams = self.streams.lock().unwrap_or_else(|p| p.into_inner());
         // A learner has one live recording at a time: drop stale streams for
@@ -442,8 +451,8 @@ impl AppService {
                         text
                     }
                     _ => {
-                        return Err(EllaError::Validation(
-                            "I captured your voice, but speech recognition is not available in this mode. Try typing instead."
+                        return Err(EllaError::Engine(
+                            "I captured your voice, but native speech recognition is not enabled in demo mode. Try typing or start local engine mode."
                                 .into(),
                         ))
                     }
@@ -821,6 +830,21 @@ mod tests {
         assert!(service
             .send_text_turn(&session.id, "One more thing")
             .is_err());
+    }
+
+    #[test]
+    fn demo_mode_refuses_a_live_stream_so_the_buffered_turn_is_used() {
+        let service = service();
+        service.save_learner("Asha", Some(14)).unwrap();
+        let session = service.start_session("street-food").unwrap();
+        // Without native STT the streaming tail is not enough to transcribe;
+        // the caller has to fall back to the turn that carries all the audio.
+        assert!(service.begin_voice_stream(&session.id).is_err());
+        let error = service
+            .send_voice_turn(&session.id, vec![0; 16_000], 16_000, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("local engine mode"), "{error}");
     }
 
     #[test]

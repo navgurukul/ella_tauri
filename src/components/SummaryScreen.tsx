@@ -37,16 +37,6 @@ export function SummaryScreen({
           </div>
         </dl>
 
-        {summary.best_evidence && (
-          <blockquote className="summary__quote">
-            <span className="mono">YOUR OWN WORDS</span>
-            “{summary.best_evidence.evidence}”
-            <footer>
-              {summary.best_evidence.skill_label} · {summary.best_evidence.stage_label}
-            </footer>
-          </blockquote>
-        )}
-
         <div className="summary__actions">
           <button className="btn btn--light" onClick={onGarden}>
             See my garden

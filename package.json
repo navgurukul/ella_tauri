@@ -11,6 +11,7 @@
     "test:watch": "vitest",
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
+    "desktop:dev:local": "ELLA_ENGINE_MODE=local tauri dev",
     "desktop:build": "tauri build --no-bundle",
     "desktop:bundle": "tauri build --bundles app --no-sign",
     "engines:local": "./scripts/start-local-engines.sh",

@@ -23,9 +23,7 @@ pub fn run() {
                 .ok()
                 .map(|directory| directory.join("engines"));
             std::fs::create_dir_all(&data_dir)?;
-            let database_path = data_dir.join("ella.sqlite3");
-            adopt_legacy_database(&data_dir, &database_path);
-            let database = Database::open(&database_path)?;
+            let database = Database::open(&data_dir.join("ella.sqlite3"))?;
             app.manage(AppState(Arc::new(AppService::new(
                 database,
                 engine_from_environment(packaged_engine_root),
@@ -48,31 +46,4 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Ella");
-}
-
-/// Carry a learner's history across the Zoe -> Ella rename by adopting the old
-/// database file (and its WAL sidecars) the first time the renamed app starts.
-fn adopt_legacy_database(data_dir: &std::path::Path, database_path: &std::path::Path) {
-    if database_path.exists() {
-        return;
-    }
-    let legacy = data_dir.join("zospeak-poc.sqlite3");
-    if !legacy.exists() {
-        return;
-    }
-    for suffix in ["", "-wal", "-shm"] {
-        let from = with_suffix(&legacy, suffix);
-        if from.exists() {
-            let _ = std::fs::rename(&from, with_suffix(database_path, suffix));
-        }
-    }
-}
-
-fn with_suffix(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
-    if suffix.is_empty() {
-        return path.to_path_buf();
-    }
-    let mut name = path.as_os_str().to_os_string();
-    name.push(suffix);
-    std::path::PathBuf::from(name)
 }

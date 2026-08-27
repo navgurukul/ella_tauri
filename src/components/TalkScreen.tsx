@@ -59,8 +59,6 @@ export function TalkScreen({
   const mounted = useRef(true);
 
   const level = levelInfo(snapshot.garden, snapshot.learner?.level_name);
-  const learnerMessages = session.messages.filter((message) => message.speaker === "learner");
-  const latestLearner = learnerMessages.at(-1);
   const latestElla = [...session.messages].reverse().find((message) => message.speaker === "ella");
 
   async function cancelVoiceStream() {
@@ -447,27 +445,15 @@ export function TalkScreen({
 
           <p className="talk-prompt">{prompt}</p>
 
-          {state === "listening" && liveTranscript && (
-            <p className="talk-live-transcript">
-              <span>You’re saying</span>
-              {liveTranscript}
-            </p>
-          )}
-
-          {(latestLearner || lastTurn?.correction) && (
+          {/* Only Ella's side of the talk is on screen: the learner's own words
+              are never echoed back, so a misheard transcript cannot become the
+              thing they read. */}
+          {lastTurn?.correction && (
             <div className="talk-feedback">
-              {latestLearner && (
-                <div className="talk-feedback__item">
-                  <span className="talk-feedback__label">Your answer</span>
-                  <p>“{latestLearner.content}”</p>
-                </div>
-              )}
-              {lastTurn?.correction && (
-                <div className="talk-feedback__item talk-feedback__item--coach">
-                  <span className="talk-feedback__label">Try this</span>
-                  <p>{lastTurn.correction}</p>
-                </div>
-              )}
+              <div className="talk-feedback__item talk-feedback__item--coach">
+                <span className="talk-feedback__label">Try this</span>
+                <p>{lastTurn.correction}</p>
+              </div>
             </div>
           )}
 
@@ -503,7 +489,7 @@ export function TalkScreen({
 
       <div className="talk-dock">
         <EllaMascot
-          variant="talk"
+          variant="conversation"
           className="ella--stage-talk"
           state={state}
           reaction={reaction}

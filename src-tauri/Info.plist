@@ -2,7 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>NSMicrophoneUsageDescription</key>
-  <string>ZoSpeak uses the microphone so you can practise speaking English with Zoe.</string>
+	<!-- WKWebView will not prompt for the microphone without this string, and
+	     macOS denies getUserMedia outright rather than asking. Tauri merges
+	     this file into the generated Info.plist for both `tauri dev` and the
+	     bundled app. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Ella listens while you practise speaking English so she can reply out loud. Your voice is transcribed on this device and never leaves it.</string>
 </dict>
 </plist>

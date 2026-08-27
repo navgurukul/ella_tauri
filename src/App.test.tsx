@@ -20,7 +20,9 @@ async function onboard(name: string, age = "14") {
   fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 
   fireEvent.click(await screen.findByRole("button", { name: /skip this check/i }));
-  fireEvent.click(await screen.findByRole("button", { name: /skip for now/i }));
+  const skipPlacement = await screen.findByRole("button", { name: /skip for now/i });
+  expect(document.querySelector('[data-screen="onboarding-placement"] .ella--conversation')).toBeInTheDocument();
+  fireEvent.click(skipPlacement);
   await screen.findByText(`Namaste, ${name}!`);
 }
 
@@ -84,7 +86,7 @@ describe("Ella learner flow", () => {
 
     await screen.findByText("End talk");
     expect(promptText()).toMatch(/tastiest thing you ate/i);
-    const avatar = document.querySelector(".ella--talk");
+    const avatar = document.querySelector(".ella--conversation");
     const controls = document.querySelector(".talk-controls");
     expect(avatar).toHaveAttribute("aria-hidden", "true");
     expect(avatar?.parentElement).toBe(controls?.parentElement);
@@ -99,10 +101,9 @@ describe("Ella learner flow", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
 
-    await waitFor(() => {
-      expect(screen.getByText(/I ate vada pav near the station/)).toBeInTheDocument();
-      expect(promptText()).toMatch(/who would you like to share that with/i);
-    });
+    await waitFor(() => expect(promptText()).toMatch(/who would you like to share that with/i));
+    // Only Ella's side is on screen: the learner's answer is not echoed back.
+    expect(screen.queryByText(/near the station/)).not.toBeInTheDocument();
   });
 
   it("gives the conversation the whole window", async () => {
@@ -154,8 +155,10 @@ describe("Ella learner flow", () => {
     fireEvent.click(screen.getByRole("button", { name: /continue talking/i }));
 
     await screen.findByText("End talk");
-    // Resumed through `get_session`, so the earlier messages come back with it.
-    expect(screen.getByText(/I ate poha this morning/)).toBeInTheDocument();
+    // Resumed through `get_session`: Ella's reply to the earlier turn is back on
+    // stage. The learner's own words stay off screen.
+    expect(promptText()).toMatch(/who would you like to share that with/i);
+    expect(screen.queryByText(/poha this morning/)).not.toBeInTheDocument();
   });
 
   it("starts the topic a garden unit stands for", async () => {

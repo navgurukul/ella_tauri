@@ -95,10 +95,16 @@ Or keep sidecar logs in a separate terminal:
 npm run engines:local
 
 # Terminal 2
-ELLA_ENGINE_MODE=local \
-ELLA_ENGINE_ROOT="$PWD/engines" \
-npm run desktop:dev
+npm run desktop:dev:local
 ```
+
+`desktop:dev` is the UI-only launch: it leaves `ELLA_ENGINE_MODE` unset, so the
+app runs the demo engine and **has no speech recognition** — the desktop webview
+does not provide the Web Speech API, so voice turns can only fail with
+"native speech recognition is not enabled in demo mode". Use
+`desktop:dev:local` (or `npm run local`, which starts the engines too) whenever
+you need to speak to Ella. The engine chip in the sidebar names the mode that is
+actually running.
 
 Windows x86-64 development host (PowerShell):
 

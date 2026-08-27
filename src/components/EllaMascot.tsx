@@ -8,18 +8,18 @@ export type EllaReaction = "success" | "error" | null;
  * Ella is drawn, not illustrated: a purple blob with two capsule ears, two eyes
  * that follow the cursor, and a mouth that swaps shape while she talks.
  *
- * Two variants, both from the design. `peek` is the 660x450 blob that rises
- * from the bottom of the talk stage and peeks out of screen corners; every peek
- * size is that one blob under a CSS scale. `hero` is the 920x560 close-up that
- * fills the onboarding welcome screen — a wider face with its features placed
- * differently, not a scale of the other.
+ * Four visual roles share one component. `peek` is the compact corner mascot;
+ * `conversation` is the calm placement-flow face used throughout voice calls;
+ * `hero` is the wider onboarding close-up; and `celebration` keeps the larger
+ * logo-derived expression available for a future reward surface.
  */
-export type EllaVariant = "peek" | "hero" | "talk";
+export type EllaVariant = "peek" | "conversation" | "hero" | "celebration";
 
 const BLOB: Record<EllaVariant, { width: number; height: number }> = {
   peek: { width: 660, height: 450 },
+  conversation: { width: 660, height: 450 },
   hero: { width: 920, height: 560 },
-  talk: { width: 660, height: 450 },
+  celebration: { width: 660, height: 450 },
 };
 
 interface EllaMascotProps {
@@ -31,7 +31,7 @@ interface EllaMascotProps {
   rotate?: number;
   /** Transient feedback that can overlap the current operational state. */
   reaction?: EllaReaction;
-  /** Normalised microphone activity, used only by the Talk variant. */
+  /** Normalised microphone activity for voice-responsive variants. */
   activity?: number;
   /** Decorative instances defer announcements to a dedicated status region. */
   decorative?: boolean;
@@ -58,7 +58,7 @@ export function EllaMascot({
 
   useEffect(() => {
     const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
-    if (reduceMotion || state !== "resting" || variant === "talk") return;
+    if (reduceMotion || state !== "resting" || variant === "celebration") return;
 
     const eyes = [leftEye, rightEye];
     let pointerX: number | null = null;

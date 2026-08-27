@@ -599,18 +599,18 @@ button { font-family: inherit; }
   pointer-events: auto;
 }
 
-/* Talk uses the logo's visual grammar but keeps independently animatable parts. */
-.ella--talk .ella__body {
+/* Reserved celebration avatar: logo grammar with independently animated parts. */
+.ella--celebration .ella__body {
   border: 6px solid var(--white);
   border-bottom: 0;
   border-radius: 50% 50% 0 0 / 42% 42% 0 0;
 }
-.ella--talk .ella__ear {
+.ella--celebration .ella__ear {
   box-sizing: border-box;
   border: 6px solid var(--white);
   border-radius: 50%;
 }
-.ella--talk .ella__ear--left {
+.ella--celebration .ella__ear--left {
   top: -58px;
   left: 430px;
   width: 62px;
@@ -618,7 +618,7 @@ button { font-family: inherit; }
   transform: rotate(4deg);
   transform-origin: 50% 100%;
 }
-.ella--talk .ella__ear--right {
+.ella--celebration .ella__ear--right {
   top: -32px;
   left: 500px;
   width: 66px;
@@ -626,16 +626,16 @@ button { font-family: inherit; }
   transform: rotate(38deg);
   transform-origin: 50% 100%;
 }
-.ella--talk .ella__eye {
+.ella--celebration .ella__eye {
   top: 48px;
   width: 50px;
   height: 64px;
   border-radius: 50%;
   transform: rotate(9deg);
 }
-.ella--talk .ella__eye--left { left: 248px; }
-.ella--talk .ella__eye--right { top: 62px; left: 356px; }
-.ella--talk .ella__glint {
+.ella--celebration .ella__eye--left { left: 248px; }
+.ella--celebration .ella__eye--right { top: 62px; left: 356px; }
+.ella--celebration .ella__glint {
   top: 18px;
   left: 27px;
   width: 20px;
@@ -643,66 +643,66 @@ button { font-family: inherit; }
   border-radius: 0;
   clip-path: polygon(50% 0, 61% 38%, 100% 50%, 61% 62%, 50% 100%, 39% 62%, 0 50%, 39% 38%);
 }
-.ella--talk .ella__eye-line {
+.ella--celebration .ella__eye-line {
   top: 78px;
   width: 48px;
   height: 13px;
   border-radius: 50%;
 }
-.ella--talk .ella__eye-line--left { left: 247px; transform: rotate(7deg); }
-.ella--talk .ella__eye-line--right { top: 92px; left: 355px; transform: rotate(-7deg); }
-.ella--talk .ella__mouth { left: 320px; }
-.ella--talk .ella__mouth--smile {
+.ella--celebration .ella__eye-line--left { left: 247px; transform: rotate(7deg); }
+.ella--celebration .ella__eye-line--right { top: 92px; left: 355px; transform: rotate(-7deg); }
+.ella--celebration .ella__mouth { left: 320px; }
+.ella--celebration .ella__mouth--smile {
   top: 128px;
   width: 36px;
   height: 15px;
   opacity: 0;
 }
-.ella--talk .ella__mouth--open {
+.ella--celebration .ella__mouth--open {
   top: 126px;
   left: 324px;
   width: 28px;
   height: 22px;
 }
-.ella--talk .ella__mouth--worry {
+.ella--celebration .ella__mouth--worry {
   top: 132px;
   left: 318px;
   width: 40px;
   height: 14px;
 }
-.ella--talk .ella__brow { top: 34px; width: 46px; height: 14px; border-width: 5px; }
-.ella--talk .ella__brow--left { left: 245px; transform: rotate(12deg); }
-.ella--talk .ella__brow--right { top: 48px; left: 358px; transform: rotate(-12deg); }
-.ella--talk .ella__cheek { top: 119px; width: 34px; height: 18px; }
-.ella--talk .ella__cheek--left { left: 210px; }
-.ella--talk .ella__cheek--right { left: 421px; }
-.ella--talk .ella__sparkle { width: 30px; height: 38px; }
-.ella--talk .ella__sparkle--left { top: 16px; left: 188px; }
-.ella--talk .ella__sparkle--right { top: 16px; left: 454px; }
+.ella--celebration .ella__brow { top: 34px; width: 46px; height: 14px; border-width: 5px; }
+.ella--celebration .ella__brow--left { left: 245px; transform: rotate(12deg); }
+.ella--celebration .ella__brow--right { top: 48px; left: 358px; transform: rotate(-12deg); }
+.ella--celebration .ella__cheek { top: 119px; width: 34px; height: 18px; }
+.ella--celebration .ella__cheek--left { left: 210px; }
+.ella--celebration .ella__cheek--right { left: 421px; }
+.ella--celebration .ella__sparkle { width: 30px; height: 38px; }
+.ella--celebration .ella__sparkle--left { top: 16px; left: 188px; }
+.ella--celebration .ella__sparkle--right { top: 16px; left: 454px; }
 
-.ella--talk.ella--resting { animation: ellaBreathe 4.8s ease-in-out infinite; }
-.ella--talk.ella--listening {
+.ella--celebration.ella--resting { animation: ellaBreathe 4.8s ease-in-out infinite; }
+.ella--celebration.ella--listening {
   transform: rotate(var(--ella-rotate)) translateY(calc(var(--ella-activity) * -5px));
 }
-.ella--talk.ella--listening .ella__ear--left {
+.ella--celebration.ella--listening .ella__ear--left {
   transform: rotate(1deg) translateY(calc(var(--ella-activity) * -4px));
 }
-.ella--talk.ella--listening .ella__ear--right {
+.ella--celebration.ella--listening .ella__ear--right {
   transform: rotate(34deg) translateY(calc(var(--ella-activity) * -4px));
 }
-.ella--talk.ella--listening .ella__eye { transform: rotate(9deg) scale(1.08); }
-.ella--talk.ella--listening .ella__glint { animation: ellaGlint 1.1s ease-in-out infinite; }
-.ella--talk.ella--thinking { animation: ellaThink 1.3s ease-in-out infinite; }
-.ella--talk.ella--speaking { animation: ellaSpeakBob 0.72s ease-in-out infinite; }
-.ella--talk.ella--speaking .ella__mouth--open { animation: ellaMouth 0.36s ease-in-out infinite; }
-.ella--talk.ella--reaction-success .ella__cheek,
-.ella--talk.ella--reaction-success .ella__sparkle { opacity: 1; animation: ellaSpark 1.1s ease-out both; }
-.ella--talk.ella--reaction-error .ella__eye { transform: rotate(9deg) scaleY(0.85); }
-.ella--talk.ella--reaction-error .ella__brow,
-.ella--talk.ella--reaction-error .ella__mouth--worry { opacity: 1; }
-.ella--talk.ella--reaction-error .ella__mouth--smile,
-.ella--talk.ella--reaction-error .ella__mouth--open { opacity: 0; }
-.ella--talk.ella--reaction-error { animation: ellaConcern 0.42s ease-in-out 2; }
+.ella--celebration.ella--listening .ella__eye { transform: rotate(9deg) scale(1.08); }
+.ella--celebration.ella--listening .ella__glint { animation: ellaGlint 1.1s ease-in-out infinite; }
+.ella--celebration.ella--thinking { animation: ellaThink 1.3s ease-in-out infinite; }
+.ella--celebration.ella--speaking { animation: ellaSpeakBob 0.72s ease-in-out infinite; }
+.ella--celebration.ella--speaking .ella__mouth--open { animation: ellaMouth 0.36s ease-in-out infinite; }
+.ella--celebration.ella--reaction-success .ella__cheek,
+.ella--celebration.ella--reaction-success .ella__sparkle { opacity: 1; animation: ellaSpark 1.1s ease-out both; }
+.ella--celebration.ella--reaction-error .ella__eye { transform: rotate(9deg) scaleY(0.85); }
+.ella--celebration.ella--reaction-error .ella__brow,
+.ella--celebration.ella--reaction-error .ella__mouth--worry { opacity: 1; }
+.ella--celebration.ella--reaction-error .ella__mouth--smile,
+.ella--celebration.ella--reaction-error .ella__mouth--open { opacity: 0; }
+.ella--celebration.ella--reaction-error { animation: ellaConcern 0.42s ease-in-out 2; }
 
 @keyframes ellaBreathe { 0%, 100% { transform: rotate(var(--ella-rotate)) translateY(0); } 50% { transform: rotate(var(--ella-rotate)) translateY(-3px); } }
 @keyframes ellaThink { 0%, 100% { transform: rotate(var(--ella-rotate)) translateY(0); } 50% { transform: rotate(calc(var(--ella-rotate) - 0.7deg)) translateY(-4px); } }
@@ -1413,30 +1413,6 @@ button { font-family: inherit; }
   text-wrap: balance;
 }
 
-.talk-live-transcript {
-  display: flex;
-  align-items: baseline;
-  gap: 9px;
-  max-width: 620px;
-  margin: 0;
-  padding: 9px 14px;
-  border: 1.5px solid rgba(147, 71, 221, 0.18);
-  border-radius: var(--r-pill);
-  background: rgba(255, 255, 255, 0.78);
-  color: var(--ink-72);
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 1.35;
-}
-.talk-live-transcript span {
-  flex: none;
-  color: var(--violet-deep);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-}
-
 .talk-feedback {
   display: flex;
   width: min(620px, 100%);
@@ -1454,7 +1430,6 @@ button { font-family: inherit; }
   min-width: 0;
   padding: 12px 16px 13px;
 }
-.talk-feedback__item + .talk-feedback__item { border-left: 1.5px solid var(--ink-10); }
 .talk-feedback__item--coach {
   background: var(--lilac);
   color: var(--violet-deep);
@@ -1494,7 +1469,7 @@ button { font-family: inherit; }
 .talk-dock .ella--stage-talk { z-index: 0; }
 .talk-controls {
   position: absolute;
-  top: 154px;
+  top: 138px;
   left: 0;
   right: 0;
   z-index: 2;
@@ -2054,27 +2029,6 @@ button { font-family: inherit; }
 }
 .summary__panel .stats { gap: 34px; }
 
-.summary__quote {
-  margin: 24px 0 0;
-  padding: 18px 22px;
-  border-radius: var(--r-tile);
-  background: rgba(255, 255, 255, 0.14);
-  font-size: 17px;
-  font-weight: 500;
-  line-height: 1.5;
-}
-.summary__quote .mono {
-  display: block;
-  margin-bottom: 8px;
-  color: rgba(255, 255, 255, 0.7);
-}
-.summary__quote footer {
-  margin-top: 10px;
-  font-size: 13px;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.75);
-}
-
 .summary__actions { display: flex; gap: 12px; margin-top: 28px; }
 
 /* --------------------------------------------------- boot / veil / toast -- */
@@ -2181,10 +2135,10 @@ button { font-family: inherit; }
     bottom: -115px;
     --ella-scale: 0.88 !important;
   }
-  .talk-controls { top: 101px; }
+  .talk-controls { top: 90px; }
   .mic-stack { gap: 6px; }
   .mic-wrap { width: 76px; height: 76px; }
-  .ella--talk .ella__mouth--open { top: 121px; }
+  .ella--celebration .ella__mouth--open { top: 121px; }
   .hero { padding: 22px 28px; }
   .hero__blurb { display: none; }
   .section-head { margin-top: 20px; }

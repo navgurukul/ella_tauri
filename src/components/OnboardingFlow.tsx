@@ -417,7 +417,6 @@ function PlacementStep({
         {call === "done" ? (
           <>
             <p className="talk-prompt">That was lovely, {greetName}!</p>
-            {result && <p className="talk-echo">You said: “{result.transcript}”</p>}
             <p className="level-badge">
               <span className="mono">YOUR LEVEL</span>
               <b>{result?.level ?? "A2"}</b>
@@ -438,7 +437,7 @@ function PlacementStep({
       </div>
 
       <div className="talk-dock">
-        <EllaMascot className="ella--stage-talk" state={ellaState}>
+        <EllaMascot variant="conversation" className="ella--stage-talk" state={ellaState}>
           {call !== "done" && (
             <div className="mic-stack">
               <div className="mic-wrap">
