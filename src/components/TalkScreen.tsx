@@ -58,7 +58,7 @@ export function TalkScreen({
   const focusMicAfterModeSwitch = useRef(false);
   const mounted = useRef(true);
 
-  const level = levelInfo(snapshot.garden, snapshot.learner?.level_name);
+  const level = levelInfo(snapshot.learner?.level_name);
   const latestElla = [...session.messages].reverse().find((message) => message.speaker === "ella");
 
   async function cancelVoiceStream() {
@@ -468,8 +468,8 @@ export function TalkScreen({
               }}
             >
               <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
-                <path d="M3 12a9 9 0 109-9" />
-                <path d="M3 4v5h5" />
+                <path d="M3.51 15a9 9 0 102.13-9.36L1 10" />
+                <polyline points="1 4 1 10 7 10" />
               </svg>
               Hear it again
             </button>

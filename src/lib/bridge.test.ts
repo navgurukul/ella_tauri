@@ -11,7 +11,7 @@ function memoryStorage(): StorageLike {
 }
 
 describe("browser proof-of-concept bridge", () => {
-  it("runs a complete learner journey and persists garden progress", async () => {
+  it("runs a complete learner journey and persists it", async () => {
     const bridge = createBrowserBridge(memoryStorage());
     expect((await bridge.bootstrap()).learner).toBeUndefined();
 
@@ -29,8 +29,7 @@ describe("browser proof-of-concept bridge", () => {
 
     const summary = await bridge.completeSession(session.id);
     expect(summary.turns).toBe(3);
-    expect(summary.garden.total_conversations).toBe(1);
-    expect(summary.garden.skills.every((skill) => skill.stage === 1)).toBe(true);
+    expect(summary.headline).not.toHaveLength(0);
 
     const restored = await bridge.bootstrap();
     expect(restored.learner?.name).toBe("Asha");

@@ -130,6 +130,9 @@ export function createVoiceCapture(): VoiceCapture {
       chunks = [];
       streamChunks = [];
       transcript = "";
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("Microphone access is not available on this device.");
+      }
       const micStarted = performance.now();
       llogAbsolute("mic:start", "requesting getUserMedia");
       stream = await navigator.mediaDevices.getUserMedia({

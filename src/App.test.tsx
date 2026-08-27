@@ -75,6 +75,24 @@ describe("Ella onboarding", () => {
     fireEvent.click(screen.getByRole("button", { name: "Go back" }));
     expect(screen.getByLabelText("What should Ella call you?")).toHaveValue("Riya");
   });
+
+  it("uses the expressive avatar for clear mic-check and retry states", async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /let’s start/i }));
+    fireEvent.change(screen.getByLabelText("What should Ella call you?"), { target: { value: "Riya" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.change(screen.getByLabelText("And how old are you, Riya?"), { target: { value: "14" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    const stage = await screen.findByText("Quick mic check first.");
+    expect(stage.closest('[data-screen="onboarding-miccheck"]')?.querySelector(".ella--celebration.ella--resting"))
+      .toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Start the mic check" }));
+
+    expect(await screen.findByRole("button", { name: "Try the mic check again" })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(/microphone access is not available on this device/i);
+    expect(document.querySelector('[data-mic-state="error"] .ella--reaction-error')).toBeInTheDocument();
+  });
 });
 
 describe("Ella learner flow", () => {
@@ -134,15 +152,6 @@ describe("Ella learner flow", () => {
     }
   });
 
-  it("shows the garden with a unit per skill strand", async () => {
-    await onboard("Kabir");
-    fireEvent.click(within(screen.getByRole("navigation")).getByRole("button", { name: "Garden" }));
-
-    expect(await screen.findByText("Your garden")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Unit 1: Hello & introductions/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Unit 5: Plans & weekend \(locked\)/ })).toBeDisabled();
-  });
-
   it("offers an unfinished talk on the home screen and resumes it", async () => {
     await bridge.saveLearner("Meera", 14);
     const session = await bridge.startSession("street-food");
@@ -159,16 +168,6 @@ describe("Ella learner flow", () => {
     // stage. The learner's own words stay off screen.
     expect(promptText()).toMatch(/who would you like to share that with/i);
     expect(screen.queryByText(/poha this morning/)).not.toBeInTheDocument();
-  });
-
-  it("starts the topic a garden unit stands for", async () => {
-    await onboard("Kabir");
-    fireEvent.click(within(screen.getByRole("navigation")).getByRole("button", { name: "Garden" }));
-
-    fireEvent.click(await screen.findByRole("button", { name: /Unit 2: Food & ordering/ }));
-
-    await screen.findByText("End talk");
-    expect(promptText()).toMatch(/restaurant/i);
   });
 
   it("offers every designed topic on the home bento", async () => {

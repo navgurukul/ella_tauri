@@ -51,6 +51,15 @@ pub async fn start_session(
 }
 
 #[tauri::command]
+pub async fn start_chore(
+    state: State<'_, AppState>,
+    chore_id: String,
+) -> Result<Session, String> {
+    let service = state.0.clone();
+    off_main_thread(move || service.start_chore(&chore_id)).await
+}
+
+#[tauri::command]
 pub async fn get_session(
     state: State<'_, AppState>,
     session_id: String,

@@ -1,0 +1,161 @@
+{
+  "chore": "market-cloth-price",
+  "learner": "Souvik",
+  "ledger_breaks": 2,
+  "median_ttft_ms": 3221.0,
+  "median_turn_ms": 7593.0,
+  "opening": "Come, come, look at these shirts. Best cloth in this market. Which one has caught your eye?",
+  "opening_ms": 1.0,
+  "outcome": "passed",
+  "schema_version": 1,
+  "title": "Talk a stall price down",
+  "turns": [
+    {
+      "audio_bytes": 392592,
+      "intent": "open",
+      "learner": "Hello. How much is this shirt?",
+      "ledger": {
+        "agreed": false,
+        "current": 600,
+        "progress": -0.0,
+        "reached_target": false,
+        "regenerated": false,
+        "target": 400
+      },
+      "llm_completion_ms": 6623,
+      "llm_ttft_ms": 2254,
+      "reply": "Come, come, look at these shirts. Best cloth in this market. Rs 600. Which one has caught your eye?",
+      "signal": null,
+      "total_ms": 7593.0,
+      "tts_completion_ms": 967,
+      "tts_first_audio_ms": 967,
+      "turn": 1
+    },
+    {
+      "audio_bytes": 66280,
+      "intent": "first push",
+      "learner": "That is too much for me. Can you make it less?",
+      "ledger": {
+        "agreed": false,
+        "current": 600,
+        "progress": -0.0,
+        "reached_target": false,
+        "regenerated": false,
+        "target": 400
+      },
+      "llm_completion_ms": 5319,
+      "llm_ttft_ms": 4577,
+      "reply": "Come on, tell me!",
+      "signal": null,
+      "total_ms": 5467.0,
+      "tts_completion_ms": 146,
+      "tts_first_audio_ms": 146,
+      "turn": 2
+    },
+    {
+      "audio_bytes": 185744,
+      "intent": "give a reason",
+      "learner": "I am a student and I only have a little money today.",
+      "ledger": {
+        "agreed": false,
+        "current": 550,
+        "progress": 0.25,
+        "reached_target": false,
+        "regenerated": false,
+        "target": 400
+      },
+      "llm_completion_ms": 10531,
+      "llm_ttft_ms": 8567,
+      "reply": "Oh, that's a shame. Rs 550 then.",
+      "signal": null,
+      "total_ms": 10896.0,
+      "tts_completion_ms": 363,
+      "tts_first_audio_ms": 362,
+      "turn": 3
+    },
+    {
+      "audio_bytes": 91536,
+      "intent": "counter",
+      "learner": "Can you do it for four hundred and fifty rupees?",
+      "ledger": {
+        "agreed": false,
+        "current": 500,
+        "progress": 0.5,
+        "reached_target": false,
+        "regenerated": true,
+        "target": 400
+      },
+      "llm_completion_ms": 10637,
+      "llm_ttft_ms": 3221,
+      "reply": "Rs 500 then.",
+      "signal": null,
+      "total_ms": 10851.0,
+      "tts_completion_ms": 211,
+      "tts_first_audio_ms": 210,
+      "turn": 4
+    },
+    {
+      "audio_bytes": 120892,
+      "intent": "lowball under the floor",
+      "learner": "I will give you one hundred rupees, final.",
+      "ledger": {
+        "agreed": false,
+        "current": 500,
+        "progress": 0.5,
+        "reached_target": false,
+        "regenerated": false,
+        "target": 400
+      },
+      "llm_completion_ms": 4255,
+      "llm_ttft_ms": 3099,
+      "reply": "Come on, what did it taste like?",
+      "signal": null,
+      "total_ms": 4744.0,
+      "tts_completion_ms": 486,
+      "tts_first_audio_ms": 486,
+      "turn": 5
+    },
+    {
+      "audio_bytes": 124304,
+      "intent": "reasonable close",
+      "learner": "Okay, four hundred rupees and I will buy it right now.",
+      "ledger": {
+        "agreed": false,
+        "current": 425,
+        "progress": 0.875,
+        "reached_target": false,
+        "regenerated": true,
+        "target": 400
+      },
+      "llm_completion_ms": 13543,
+      "llm_ttft_ms": 7777,
+      "reply": "Rs 425 then.",
+      "signal": null,
+      "total_ms": 13825.0,
+      "tts_completion_ms": 277,
+      "tts_first_audio_ms": 277,
+      "turn": 6
+    },
+    {
+      "audio_bytes": 164584,
+      "intent": "confirm",
+      "learner": "So we agree? Four hundred rupees.",
+      "ledger": {
+        "agreed": true,
+        "current": 400,
+        "progress": 1.0,
+        "reached_target": true,
+        "regenerated": false,
+        "target": 400
+      },
+      "llm_completion_ms": 3340,
+      "llm_ttft_ms": 2913,
+      "reply": "Alright, alright. Take it at that price.",
+      "signal": "deal",
+      "total_ms": 3698.0,
+      "tts_completion_ms": 354,
+      "tts_first_audio_ms": 353,
+      "turn": 7
+    }
+  ]
+}

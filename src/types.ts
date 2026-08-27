@@ -58,28 +58,11 @@ export interface EngineStatus {
   components: EngineComponent[];
 }
 
-export interface SkillProgress {
-  id: string;
-  label: string;
-  strand: SkillStrand;
-  evidence_count: number;
-  stage: 0 | 1 | 2 | 3;
-  stage_label: "Bare plot" | "Seedling" | "Young plant" | "Bloom";
-  last_evidence?: string | null;
-}
-
-export interface Garden {
-  level_name: string;
-  total_conversations: number;
-  skills: SkillProgress[];
-}
-
 export interface AppSnapshot {
   learner?: Learner | null;
   topics: Topic[];
   recent_sessions: SessionListItem[];
   engine_status: EngineStatus;
-  garden: Garden;
 }
 
 export interface AudioPayload {
@@ -87,23 +70,31 @@ export interface AudioPayload {
   base64: string;
 }
 
-export interface SkillEvidence {
-  skill_id: string;
-  skill_label: string;
-  strand: SkillStrand;
-  new_stage: 0 | 1 | 2 | 3;
-  stage_label: string;
-  evidence: string;
+/** What the live chore progress bar draws. Only sent for ledger chores. */
+export interface LedgerView {
+  unit: string;
+  current: number;
+  target: number;
+  opening: number;
+  /** 0-1, from the chore's opening figure to its target. */
+  progress: number;
+  agreed: boolean;
+  reached_target: boolean;
+  regenerated: boolean;
 }
+
+/** How a chore character signed off. */
+export type TurnSignal = "deal" | "walk";
 
 export interface TurnResult {
   learner_message: Message;
   ella_message: Message;
   correction?: string | null;
-  evidence?: SkillEvidence | null;
   suggested_complete: boolean;
   audio?: AudioPayload | null;
   timings?: TurnTimings | null;
+  ledger?: LedgerView | null;
+  signal?: TurnSignal | null;
 }
 
 export interface TurnTimings {
@@ -132,8 +123,6 @@ export interface SessionSummary {
   turns: number;
   headline: string;
   encouragement: string;
-  best_evidence?: SkillEvidence | null;
-  garden: Garden;
 }
 
 export interface VoiceTurnInput {
@@ -206,26 +195,9 @@ export interface Streak {
   week: StreakDay[];
 }
 
-export type UnitState = "bloom" | "young" | "seedling" | "bare" | "locked";
-
-export interface UnitNode {
-  num: number;
-  name: string;
-  state: UnitState;
-  /** The conversation this unit opens when it is tapped. */
-  topicId: string | null;
-  /** Coordinates on the 1110x600 garden stage. */
-  x: number;
-  y: number;
-  tint: string;
-  done: boolean;
-  current: boolean;
-}
 
 export interface WeeklyDigest {
   talks: number;
-  newWords: number;
-  blooms: number;
 }
 
 /** What the onboarding placement talk hands back once it has really run. */
@@ -236,8 +208,4 @@ export interface PlacementResult {
 export interface LevelInfo {
   /** CEFR band shown next to the learner's name. */
   code: string;
-  skillsDone: number;
-  skillsTotal: number;
-  /** 0-1, for the garden progress bars. */
-  ratio: number;
 }

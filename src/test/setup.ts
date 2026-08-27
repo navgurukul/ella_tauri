@@ -6,7 +6,7 @@ import { afterEach } from "vitest";
 // auto-cleanup; without this every render stacks up in the same document.
 afterEach(cleanup);
 
-// The garden scales its fixed-coordinate stage to the window, which jsdom has
+// Fixed-coordinate stages scale to the window, which jsdom has
 // no ResizeObserver for.
 class MockResizeObserver implements ResizeObserver {
   observe() {}

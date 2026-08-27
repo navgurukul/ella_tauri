@@ -9,7 +9,8 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        skill_seeds, topics, topics_for_age, AppSnapshot, Learner, Message, Session, SessionSummary, SkillEvidence,
+        find_character, find_chore, topics, topics_for_age, AppSnapshot, ChoreContext, LedgerTurn,
+        LedgerView, Learner, Message, Session, SessionSummary, TurnSignal, WinCondition,
         Speaker, Topic, TurnResult, TutorRequest,
     },
     error::{EllaError, EllaResult},
@@ -32,6 +33,9 @@ struct StreamChunkOutcome {
     text: String,
     engine: String,
     fell_back: bool,
+    /// Why this chunk produced nothing. Kept so a turn where every chunk failed
+    /// can report the real cause instead of guessing at the microphone.
+    error: Option<String>,
 }
 
 struct VoiceStream {
@@ -64,7 +68,6 @@ impl AppService {
             learner,
             recent_sessions: self.database.recent_sessions(5)?,
             engine_status: self.engine.status(),
-            garden: self.database.garden()?,
         })
     }
 
@@ -127,6 +130,104 @@ impl AppService {
         };
         self.database.create_session(&session, &opening)?;
         Ok(session)
+    }
+
+    /// Start a chore. The session row is the same shape as a free conversation;
+    /// what differs is that it names a chore and a character, and — for ledger
+    /// chores — opens a ledger at the authored opening figure.
+    pub fn start_chore(&self, chore_id: &str) -> EllaResult<Session> {
+        let chore = find_chore(chore_id)
+            .ok_or_else(|| EllaError::NotFound(format!("No chore called {chore_id}.")))?;
+        let character = find_character(&chore.character_id).ok_or_else(|| {
+            EllaError::Engine(format!(
+                "Chore {chore_id} names character {} which is not in the cast.",
+                chore.character_id
+            ))
+        })?;
+        let learner = self.database.learner()?.ok_or_else(|| {
+            EllaError::Conflict("Tell Ella your name before starting a conversation.".into())
+        })?;
+
+        let ledger_opening = match &chore.win {
+            WinCondition::Ledger(spec) => Some(spec.opening),
+            WinCondition::Rubric { .. } => None,
+        };
+        let context = ChoreContext {
+            chore_id: chore.id.clone(),
+            character: character.clone(),
+            setting: chore.setting.clone(),
+            learner_goal: chore.learner_goal.clone(),
+            character_brief: chore.character_brief.clone(),
+            max_turns: chore.max_turns,
+            ledger: match &chore.win {
+                WinCondition::Ledger(spec) => Some(LedgerTurn {
+                    spec: spec.clone(),
+                    current: spec.opening,
+                    agreed: false,
+                }),
+                WinCondition::Rubric { .. } => None,
+            },
+        };
+
+        let started_at = now();
+        let opening = Message {
+            id: Uuid::new_v4().to_string(),
+            speaker: Speaker::Ella,
+            content: self.engine.opening_in_chore(&context, &learner.name)?,
+            turn: 0,
+            created_at: started_at.clone(),
+        };
+        let session = Session {
+            id: Uuid::new_v4().to_string(),
+            topic_id: chore.id.clone(),
+            topic_label: chore.title.clone(),
+            status: "active".into(),
+            started_at,
+            completed_at: None,
+            messages: vec![opening.clone()],
+        };
+        self.database.create_chore_session(
+            &session,
+            &opening,
+            &chore.id,
+            &character.id,
+            ledger_opening,
+            &now(),
+        )?;
+        Ok(session)
+    }
+
+    /// Rebuild the chore context for a turn, with the ledger figure as it
+    /// currently stands. `None` for a free-topic session.
+    fn chore_context_for(&self, session_id: &str) -> EllaResult<Option<ChoreContext>> {
+        let Some((chore_id, character_id)) = self.database.session_chore(session_id)? else {
+            return Ok(None);
+        };
+        let Some(chore) = find_chore(&chore_id) else {
+            // The catalog moved under a live session. Degrade to a free
+            // conversation rather than failing the turn.
+            return Ok(None);
+        };
+        let character = find_character(&character_id).unwrap_or_else(|| {
+            find_character("ella").expect("the cast always contains Ella")
+        });
+        let ledger = match (&chore.win, self.database.ledger_state(session_id)?) {
+            (WinCondition::Ledger(spec), Some((current, agreed))) => Some(LedgerTurn {
+                spec: spec.clone(),
+                current,
+                agreed,
+            }),
+            _ => None,
+        };
+        Ok(Some(ChoreContext {
+            chore_id: chore.id,
+            character,
+            setting: chore.setting,
+            learner_goal: chore.learner_goal,
+            character_brief: chore.character_brief,
+            max_turns: chore.max_turns,
+            ledger,
+        }))
     }
 
     pub fn get_session(&self, id: &str) -> EllaResult<Session> {
@@ -438,10 +539,25 @@ impl AppService {
                     None,
                 );
                 if joined.is_empty() {
-                    return Err(EllaError::Validation(
-                        "I could not hear any words in that recording. Move closer to the microphone and try again."
-                            .into(),
-                    ));
+                    // Every chunk came back empty. That is usually an engine
+                    // failure, not a quiet learner, so say which - blaming the
+                    // microphone sent us hunting the wrong problem for hours.
+                    let reasons = outcomes
+                        .iter()
+                        .filter_map(|outcome| outcome.error.as_deref())
+                        .collect::<Vec<_>>();
+                    if reasons.is_empty() {
+                        return Err(EllaError::Validation(
+                            "I could not hear any words in that recording. Move closer to the microphone and try again."
+                                .into(),
+                        ));
+                    }
+                    let detail = reasons.first().copied().unwrap_or("unknown");
+                    return Err(EllaError::Engine(format!(
+                        "Speech recognition returned nothing for all {} parts of that recording. \
+                         First cause: {detail}",
+                        outcomes.len()
+                    )));
                 }
                 joined
             } else {
@@ -502,12 +618,17 @@ impl AppService {
             .filter(|message| message.speaker == Speaker::Learner)
             .count() as u32
             + 1;
+        // A chore session carries a character, a setting and a hidden brief; a
+        // free-topic session carries none of that and behaves exactly as before.
+        let chore_context = self.chore_context_for(session_id)?;
         let request = TutorRequest {
             learner_name: learner.name,
+            topic_id: session.topic_id.clone(),
             topic_label: session.topic_label.clone(),
             messages: session.messages.clone(),
             learner_text: clean.into(),
             turn,
+            chore: chore_context.clone(),
         };
         trace.stage(
             "llm:start",
@@ -544,16 +665,9 @@ impl AppService {
             turn,
             created_at: created_at.clone(),
         };
-        let (skill_id, _, _) = skill_seeds()[((turn - 1) as usize) % skill_seeds().len()];
+
         let db_persist_started = Instant::now();
-        let skill = self.database.persist_turn(
-            session_id,
-            &learner_message,
-            &ella_message,
-            skill_id,
-            clean,
-            &created_at,
-        )?;
+        self.database.persist_turn(session_id, &learner_message, &ella_message)?;
         trace.stage(
             "db:turn-persisted",
             &format!(
@@ -601,14 +715,54 @@ impl AppService {
                 None
             }
         };
+        // The app owns the number. `named_figure` is only ever accepted when it
+        // is legal for this spec, so a character that concedes too far in prose
+        // still does not move the ledger.
+        let ledger_view = match chore_context.as_ref().and_then(|c| c.ledger.clone()) {
+            Some(ledger) => {
+                let next = generated
+                    .named_figure
+                    .filter(|value| ledger.spec.accepts(ledger.current, *value))
+                    .unwrap_or(ledger.current);
+                let agreed = ledger.agreed || generated.signal == Some(TurnSignal::Deal);
+                self.database
+                    .save_ledger_state(session_id, next, agreed, &created_at)?;
+                Some(LedgerView {
+                    unit: ledger.spec.unit.clone(),
+                    current: next,
+                    target: ledger.spec.target,
+                    opening: ledger.spec.opening,
+                    progress: ledger.spec.progress(next),
+                    agreed,
+                    reached_target: ledger.spec.reached_target(next),
+                    regenerated: generated.regenerated,
+                })
+            }
+            None => None,
+        };
+
+        // A chore is over when the character signs off, when the ledger has
+        // gone as far as it goes, or when the turn budget runs out — not on a
+        // fixed count. A free conversation has no decision to reach, so three
+        // turns of practice remains the point at which stopping is fine.
+        let suggested_complete = match chore_context.as_ref() {
+            Some(context) => {
+                generated.signal.is_some()
+                    || ledger_view.as_ref().is_some_and(|ledger| ledger.agreed)
+                    || turn >= context.max_turns
+            }
+            None => turn >= 3,
+        };
+
         Ok(TurnResult {
             learner_message,
             ella_message,
             correction: gentle_correction(clean),
-            evidence: Some(skill.into()),
-            suggested_complete: turn >= 3,
+            suggested_complete,
             audio,
             timings: None,
+            ledger: ledger_view,
+            signal: generated.signal,
         })
     }
 
@@ -620,29 +774,22 @@ impl AppService {
             .iter()
             .filter(|message| message.speaker == Speaker::Learner)
             .count() as u32;
-        let garden = self.database.garden()?;
-        let best_evidence = garden
-            .skills
-            .iter()
-            .filter(|skill| skill.last_evidence.is_some())
-            .max_by_key(|skill| skill.evidence_count)
-            .cloned()
-            .map(SkillEvidence::from);
+        let conversations = self.database.completed_conversations()?;
+        let headline = if turns >= 3 {
+            "You kept that conversation going".into()
+        } else {
+            "Every answer counts".into()
+        };
+        let encouragement = format!(
+            "That is {conversations} conversation{} finished. Come back and talk to Ella again.",
+            if conversations == 1 { "" } else { "s" }
+        );
         Ok(SessionSummary {
             session_id: session.id,
-            topic_label: session.topic_label.clone(),
+            topic_label: session.topic_label,
             turns,
-            headline: if turns >= 3 {
-                "Your garden grew!".into()
-            } else {
-                "Every word waters the garden.".into()
-            },
-            encouragement: format!(
-                "You kept a real conversation about {} going. That is brave practice.",
-                session.topic_label.to_lowercase()
-            ),
-            best_evidence,
-            garden,
+            headline,
+            encouragement,
         })
     }
 
@@ -664,14 +811,14 @@ fn transcribe_stream_chunk(
 ) -> StreamChunkOutcome {
     let audio_ms = samples.len() as f64 * 1_000.0 / sample_rate as f64;
     let started = Instant::now();
-    let (text, engine_name, fell_back) = match engine.transcribe(&samples, sample_rate) {
+    let (text, engine_name, fell_back, error) = match engine.transcribe(&samples, sample_rate) {
         Ok(transcription) => {
             let fell_back = transcription.fallback_from.is_some();
-            (transcription.text, transcription.engine, fell_back)
+            (transcription.text, transcription.engine, fell_back, None)
         }
         Err(error) => {
             eprintln!("[LATENCY]     stt-stream> chunk {index} produced no words ({error})");
-            (String::new(), "none".into(), true)
+            (String::new(), "none".into(), true, Some(error.to_string()))
         }
     };
     let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
@@ -682,6 +829,7 @@ fn transcribe_stream_chunk(
         text,
         engine: engine_name,
         fell_back,
+        error,
     }
 }
 
@@ -778,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    fn full_demo_turn_is_persisted_and_grows_a_skill() {
+    fn full_demo_turn_is_persisted() {
         let service = service();
         service.save_learner("Asha", Some(14)).unwrap();
         let session = service.start_session("street-food").unwrap();
@@ -787,7 +935,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.learner_message.turn, 1);
-        assert_eq!(result.evidence.unwrap().new_stage, 1);
         let saved = service.get_session(&session.id).unwrap();
         assert_eq!(saved.messages.len(), 3);
         assert_eq!(saved.messages[1].speaker, Speaker::Learner);
@@ -808,8 +955,7 @@ mod tests {
         }
         let summary = service.complete_session(&session.id).unwrap();
         assert_eq!(summary.turns, 3);
-        assert_eq!(summary.garden.total_conversations, 1);
-        assert!(summary.best_evidence.is_some());
+        assert!(!summary.headline.is_empty());
     }
 
     #[test]

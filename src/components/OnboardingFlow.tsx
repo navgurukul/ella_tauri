@@ -11,7 +11,7 @@ const ORDER: ObStep[] = ["welcome", "name", "age", "miccheck", "placement"];
 /** The dots track the four steps after the welcome screen. */
 const DOT_COUNT = ORDER.length - 1;
 
-type MicState = "idle" | "listening" | "done";
+type MicState = "idle" | "requesting" | "listening" | "done" | "error";
 
 export function OnboardingFlow({
   busy,
@@ -86,7 +86,7 @@ export function OnboardingFlow({
               <li key={dot} className={dot === index - 1 ? "is-current" : dot < index - 1 ? "is-done" : ""} />
             ))}
           </ol>
-          <EllaMascot className="ella--corner-ob" scale={0.7} rotate={-5} />
+          {step !== "miccheck" && <EllaMascot className="ella--corner-ob" scale={0.7} rotate={-5} />}
         </>
       )}
 
@@ -182,7 +182,7 @@ function NameStep({
       />
       <p className="ob-step__hint">
         {returning
-          ? "Use the same name as before and Ella picks your garden back up."
+          ? "Use the same name as before and Ella picks up where you left off."
           : "A nickname works too. This stays between you two."}
       </p>
       <button className="btn btn--violet ob-step__cta" disabled={!ready}>
@@ -238,9 +238,11 @@ function AgeStep({
 }
 
 const MIC_HINT: Record<MicState, string> = {
-  idle: "Tap, then say anything",
-  listening: "Listening…",
-  done: "All good! Ella hears you.",
+  idle: "Tap the mic and say hello",
+  requesting: "Opening your microphone…",
+  listening: "Listening… say anything",
+  done: "Perfect — Ella can hear you.",
+  error: "Let’s try that once more",
 };
 
 /**
@@ -250,55 +252,74 @@ const MIC_HINT: Record<MicState, string> = {
 function MicCheckStep({ onNext }: { onNext: () => void }) {
   const [mic, setMic] = useState<MicState>("idle");
   const [level, setLevel] = useState(0);
+  const [heardSignal, setHeardSignal] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
   const voice = useRef(createVoiceCapture());
   const heard = useRef(false);
+  const active = useRef(false);
+  const autoFinishTimer = useRef<number | null>(null);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    return () => {
+      active.current = false;
+      if (autoFinishTimer.current !== null) window.clearTimeout(autoFinishTimer.current);
       void voice.current.cancel();
-    },
-    [],
-  );
+    };
+  }, []);
 
-  async function tap() {
-    if (mic === "done") return;
-    if (mic === "listening") {
-      await voice.current.cancel();
-      setLevel(0);
+  async function finishCheck(didHear = heard.current) {
+    if (!active.current) return;
+    active.current = false;
+    if (autoFinishTimer.current !== null) window.clearTimeout(autoFinishTimer.current);
+    autoFinishTimer.current = null;
+    await voice.current.cancel().catch(() => undefined);
+    setLevel(0);
+    if (didHear) {
+      setFailed(null);
       setMic("done");
       return;
     }
+    setFailed("I didn’t hear anything. Check your input and tap the mic to try again.");
+    setMic("error");
+  }
+
+  async function tap() {
+    if (mic === "done" || mic === "requesting") return;
+    if (mic === "listening") {
+      await finishCheck();
+      return;
+    }
     setFailed(null);
+    setHeardSignal(false);
     heard.current = false;
+    active.current = true;
+    setMic("requesting");
     try {
       await voice.current.start(
         () => undefined,
         (value) => {
           setLevel(value);
-          if (value > 0.06) heard.current = true;
+          if (value > 0.06 && !heard.current) {
+            heard.current = true;
+            setHeardSignal(true);
+            autoFinishTimer.current = window.setTimeout(() => void finishCheck(true), 1100);
+          }
         },
       );
-      setMic("listening");
+      if (active.current) setMic("listening");
     } catch (reason) {
+      active.current = false;
+      setLevel(0);
+      setMic("error");
       setFailed(
         `I could not open the microphone (${message(reason).toLowerCase().replace(/\.$/, "")}). You can still talk to Ella by typing.`,
       );
     }
   }
 
-  // Stop on the learner's behalf once Ella has clearly heard something.
-  useEffect(() => {
-    if (mic !== "listening") return;
-    const timer = window.setTimeout(() => {
-      if (heard.current) {
-        void voice.current.cancel();
-        setLevel(0);
-        setMic("done");
-      }
-    }, 2000);
-    return () => window.clearTimeout(timer);
-  }, [mic, level]);
+  const ellaState: EllaState =
+    mic === "requesting" ? "thinking" : mic === "listening" ? "listening" : "resting";
+  const hint = mic === "listening" && heardSignal ? "I hear you — that sounds clear!" : MIC_HINT[mic];
 
   return (
     <div className="ob-step" data-screen="onboarding-miccheck">
@@ -307,33 +328,59 @@ function MicCheckStep({ onNext }: { onNext: () => void }) {
         Ella wants to hear you loud and clear before your first talk. Say anything!
       </p>
 
-      <div className="ob-mic-wrap">
-        {mic === "listening" && (
-          <>
-            <span className="ob-mic-pulse" />
-            <span className="ob-mic-pulse ob-mic-pulse--delayed" />
-          </>
-        )}
-        <button
-          className={`ob-mic is-${mic}`}
-          onClick={() => void tap()}
-          aria-label={mic === "listening" ? "Stop the mic check" : "Start the mic check"}
-        >
-          {mic === "done" ? (
-            <svg className="ob-mic__check" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M20 6L9 17L4 12" />
-            </svg>
-          ) : (
-            <MicGlyph size={38} />
+      <div className={`ob-mic-stage is-${mic}`} data-mic-state={mic}>
+        <EllaMascot
+          variant="celebration"
+          className="ella--mic-check"
+          scale={0.5}
+          state={ellaState}
+          reaction={mic === "done" ? "success" : mic === "error" ? "error" : null}
+          activity={level}
+          decorative
+        />
+        <div className="ob-mic-wrap">
+          {mic === "listening" && (
+            <>
+              <span className="ob-mic-pulse" />
+              <span className="ob-mic-pulse ob-mic-pulse--delayed" />
+            </>
           )}
-        </button>
+          <button
+            className={`ob-mic is-${mic}`}
+            onClick={() => void tap()}
+            disabled={mic === "requesting" || mic === "done"}
+            aria-pressed={mic === "listening"}
+            aria-label={
+              mic === "requesting"
+                ? "Opening the microphone"
+                : mic === "listening"
+                  ? "Stop the mic check"
+                  : mic === "done"
+                    ? "Microphone check complete"
+                    : mic === "error"
+                      ? "Try the mic check again"
+                      : "Start the mic check"
+            }
+          >
+            {mic === "requesting" ? (
+              <LoaderCircle className="spin ob-mic__loader" aria-hidden="true" />
+            ) : mic === "done" ? (
+              <svg className="ob-mic__check" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 6L9 17L4 12" />
+              </svg>
+            ) : (
+              <MicGlyph size={34} />
+            )}
+          </button>
+        </div>
       </div>
 
       <p className="ob-mic-hint" aria-live="polite">
-        {MIC_HINT[mic]}
+        <span className="ob-mic-hint__dot" aria-hidden="true" />
+        {hint}
       </p>
       {mic === "listening" && <VoiceMeter level={level} />}
-      {failed && <p className="inline-error ob-step__sub">{failed}</p>}
+      {failed && <p className="inline-error ob-mic-error" role="alert">{failed}</p>}
 
       {mic === "done" ? (
         <button className="btn btn--green ob-step__cta" onClick={onNext}>
@@ -422,7 +469,7 @@ function PlacementStep({
               <b>{result?.level ?? "A2"}</b>
             </p>
             <button className="btn btn--green" onClick={onDone} disabled={busy}>
-              Start my garden
+              Start talking
             </button>
           </>
         ) : call === "working" ? (

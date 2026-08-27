@@ -2,13 +2,10 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppSnapshot,
   EllaBridge,
-  Garden,
   Learner,
   Message,
   Session,
   SessionSummary,
-  SkillEvidence,
-  SkillProgress,
   Topic,
   TurnResult,
   VoiceStreamFinishInput,
@@ -67,33 +64,6 @@ const topics: Topic[] = [
   },
 ];
 
-const seedSkills: SkillProgress[] = [
-  {
-    id: "descriptive-words",
-    label: "Use descriptive words",
-    strand: "vocabulary",
-    evidence_count: 0,
-    stage: 0,
-    stage_label: "Bare plot",
-  },
-  {
-    id: "past-events",
-    label: "Talk about past events",
-    strand: "grammar",
-    evidence_count: 0,
-    stage: 0,
-    stage_label: "Bare plot",
-  },
-  {
-    id: "longer-answers",
-    label: "Build longer answers",
-    strand: "fluency",
-    evidence_count: 0,
-    stage: 0,
-    stage_label: "Bare plot",
-  },
-];
-
 /** Mirrors `topics_for_age` in the Rust domain so the preview matches the app. */
 const MIN_AGE: Record<string, number> = { "job-interview": 14, "market-bargaining": 10 };
 
@@ -112,7 +82,8 @@ function topicsForAge(age?: number | null): Topic[] {
 interface BrowserState {
   learner?: Learner;
   sessions: Session[];
-  garden: Garden;
+  /** Conversations finished, the one progress number the preview still keeps. */
+  conversations: number;
 }
 
 export interface StorageLike {
@@ -162,14 +133,7 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
   const read = (): BrowserState => {
     const raw = storage.getItem(storageKey);
     if (raw) return JSON.parse(raw) as BrowserState;
-    return {
-      sessions: [],
-      garden: {
-        level_name: "Morning Meadow",
-        total_conversations: 0,
-        skills: structuredClone(seedSkills),
-      },
-    };
+    return { sessions: [], conversations: 0 };
   };
 
   const write = (state: BrowserState) => storage.setItem(storageKey, JSON.stringify(state));
@@ -199,7 +163,6 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
         { name: "Storage", ready: true, detail: "Browser-local preview data" },
       ],
     },
-    garden: state.garden,
   });
 
   const getSessionOrThrow = (state: BrowserState, sessionId: string) => {
@@ -232,25 +195,11 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
     };
     session.messages.push(learnerMessage, ellaMessage);
 
-    const skill = state.garden.skills[(turn - 1) % state.garden.skills.length];
-    skill.evidence_count += 1;
-    skill.stage = Math.min(3, skill.evidence_count) as SkillProgress["stage"];
-    skill.stage_label = stageLabel(skill.stage);
-    skill.last_evidence = clean;
-    const evidence: SkillEvidence = {
-      skill_id: skill.id,
-      skill_label: skill.label,
-      strand: skill.strand,
-      new_stage: skill.stage,
-      stage_label: skill.stage_label,
-      evidence: clean,
-    };
     write(state);
     return {
       learner_message: learnerMessage,
       ella_message: ellaMessage,
       correction: gentleCorrection(clean),
-      evidence,
       suggested_complete: turn >= 3,
     };
   };
@@ -317,29 +266,16 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
       const session = getSessionOrThrow(state, sessionId);
       session.status = "complete";
       session.completed_at = new Date().toISOString();
-      state.garden.total_conversations += 1;
+      state.conversations += 1;
       const learners = session.messages.filter((message) => message.speaker === "learner");
-      const lastEvidence = state.garden.skills
-        .filter((skill) => skill.last_evidence)
-        .sort((left, right) => right.evidence_count - left.evidence_count)[0];
       write(state);
       return {
         session_id: session.id,
         topic_label: session.topic_label,
         turns: learners.length,
-        headline: learners.length >= 3 ? "Your garden grew!" : "Every word waters the garden.",
+        headline:
+          learners.length >= 3 ? "You kept that conversation going" : "Every answer counts",
         encouragement: `You kept a real conversation about ${session.topic_label.toLowerCase()} going. That is brave practice.`,
-        best_evidence: lastEvidence
-          ? {
-              skill_id: lastEvidence.id,
-              skill_label: lastEvidence.label,
-              strand: lastEvidence.strand,
-              new_stage: lastEvidence.stage,
-              stage_label: lastEvidence.stage_label,
-              evidence: lastEvidence.last_evidence ?? "",
-            }
-          : null,
-        garden: structuredClone(state.garden),
       };
     },
     async resetDemoData() {
@@ -388,8 +324,4 @@ function gentleCorrection(text: string): string | null {
   if (/\bi goed\b/i.test(text)) return "Try “I went” instead of “I goed.”";
   if (/\bi am went\b/i.test(text)) return "Try “I went” when you are talking about the past.";
   return null;
-}
-
-function stageLabel(stage: SkillProgress["stage"]): SkillProgress["stage_label"] {
-  return (["Bare plot", "Seedling", "Young plant", "Bloom"] as const)[stage];
 }

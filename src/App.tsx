@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { LoaderCircle, X } from "lucide-react";
 import { EllaGlyph, EllaMascot } from "./components/EllaMascot";
-import { GardenScreen } from "./components/GardenScreen";
 import { HomeScreen } from "./components/HomeScreen";
 import { OnboardingFlow } from "./components/OnboardingFlow";
 import { Sidebar, type NavKey } from "./components/Sidebar";
@@ -15,17 +14,15 @@ import type {
   PlacementResult,
   Session,
   SessionSummary,
-  SkillEvidence,
   Topic,
 } from "./types";
 
-type Screen = "onboarding" | "home" | "talk" | "summary" | "garden";
+type Screen = "onboarding" | "home" | "talk" | "summary";
 
 const NAV_FOR: Record<Exclude<Screen, "onboarding">, NavKey> = {
   home: "home",
   talk: "talk",
-  summary: "garden",
-  garden: "garden",
+  summary: "home",
 };
 
 export default function App() {
@@ -33,7 +30,6 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("onboarding");
   const [session, setSession] = useState<Session | null>(null);
   const [summary, setSummary] = useState<SessionSummary | null>(null);
-  const [reveal, setReveal] = useState<SkillEvidence | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -101,7 +97,6 @@ export default function App() {
         current
           ? {
               ...current,
-              garden: result.garden,
               recent_sessions: [
                 listItemFor(result, created.topic_id, created.started_at),
                 ...current.recent_sessions,
@@ -109,7 +104,7 @@ export default function App() {
             }
           : current,
       );
-      return { level: levelInfo(result.garden, snapshot.learner?.level_name).code };
+      return { level: levelInfo(snapshot.learner?.level_name).code };
     } catch {
       // Never leave a half-open placement talk waiting on the home screen.
       if (startedId) await bridge.completeSession(startedId).catch(() => undefined);
@@ -147,10 +142,13 @@ export default function App() {
   function handleComplete(result: SessionSummary) {
     if (!snapshot) return;
     setSummary(result);
-    setReveal(result.best_evidence ?? null);
+    // Drop the finished conversation. `session` is a frozen snapshot taken
+    // before completion, so its status still reads "active" — leaving it set
+    // let the sidebar's "Talk" reopen a session the backend had closed, and
+    // every turn after that failed with "this conversation has already ended".
+    setSession(null);
     setSnapshot({
       ...snapshot,
-      garden: result.garden,
       recent_sessions: [
         listItemFor(result, session?.topic_id ?? "", session?.started_at),
         ...snapshot.recent_sessions.filter((item) => item.id !== result.session_id),
@@ -165,7 +163,6 @@ export default function App() {
       setSnapshot(fresh);
       setSession(null);
       setSummary(null);
-      setReveal(null);
       setScreen("onboarding");
     });
   }
@@ -210,7 +207,7 @@ export default function App() {
     );
   }
 
-  const level = levelInfo(snapshot.garden, snapshot.learner?.level_name);
+  const level = levelInfo(snapshot.learner?.level_name);
 
   return (
     <div className={`shell ${screen === "talk" ? "shell--immersive" : ""}`.trim()}>
@@ -219,7 +216,6 @@ export default function App() {
           active={NAV_FOR[screen]}
           learnerName={snapshot.learner?.name ?? "friend"}
           level={level}
-          engineStatus={snapshot.engine_status}
           onNavigate={handleNavigate}
           onReset={handleReset}
         />
@@ -231,7 +227,6 @@ export default function App() {
             busy={busy}
             onStart={(topic) => void handleStart(topic)}
             onResume={(sessionId) => void handleResume(sessionId)}
-            onGarden={() => setScreen("garden")}
           />
         )}
         {screen === "talk" && session && (
@@ -244,18 +239,7 @@ export default function App() {
           />
         )}
         {screen === "summary" && summary && (
-          <SummaryScreen
-            summary={summary}
-            onGarden={() => setScreen("garden")}
-            onHome={() => setScreen("home")}
-          />
-        )}
-        {screen === "garden" && (
-          <GardenScreen
-            snapshot={snapshot}
-            reveal={reveal}
-            onTalk={(topicId) => void handleStartTopic(topicId)}
-          />
+          <SummaryScreen summary={summary} onHome={() => setScreen("home")} />
         )}
       </main>
       {busy && <BusyVeil />}
@@ -283,7 +267,7 @@ function BootScreen({ error }: { error: string | null }) {
         <EllaGlyph size={48} />
         <span>Ella</span>
       </div>
-      <h1 className="display display--md">{error ? "Ella could not start" : "Waking up the garden…"}</h1>
+      <h1 className="display display--md">{error ? "Ella could not start" : "Waking Ella up…"}</h1>
       <p>{error ?? "Getting your local learning space ready."}</p>
       {!error && <LoaderCircle className="spin" aria-label="Loading" />}
       {!error && <EllaMascot className="ella--corner-boot" scale={0.55} rotate={-4} />}

@@ -10,8 +10,8 @@ export type EllaReaction = "success" | "error" | null;
  *
  * Four visual roles share one component. `peek` is the compact corner mascot;
  * `conversation` is the calm placement-flow face used throughout voice calls;
- * `hero` is the wider onboarding close-up; and `celebration` keeps the larger
- * logo-derived expression available for a future reward surface.
+ * `hero` is the wider onboarding close-up; and `celebration` is the larger,
+ * logo-derived expression used when feedback states need to feel unmistakable.
  */
 export type EllaVariant = "peek" | "conversation" | "hero" | "celebration";
 

@@ -8,7 +8,6 @@ import {
   topicMeta,
   topicPresentation,
   unfinishedSession,
-  units,
   weeklyDigest,
 } from "../lib/presentation";
 import type {
@@ -23,21 +22,16 @@ export function HomeScreen({
   busy,
   onStart,
   onResume,
-  onGarden,
 }: {
   snapshot: AppSnapshot;
   busy: boolean;
   onStart: (topic: Topic) => void;
   onResume: (sessionId: string) => void;
-  onGarden: () => void;
 }) {
   const name = snapshot.learner?.name ?? "friend";
-  const level = levelInfo(snapshot.garden, snapshot.learner?.level_name);
+  const level = levelInfo(snapshot.learner?.level_name);
   const digest = weeklyDigest(snapshot);
   const run = streak(snapshot.recent_sessions);
-  const blooming = units(snapshot.garden, snapshot.topics).filter(
-    (unit) => unit.state === "young" || unit.state === "seedling",
-  ).length;
   // `streak` marks today "done" the moment there is a session for it, so a
   // remaining "today" cell means the learner has not talked yet.
   const talkedToday = !run.week.some((day) => day.state === "today");
@@ -151,40 +145,12 @@ export function HomeScreen({
             </p>
           </section>
 
-          <section className="card card--garden">
-            <div className="card__head">
-              <h4>Garden {level.code}</h4>
-              <span className="pill pill--green">
-                {level.skillsDone} / {level.skillsTotal} skills
-              </span>
-            </div>
-            <div className="meter">
-              <span style={{ width: `${Math.round(level.ratio * 100)}%` }} />
-            </div>
-            <p className="card__note">
-              {blooming > 0
-                ? `${blooming} ${blooming === 1 ? "plant is" : "plants are"} close to blooming. One good conversation could do it.`
-                : "Your plot is ready. One conversation plants the first seed."}
-            </p>
-            <button className="btn btn--outline btn--block" onClick={onGarden}>
-              Visit garden
-            </button>
-          </section>
-
           <section className="card card--week">
             <p className="card__eyebrow">This week</p>
             <dl className="stats">
               <div>
                 <dt className="display display--sm">{digest.talks}</dt>
                 <dd>talks</dd>
-              </div>
-              <div>
-                <dt className="display display--sm">{digest.newWords}</dt>
-                <dd>new words</dd>
-              </div>
-              <div>
-                <dt className="display display--sm">{digest.blooms}</dt>
-                <dd>blooms</dd>
               </div>
             </dl>
           </section>

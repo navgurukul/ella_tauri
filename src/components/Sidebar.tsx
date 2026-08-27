@@ -1,11 +1,10 @@
-import { useState } from "react";
 import type { ReactElement } from "react";
-import { RotateCcw, Settings2 } from "lucide-react";
+import { RotateCcw } from "lucide-react";
 import { EllaGlyph } from "./EllaMascot";
 import { initials } from "../lib/presentation";
-import type { EngineStatus, LevelInfo } from "../types";
+import type { LevelInfo } from "../types";
 
-export type NavKey = "home" | "talk" | "garden";
+export type NavKey = "home" | "talk";
 
 const NAV: Array<{ key: NavKey; label: string; icon: ReactElement }> = [
   {
@@ -34,37 +33,21 @@ const NAV: Array<{ key: NavKey; label: string; icon: ReactElement }> = [
       </svg>
     ),
   },
-  {
-    key: "garden",
-    label: "Garden",
-    icon: (
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <circle cx="12" cy="4.9" r="3.5" />
-        <circle cx="19.1" cy="12" r="3.5" />
-        <circle cx="12" cy="19.1" r="3.5" />
-        <circle cx="4.9" cy="12" r="3.5" />
-        <circle cx="12" cy="12" r="2.7" />
-      </svg>
-    ),
-  },
 ];
 
 export function Sidebar({
   active,
   learnerName,
   level,
-  engineStatus,
   onNavigate,
   onReset,
 }: {
   active: NavKey;
   learnerName: string;
   level: LevelInfo;
-  engineStatus: EngineStatus;
   onNavigate: (key: NavKey) => void;
   onReset: () => void;
 }) {
-  const [showEngines, setShowEngines] = useState(false);
   return (
     <aside className="sidebar">
       <div className="wordmark">
@@ -87,43 +70,20 @@ export function Sidebar({
       </nav>
 
       <div className="sidebar__foot">
-        <button
-          className="engine-chip"
-          onClick={() => setShowEngines((open) => !open)}
-          aria-expanded={showEngines}
-        >
-          <span className={`dot ${engineStatus.ready ? "is-ready" : "is-warning"}`} />
-          <span className="engine-chip__text">
-            <strong>{engineStatus.label}</strong>
-            <small>{engineStatus.ready ? "Ready" : "Needs attention"}</small>
-          </span>
-          <Settings2 size={16} aria-hidden="true" />
-        </button>
-
-        {showEngines && (
-          <div className="engine-popover" role="dialog" aria-label="Engine status">
-            <strong>{engineStatus.mode === "demo" ? "Demo mode" : "Local engine mode"}</strong>
-            {engineStatus.components.map((component) => (
-              <div className="engine-popover__row" key={component.name}>
-                <span className={`dot ${component.ready ? "is-ready" : "is-warning"}`} />
-                <span>
-                  <b>{component.name}</b>
-                  <small>{component.detail}</small>
-                </span>
-              </div>
-            ))}
-            <button className="engine-popover__reset" onClick={onReset}>
-              <RotateCcw size={14} aria-hidden="true" /> Reset demo data
-            </button>
-          </div>
-        )}
-
         <div className="profile">
           <span className="profile__avatar">{initials(learnerName)}</span>
           <span className="profile__text">
             <strong>{learnerName}</strong>
             <small>Level {level.code}</small>
           </span>
+          <button
+            className="profile__reset"
+            onClick={onReset}
+            title="Reset demo data"
+            aria-label="Reset demo data"
+          >
+            <RotateCcw size={16} aria-hidden="true" />
+          </button>
         </div>
       </div>
     </aside>

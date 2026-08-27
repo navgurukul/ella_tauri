@@ -370,6 +370,7 @@ mod tests {
                 messages: vec![],
                 learner_text: "I played football with friends".into(),
                 turn: 1,
+                            chore: None,
             })
             .unwrap();
         assert!(reply.ends_with('?'));
@@ -401,6 +402,7 @@ mod tests {
                 messages: vec![],
                 learner_text: transcript,
                 turn: 1,
+                            chore: None,
             })
             .unwrap();
         assert!(!reply.is_empty());

@@ -20,7 +20,8 @@
     "models:validate": "node scripts/models.mjs validate",
     "benchmark:stt": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin stt-benchmark --",
     "check": "npm run test && npm run build && cargo test --manifest-path src-tauri/Cargo.toml",
-    "telemetry:report": "python3 scripts/latency-report.py"
+    "telemetry:report": "python3 scripts/latency-report.py",
+    "bench:chore": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin chore-bench --"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

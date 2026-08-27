@@ -1,0 +1,140 @@
+{
+  "chore": "deposit-refund",
+  "learner": "Souvik",
+  "ledger_breaks": 1,
+  "median_ttft_ms": 3041.0,
+  "median_turn_ms": 6835.0,
+  "opening": "Oh, it is you. I am rather busy this morning. What did you want to talk about?",
+  "opening_ms": 1.0,
+  "outcome": "passed",
+  "schema_version": 1,
+  "title": "Get a deposit refunded",
+  "turns": [
+    {
+      "audio_bytes": 337980,
+      "intent": "open",
+      "learner": "Hello sir. I moved out last week. Can I get my deposit back?",
+      "ledger": {
+        "agreed": false,
+        "current": 500,
+        "progress": 0.0,
+        "reached_target": false,
+        "regenerated": true,
+        "target": 3500
+      },
+      "llm_completion_ms": 13167,
+      "llm_ttft_ms": 2411,
+      "reply": "Ah, yes. I see. I am holding your deposit then. You can get your Rs 500 back.",
+      "signal": null,
+      "total_ms": 13875.0,
+      "tts_completion_ms": 704,
+      "tts_first_audio_ms": 704,
+      "turn": 1
+    },
+    {
+      "audio_bytes": 241040,
+      "intent": "ask for all of it",
+      "learner": "The flat was clean when I left. I would like the full five thousand.",
+      "ledger": {
+        "agreed": false,
+        "current": 1000,
+        "progress": 0.1666666716337204,
+        "reached_target": false,
+        "regenerated": false,
+        "target": 3500
+      },
+      "llm_completion_ms": 7124,
+      "llm_ttft_ms": 4502,
+      "reply": "Cleaned it well, then. I see. I'll give you Rs 1000 back.",
+      "signal": null,
+      "total_ms": 7564.0,
+      "tts_completion_ms": 437,
+      "tts_first_audio_ms": 436,
+      "turn": 2
+    },
+    {
+      "audio_bytes": 191888,
+      "intent": "concede a little",
+      "learner": "I understand there is some cleaning. What can you return?",
+      "ledger": {
+        "agreed": false,
+        "current": 2000,
+        "progress": 0.5,
+        "reached_target": false,
+        "regenerated": false,
+        "target": 3500
+      },
+      "llm_completion_ms": 6737,
+      "llm_ttft_ms": 3108,
+      "reply": "Cleaning well then. I'll give you Rs 2000 back.",
+      "signal": null,
+      "total_ms": 7214.0,
+      "tts_completion_ms": 475,
+      "tts_first_audio_ms": 474,
+      "turn": 3
+    },
+    {
+      "audio_bytes": 226024,
+      "intent": "specific point",
+      "learner": "I painted the bedroom myself before leaving, so there is no paint cost.",
+      "ledger": {
+        "agreed": false,
+        "current": 3000,
+        "progress": 0.8333333134651184,
+        "reached_target": false,
+        "regenerated": false,
+        "target": 3500
+      },
+      "llm_completion_ms": 5142,
+      "llm_ttft_ms": 2755,
+      "reply": "Painted the bedroom, then. I'll give you Rs 3000 back.",
+      "signal": null,
+      "total_ms": 5542.0,
+      "tts_completion_ms": 397,
+      "tts_first_audio_ms": 397,
+      "turn": 4
+    },
+    {
+      "audio_bytes": 266300,
+      "intent": "overreach past the ceiling",
+      "learner": "Then give me six thousand rupees.",
+      "ledger": {
+        "agreed": false,
+        "current": 4000,
+        "progress": 1.0,
+        "reached_target": true,
+        "regenerated": false,
+        "target": 3500
+      },
+      "llm_completion_ms": 5811,
+      "llm_ttft_ms": 2974,
+      "reply": "Painted the bedroom, and cleaned well. I'll give you Rs 4000 back.",
+      "signal": null,
+      "total_ms": 6456.0,
+      "tts_completion_ms": 643,
+      "tts_first_audio_ms": 643,
+      "turn": 5
+    },
+    {
+      "audio_bytes": 120208,
+      "intent": "reasonable close",
+      "learner": "Three thousand five hundred rupees and we are finished.",
+      "ledger": {
+        "agreed": true,
+        "current": 4000,
+        "progress": 1.0,
+        "reached_target": true,
+        "regenerated": false,
+        "target": 3500
+      },
+      "llm_completion_ms": 4981,
+      "llm_ttft_ms": 3733,
+      "reply": "Three thousand five hundred, then",
+      "signal": "deal",
+      "total_ms": 5234.0,
+      "tts_completion_ms": 249,
+      "tts_first_audio_ms": 249,
+      "turn": 6
+    }
+  ]
+}

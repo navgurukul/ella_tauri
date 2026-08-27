@@ -4,7 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::{
     domain::{
-        skill_seeds, stage_label, Garden, Learner, Message, Session, SessionListItem, SkillProgress,
+        Learner, Message, Session, SessionListItem,
     },
     error::{EllaError, EllaResult},
 };
@@ -68,18 +68,12 @@ impl Database {
              );
              CREATE INDEX IF NOT EXISTS idx_messages_session_turn
                ON messages(session_id, turn_number, created_at);
-             CREATE TABLE IF NOT EXISTS skill_progress (
-               skill_id TEXT PRIMARY KEY,
-               label TEXT NOT NULL,
-               strand TEXT NOT NULL,
-               evidence_count INTEGER NOT NULL DEFAULT 0,
-               last_evidence TEXT,
-               updated_at TEXT NOT NULL
-             );",
+",
         )?;
         rename_legacy_speaker(&connection)?;
         add_learner_age(&connection)?;
-        seed_skills(&connection)?;
+        widen_message_speaker(&connection)?;
+        add_chore_tables(&connection)?;
         Ok(())
     }
 
@@ -205,23 +199,130 @@ impl Database {
         session_id: &str,
         learner: &Message,
         ella: &Message,
-        skill_id: &str,
-        evidence: &str,
-        now: &str,
-    ) -> EllaResult<SkillProgress> {
+    ) -> EllaResult<()> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         insert_message(&transaction, session_id, learner)?;
         insert_message(&transaction, session_id, ella)?;
-        transaction.execute(
-            "UPDATE skill_progress
-             SET evidence_count = evidence_count + 1, last_evidence = ?2, updated_at = ?3
-             WHERE skill_id = ?1",
-            params![skill_id, evidence, now],
-        )?;
-        let skill = read_skill(&transaction, skill_id)?;
         transaction.commit()?;
-        Ok(skill)
+        Ok(())
+    }
+
+    /// A chore session: the same row as a free conversation plus the chore and
+    /// character it belongs to, and — for ledger chores — the opening figure.
+    pub fn create_chore_session(
+        &self,
+        session: &Session,
+        opening: &Message,
+        chore_id: &str,
+        character_id: &str,
+        ledger_opening: Option<i32>,
+        now: &str,
+    ) -> EllaResult<()> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO sessions(id, topic_id, topic_label, status, started_at, chore_id, character_id)
+             VALUES(?1, ?2, ?3, 'active', ?4, ?5, ?6)",
+            params![
+                session.id,
+                session.topic_id,
+                session.topic_label,
+                session.started_at,
+                chore_id,
+                character_id
+            ],
+        )?;
+        if let Some(current) = ledger_opening {
+            transaction.execute(
+                "INSERT INTO ledger_state(session_id, current, agreed, updated_at)
+                 VALUES(?1, ?2, 0, ?3)",
+                params![session.id, current, now],
+            )?;
+        }
+        insert_message(&transaction, &session.id, opening)?;
+        transaction.execute(
+            "INSERT INTO chore_progress(chore_id, attempts) VALUES(?1, 1)
+             ON CONFLICT(chore_id) DO UPDATE SET attempts = attempts + 1",
+            params![chore_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// `(chore_id, character_id)` for a session, or `None` for a free topic.
+    pub fn session_chore(&self, session_id: &str) -> EllaResult<Option<(String, String)>> {
+        let connection = self.connection()?;
+        let row = connection
+            .query_row(
+                "SELECT chore_id, character_id FROM sessions WHERE id = ?1",
+                params![session_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(match row {
+            Some((Some(chore), Some(character))) => Some((chore, character)),
+            _ => None,
+        })
+    }
+
+    pub fn ledger_state(&self, session_id: &str) -> EllaResult<Option<(i32, bool)>> {
+        let connection = self.connection()?;
+        let row = connection
+            .query_row(
+                "SELECT current, agreed FROM ledger_state WHERE session_id = ?1",
+                params![session_id],
+                |row| Ok((row.get::<_, i32>(0)?, row.get::<_, i32>(1)? != 0)),
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn save_ledger_state(
+        &self,
+        session_id: &str,
+        current: i32,
+        agreed: bool,
+        now: &str,
+    ) -> EllaResult<()> {
+        self.connection()?.execute(
+            "UPDATE ledger_state SET current = ?2, agreed = ?3, updated_at = ?4
+             WHERE session_id = ?1",
+            params![session_id, current, i32::from(agreed), now],
+        )?;
+        Ok(())
+    }
+
+    /// Written by the grader after a session ends; `passed` also stamps the
+    /// chore as cleared. A failed attempt still keeps its observations.
+    pub fn record_outcome(
+        &self,
+        session_id: &str,
+        chore_id: &str,
+        outcome: &str,
+        best: Option<&str>,
+        now: &str,
+    ) -> EllaResult<()> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "UPDATE sessions SET outcome = ?2 WHERE id = ?1",
+            params![session_id, outcome],
+        )?;
+        if outcome == "passed" {
+            transaction.execute(
+                "UPDATE chore_progress SET passed_at = COALESCE(passed_at, ?2), best = ?3
+                 WHERE chore_id = ?1",
+                params![chore_id, now, best],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn complete_session(&self, id: &str, completed_at: &str) -> EllaResult<()> {
@@ -237,26 +338,15 @@ impl Database {
         Ok(())
     }
 
-    pub fn garden(&self) -> EllaResult<Garden> {
-        let connection = self.connection()?;
-        let total_conversations = connection.query_row(
+    /// How many conversations the learner has finished. The garden that used to
+    /// render progress is gone; this count survives because the home screen and
+    /// the session summary both still show it.
+    pub fn completed_conversations(&self) -> EllaResult<u32> {
+        Ok(self.connection()?.query_row(
             "SELECT COUNT(*) FROM sessions WHERE status = 'complete'",
             [],
             |row| row.get::<_, u32>(0),
-        )?;
-        let mut statement = connection.prepare(
-            "SELECT skill_id, label, strand, evidence_count, last_evidence
-             FROM skill_progress
-             ORDER BY CASE strand WHEN 'vocabulary' THEN 1 WHEN 'grammar' THEN 2 ELSE 3 END",
-        )?;
-        let skills = statement
-            .query_map([], skill_from_row)?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Garden {
-            level_name: "Morning Meadow".into(),
-            total_conversations,
-            skills,
-        })
+        )?)
     }
 
     pub fn reset(&self) -> EllaResult<()> {
@@ -265,8 +355,6 @@ impl Database {
         transaction.execute("DELETE FROM messages", [])?;
         transaction.execute("DELETE FROM sessions", [])?;
         transaction.execute("DELETE FROM learner", [])?;
-        transaction.execute("DELETE FROM skill_progress", [])?;
-        seed_skills(&transaction)?;
         transaction.commit()?;
         Ok(())
     }
@@ -326,17 +414,6 @@ fn add_learner_age(connection: &Connection) -> EllaResult<()> {
     Ok(())
 }
 
-fn seed_skills(connection: &Connection) -> EllaResult<()> {
-    for (id, label, strand) in skill_seeds() {
-        connection.execute(
-            "INSERT OR IGNORE INTO skill_progress(skill_id, label, strand, evidence_count, updated_at)
-             VALUES(?1, ?2, ?3, 0, datetime('now'))",
-            params![id, label, strand],
-        )?;
-    }
-    Ok(())
-}
-
 fn insert_message(
     transaction: &Transaction<'_>,
     session_id: &str,
@@ -357,27 +434,95 @@ fn insert_message(
     Ok(())
 }
 
-fn read_skill(connection: &Connection, id: &str) -> EllaResult<SkillProgress> {
-    connection
-        .query_row(
-            "SELECT skill_id, label, strand, evidence_count, last_evidence
-             FROM skill_progress WHERE skill_id = ?1",
-            [id],
-            skill_from_row,
-        )
-        .map_err(Into::into)
+fn widen_message_speaker(connection: &Connection) -> EllaResult<()> {
+    let narrow: bool = connection.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sqlite_master
+           WHERE type = 'table' AND name = 'messages' AND sql LIKE '%''ella''%'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !narrow {
+        return Ok(());
+    }
+    connection.execute_batch(
+        "PRAGMA foreign_keys = OFF;
+         BEGIN IMMEDIATE;
+         CREATE TABLE messages_widened (
+           id TEXT PRIMARY KEY,
+           session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+           speaker TEXT NOT NULL CHECK (length(speaker) > 0),
+           content TEXT NOT NULL,
+           turn_number INTEGER NOT NULL,
+           created_at TEXT NOT NULL
+         );
+         INSERT INTO messages_widened(id, session_id, speaker, content, turn_number, created_at)
+           SELECT id, session_id, speaker, content, turn_number, created_at FROM messages;
+         DROP TABLE messages;
+         ALTER TABLE messages_widened RENAME TO messages;
+         CREATE INDEX IF NOT EXISTS idx_messages_session_turn
+           ON messages(session_id, turn_number, created_at);
+         COMMIT;
+         PRAGMA foreign_keys = ON;",
+    )?;
+    Ok(())
 }
 
-fn skill_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SkillProgress> {
-    let evidence_count = row.get::<_, u32>(3)?;
-    let stage = evidence_count.min(3) as u8;
-    Ok(SkillProgress {
-        id: row.get(0)?,
-        label: row.get(1)?,
-        strand: row.get(2)?,
-        evidence_count,
-        stage,
-        stage_label: stage_label(stage).into(),
-        last_evidence: row.get(4)?,
-    })
+/// Chore, ledger, observation and character state. Additive: `skill_progress`
+/// is left in place for one release of overlap rather than dropped here.
+fn add_chore_tables(connection: &Connection) -> EllaResult<()> {
+    for (table, column, ddl) in [
+        ("learner", "name_spoken", "ALTER TABLE learner ADD COLUMN name_spoken TEXT"),
+        ("learner", "interests", "ALTER TABLE learner ADD COLUMN interests TEXT"),
+        ("sessions", "chore_id", "ALTER TABLE sessions ADD COLUMN chore_id TEXT"),
+        ("sessions", "character_id", "ALTER TABLE sessions ADD COLUMN character_id TEXT"),
+        ("sessions", "outcome", "ALTER TABLE sessions ADD COLUMN outcome TEXT"),
+    ] {
+        let present: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+            params![table, column],
+            |row| row.get(0),
+        )?;
+        if !present {
+            connection.execute(ddl, [])?;
+        }
+    }
+    // `outcome` cannot carry a CHECK because it arrives via ALTER; the enum is
+    // enforced in Rust where the value is written.
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ledger_state (
+           session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+           current INTEGER NOT NULL,
+           agreed INTEGER NOT NULL DEFAULT 0,
+           updated_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS observations (
+           id TEXT PRIMARY KEY,
+           session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+           kind TEXT NOT NULL CHECK (kind IN ('grammar','vocabulary','fluency','pronunciation')),
+           tag TEXT NOT NULL,
+           said TEXT NOT NULL,
+           better TEXT,
+           meant TEXT,
+           confirmed_by TEXT,
+           addressed_in TEXT REFERENCES sessions(id),
+           created_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_observations_open ON observations(tag, addressed_in);
+         CREATE TABLE IF NOT EXISTS chore_progress (
+           chore_id TEXT PRIMARY KEY,
+           attempts INTEGER NOT NULL DEFAULT 0,
+           passed_at TEXT,
+           best TEXT
+         );
+         CREATE TABLE IF NOT EXISTS character_state (
+           character_id TEXT PRIMARY KEY,
+           turns_talked INTEGER NOT NULL DEFAULT 0,
+           last_hook TEXT,
+           last_met_at TEXT,
+           memory TEXT
+         );",
+    )?;
+    Ok(())
 }

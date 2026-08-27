@@ -1,4 +1,4 @@
-mod application;
+pub mod application;
 pub mod domain;
 pub mod error;
 pub mod infrastructure;
@@ -40,6 +40,7 @@ pub fn run() {
             ipc::bootstrap,
             ipc::save_learner,
             ipc::start_session,
+            ipc::start_chore,
             ipc::get_session,
             ipc::send_text_turn,
             ipc::send_voice_turn,
