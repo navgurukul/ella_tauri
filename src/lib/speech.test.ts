@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createSpeechQueue, downsampleToPcm16, speakText } from "./speech";
+import { createSpeechQueue, downsampleToPcm16, sentenceGroups, speakText } from "./speech";
 
 describe("audio conversion", () => {
   it("downsamples float microphone frames to bounded PCM16", () => {
@@ -246,5 +246,64 @@ describe("streamed sentence playback", () => {
 
     expect(FakeAudioContext.started).toHaveLength(1);
     expect(onEnd).not.toHaveBeenCalled();
+  });
+});
+
+/** These cases mirror `speech_stream_tests` in
+ * src-tauri/src/infrastructure/engines.rs. When the two splitters disagree the
+ * reply restacks the moment its audio catches up, so they are kept in step. */
+describe("sentence grouping for the subtitles", () => {
+  const grouped = (text: string) => sentenceGroups(text).map((words) => words.join(" "));
+
+  it("splits a reply the way Piper cuts it", () => {
+    expect(grouped("That sounds delicious! What did it taste like?")).toEqual([
+      "That sounds delicious!",
+      "What did it taste like?",
+    ]);
+    expect(grouped("Hi Souvik! Tell me about the tastiest thing you ate. Where did you find it?"))
+      .toEqual([
+        "Hi Souvik!",
+        "Tell me about the tastiest thing you ate.",
+        "Where did you find it?",
+      ]);
+  });
+
+  it("keeps an abbreviation and a decimal inside their sentence", () => {
+    expect(grouped("My price is Rs. 250 for this cloth.")).toEqual([
+      "My price is Rs. 250 for this cloth.",
+    ]);
+    expect(grouped("The cloth is 2.5 metres wide and very soft.")).toEqual([
+      "The cloth is 2.5 metres wide and very soft.",
+    ]);
+  });
+
+  it("still ends a sentence that finishes on a figure", () => {
+    expect(grouped("My final price is 250. Do we have a deal?")).toEqual([
+      "My final price is 250.",
+      "Do we have a deal?",
+    ]);
+  });
+
+  it("merges a fragment too short to be its own line", () => {
+    expect(grouped("Ok. I understand what you mean now.")).toEqual([
+      "Ok. I understand what you mean now.",
+    ]);
+  });
+
+  it("treats an ellipsis as one sentence", () => {
+    expect(grouped("Well... that is a very low offer.")).toEqual([
+      "Well... that is a very low offer.",
+    ]);
+  });
+
+  it("loses no words, whatever the shape", () => {
+    for (const text of [
+      "Sounds nice. What did you like about it?",
+      "Rs 250 is my last price. Take it or leave it, my friend!",
+      "One sentence with no ending punctuation",
+      "",
+    ]) {
+      expect(sentenceGroups(text).flat().join(" ")).toBe(text.trim().replace(/\s+/g, " "));
+    }
   });
 });

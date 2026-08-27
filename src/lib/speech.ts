@@ -281,6 +281,60 @@ const SCHEDULE_LEAD_SECONDS = 0.03;
  * arrived. Beyond this the queue finishes with what it has rather than hang. */
 const MISSING_SEGMENT_GRACE_MS = 1500;
 
+/** Trailing words that end in '.' without ending a sentence. */
+const NON_TERMINAL_ABBREVIATIONS = new Set([
+  "rs", "mr", "mrs", "ms", "dr", "st", "no", "vs", "etc", "approx",
+]);
+/** Mirrors SPEECH_MIN_CHARS in src-tauri/src/infrastructure/engines.rs. */
+const MIN_SENTENCE_CHARS = 10;
+
+/**
+ * Split a reply into the sentences Piper would cut it into, grouped by word.
+ *
+ * The screen draws one line per sentence, and the grouping otherwise only
+ * arrives with the audio — so a reply already on screen would restack the
+ * moment its first segment landed. This mirrors the backend splitter closely
+ * enough that the grouping does not change when the audio catches up; where the
+ * two disagree the cost is exactly one reflow, which is what happened always
+ * before this existed.
+ */
+export function sentenceGroups(text: string): string[][] {
+  const trimmed = text.trim();
+  const sentences: string[] = [];
+  let start = 0;
+  for (let index = 0; index < trimmed.length; index += 1) {
+    if (!".!?".includes(trimmed[index])) continue;
+    const next = trimmed[index + 1];
+    // Punctuation at the very end is the tail below, not a cut.
+    if (next === undefined) break;
+    if (!/\s/.test(next)) continue;
+    if (trimmed[index] === "." && continuesAfterDot(trimmed, index)) continue;
+    // Too short to be its own line; it belongs with what follows.
+    if (index + 1 - start < MIN_SENTENCE_CHARS) continue;
+    sentences.push(trimmed.slice(start, index + 1));
+    start = index + 1;
+    while (start < trimmed.length && /\s/.test(trimmed[start])) start += 1;
+    index = start - 1;
+  }
+  const rest = trimmed.slice(start).trim();
+  if (rest) sentences.push(rest);
+  return sentences
+    .map((sentence) => sentence.split(/\s+/).filter(Boolean))
+    .filter((words) => words.length > 0);
+}
+
+/** True when a '.' is inside a number or an abbreviation rather than ending a
+ * sentence: "2.5" and "Rs." are mid-sentence, "250." is not. */
+function continuesAfterDot(text: string, dot: number): boolean {
+  let start = dot;
+  while (start > 0 && /[A-Za-z0-9]/.test(text[start - 1])) start -= 1;
+  const word = text.slice(start, dot);
+  if (word.length > 0 && /^\d+$/.test(word)) {
+    return /\d/.test(text[dot + 1] ?? "");
+  }
+  return NON_TERMINAL_ABBREVIATIONS.has(word.toLowerCase());
+}
+
 export interface SpeechQueue {
   /** Queue one sentence, with the timings that say when each of its words is
    * spoken. Segments play in push order regardless of decode order. */

@@ -13,6 +13,7 @@ import { bridge } from "../lib/bridge";
 import {
   createSpeechQueue,
   createVoiceCapture,
+  sentenceGroups,
   speakText,
   type SpeechQueue,
   type SpeechQueueCallbacks,
@@ -170,7 +171,6 @@ export function TalkScreen({
       return;
     }
     stopPlayback();
-    setSpokenSentences([]);
     setSpokenIndex(-1);
     setError(null);
     setState("speaking");
@@ -235,9 +235,12 @@ export function TalkScreen({
   function armSpeechQueue() {
     if (!bridge.onSpeechSegment) return;
     stopPlayback();
-    // Clear last turn's words now, not when the new ones arrive, so the screen
-    // never shows the previous reply with this reply's highlight on it.
-    setSpokenSentences([]);
+    // Drop the highlight, but leave the words: the previous reply stays on
+    // screen while Ella thinks, and clearing the grouping re-rendered that same
+    // text as one paragraph instead of one line per sentence — so the subtitles
+    // visibly re-centred the moment the learner stopped recording. Nothing can
+    // be highlighted in the meantime: the index is cleared here, and drawing
+    // the states at all requires that a clip be playing.
     setSpokenIndex(-1);
     const generation = playbackGeneration.current;
     speechQueue.current = {
@@ -576,9 +579,7 @@ export function TalkScreen({
   // turn's text has not arrived yet. Afterwards the two are the same sentence,
   // so which one renders is invisible.
   const promptSentences =
-    spokenSentences.length > 0
-      ? spokenSentences
-      : [prompt.split(/\s+/).filter(Boolean)].filter((words) => words.length > 0);
+    spokenSentences.length > 0 ? spokenSentences : sentenceGroups(prompt);
   // Words are only dimmed while a clip with timings is actually playing. There
   // is a beat of silence before Piper's first word, and treating that as "not
   // playing" would show the reply at full contrast and then dim it the instant

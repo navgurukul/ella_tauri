@@ -211,6 +211,20 @@ describe("Ella learner flow", () => {
 
       release?.({} as TurnResult);
       await waitFor(() => expect(held).toHaveResolved());
+
+      // Sending the next turn must not restack the reply already on screen.
+      // Clearing the grouping re-rendered the same words as one centred
+      // paragraph, so the subtitles jumped the moment recording stopped.
+      const settled = [...document.querySelectorAll(".talk-prompt .talk-sentence")].map(
+        (block) => block.textContent,
+      );
+      expect(settled).toHaveLength(2);
+      fireEvent.change(screen.getByLabelText("Your answer"), { target: { value: "It was hot" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
+      await waitFor(() => expect(held.mock.calls).toHaveLength(2));
+      expect(
+        [...document.querySelectorAll(".talk-prompt .talk-sentence")].map((b) => b.textContent),
+      ).toEqual(settled);
     } finally {
       held.mockRestore();
       delete (bridge as EllaBridge).onSpeechSegment;
