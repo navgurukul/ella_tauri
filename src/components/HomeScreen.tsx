@@ -13,7 +13,6 @@ import {
 } from "../lib/presentation";
 import type {
   AppSnapshot,
-  SessionListItem,
   Topic,
   TopicPresentation,
   TopicSlot,
@@ -51,9 +50,6 @@ export function HomeScreen({
   const grid = snapshot.topics.filter((topic) => topic.id !== featured?.id).slice(0, 6);
 
   const unfinished = unfinishedSession(snapshot);
-  const finished = snapshot.recent_sessions.filter((session) => session.status === "complete");
-
-  const topicById = (topicId: string) => snapshot.topics.find((topic) => topic.id === topicId);
 
   return (
     <div className="screen screen--home" data-screen="home">
@@ -192,65 +188,11 @@ export function HomeScreen({
               </div>
             </dl>
           </section>
-
-          {finished.length > 0 && (
-            <section className="card card--recent">
-              <p className="card__eyebrow card__eyebrow--dark">Recent talks</p>
-              <ul className="recent">
-                {finished.map((session) => (
-                  <RecentTalk
-                    key={session.id}
-                    session={session}
-                    topic={topicById(session.topic_id)}
-                    disabled={busy}
-                    onStart={onStart}
-                  />
-                ))}
-              </ul>
-            </section>
-          )}
         </aside>
       </div>
 
       <EllaMascot className="ella--corner-home" scale={0.7} rotate={-5} />
     </div>
-  );
-}
-
-/**
- * A finished conversation cannot be reopened — the backend refuses turns on it
- * — so the action here starts a fresh talk on the same topic.
- */
-function RecentTalk({
-  session,
-  topic,
-  disabled,
-  onStart,
-}: {
-  session: SessionListItem;
-  topic?: Topic;
-  disabled: boolean;
-  onStart: (topic: Topic) => void;
-}) {
-  const turns = Math.max(0, Math.floor((session.message_count - 1) / 2));
-  return (
-    <li className="recent__item">
-      <span className="recent__text">
-        <strong>{session.topic_label}</strong>
-        <small className="mono">
-          {turns} {turns === 1 ? "ANSWER" : "ANSWERS"}
-        </small>
-      </span>
-      {topic && (
-        <button
-          className="link-button"
-          disabled={disabled}
-          onClick={() => onStart(topic)}
-        >
-          Talk again
-        </button>
-      )}
-    </li>
   );
 }
 
