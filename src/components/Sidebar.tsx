@@ -2,7 +2,6 @@ import type { ReactElement } from "react";
 import { RotateCcw } from "lucide-react";
 import { EllaGlyph } from "./EllaMascot";
 import { initials } from "../lib/presentation";
-import type { LevelInfo } from "../types";
 
 export type NavKey = "home" | "talk";
 
@@ -38,13 +37,11 @@ const NAV: Array<{ key: NavKey; label: string; icon: ReactElement }> = [
 export function Sidebar({
   active,
   learnerName,
-  level,
   onNavigate,
   onReset,
 }: {
   active: NavKey;
   learnerName: string;
-  level: LevelInfo;
   onNavigate: (key: NavKey) => void;
   onReset: () => void;
 }) {
@@ -74,7 +71,6 @@ export function Sidebar({
           <span className="profile__avatar">{initials(learnerName)}</span>
           <span className="profile__text">
             <strong>{learnerName}</strong>
-            <small>Level {level.code}</small>
           </span>
           <button
             className="profile__reset"

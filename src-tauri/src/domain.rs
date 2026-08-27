@@ -179,6 +179,11 @@ pub struct TurnResult {
     pub ella_message: Message,
     pub correction: Option<String>,
     pub suggested_complete: bool,
+    /// `Some` once the conversation is over and the session has been closed for
+    /// the learner: the shell shows this instead of asking for another turn.
+    /// Without it the closing note fired on every turn past the sixth and the
+    /// conversation said goodbye again and again without ever ending.
+    pub session_summary: Option<SessionSummary>,
     pub audio: Option<AudioPayload>,
     pub timings: Option<TurnTimings>,
     pub ledger: Option<LedgerView>,

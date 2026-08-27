@@ -2,7 +2,6 @@ import { EllaMascot } from "./EllaMascot";
 import {
   BENTO_SLOTS,
   CATEGORY_LABEL,
-  levelInfo,
   recommendedTopicId,
   streak,
   topicMeta,
@@ -29,7 +28,6 @@ export function HomeScreen({
   onResume: (sessionId: string) => void;
 }) {
   const name = snapshot.learner?.name ?? "friend";
-  const level = levelInfo(snapshot.learner?.level_name);
   const digest = weeklyDigest(snapshot);
   const run = streak(snapshot.recent_sessions);
   // `streak` marks today "done" the moment there is a session for it, so a
@@ -72,7 +70,8 @@ export function HomeScreen({
                   Start talking
                 </button>
                 <span className="pill pill--ghost">
-                  {level.code} · {CATEGORY_LABEL[topicPresentation(featured.id).category].toLowerCase()}
+                  ~{topicPresentation(featured.id).minutes} min ·{" "}
+                  {CATEGORY_LABEL[topicPresentation(featured.id).category].toLowerCase()}
                 </span>
               </div>
             </section>
@@ -80,7 +79,7 @@ export function HomeScreen({
 
           <div className="section-head">
             <h3>Or pick another topic</h3>
-            <span>picked for Level {level.code}</span>
+            <span>picked for you</span>
           </div>
 
           <div className="bento">
@@ -140,7 +139,7 @@ export function HomeScreen({
             </ol>
             <p className="streak-foot">
               {talkedToday
-                ? "Nice — today is already done."
+                ? "Nice, today is already done."
                 : `Talk today to make it ${run.days + 1}!`}
             </p>
           </section>

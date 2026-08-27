@@ -7,15 +7,9 @@ import { Sidebar, type NavKey } from "./components/Sidebar";
 import { SummaryScreen } from "./components/SummaryScreen";
 import { TalkScreen } from "./components/TalkScreen";
 import { bridge } from "./lib/bridge";
-import { levelInfo, recommendedTopicId, unfinishedSession } from "./lib/presentation";
+import { recommendedTopicId, unfinishedSession } from "./lib/presentation";
 import type { VoiceCaptureResult } from "./lib/speech";
-import type {
-  AppSnapshot,
-  PlacementResult,
-  Session,
-  SessionSummary,
-  Topic,
-} from "./types";
+import type { AppSnapshot, Session, SessionSummary, Topic } from "./types";
 
 type Screen = "onboarding" | "home" | "talk" | "summary";
 
@@ -75,13 +69,13 @@ export default function App() {
   }
 
   /**
-   * The onboarding placement answer runs through the ordinary pipeline: a real
+   * The onboarding first answer runs through the ordinary pipeline: a real
    * session, a real voice turn, a real completion. Anything that fails along
-   * the way (no speech recognised, engines still warming) resolves to null and
-   * onboarding falls back to the default band.
+   * the way (no speech recognised, engines still warming) is swallowed —
+   * nothing is graded on it, so onboarding just carries on.
    */
-  async function handlePlacement(capture: VoiceCaptureResult): Promise<PlacementResult | null> {
-    if (!snapshot || capture.samples.length === 0) return null;
+  async function handlePlacement(capture: VoiceCaptureResult): Promise<void> {
+    if (!snapshot || capture.samples.length === 0) return;
     let startedId: string | null = null;
     try {
       const created = await bridge.startSession(recommendedTopicId(snapshot));
@@ -104,11 +98,9 @@ export default function App() {
             }
           : current,
       );
-      return { level: levelInfo(snapshot.learner?.level_name).code };
     } catch {
       // Never leave a half-open placement talk waiting on the home screen.
       if (startedId) await bridge.completeSession(startedId).catch(() => undefined);
-      return null;
     }
   }
 
@@ -207,15 +199,12 @@ export default function App() {
     );
   }
 
-  const level = levelInfo(snapshot.learner?.level_name);
-
   return (
     <div className={`shell ${screen === "talk" ? "shell--immersive" : ""}`.trim()}>
       {screen !== "talk" && (
         <Sidebar
           active={NAV_FOR[screen]}
           learnerName={snapshot.learner?.name ?? "friend"}
-          level={level}
           onNavigate={handleNavigate}
           onReset={handleReset}
         />
@@ -233,7 +222,6 @@ export default function App() {
           <TalkScreen
             key={session.id}
             session={session}
-            snapshot={snapshot}
             onSessionChange={setSession}
             onComplete={handleComplete}
           />

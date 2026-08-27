@@ -3,7 +3,6 @@ import { LoaderCircle } from "lucide-react";
 import { EllaMascot, VoiceMeter, type EllaState } from "./EllaMascot";
 import { MicGlyph } from "./HomeScreen";
 import { createVoiceCapture, type VoiceCaptureResult } from "../lib/speech";
-import type { PlacementResult } from "../types";
 
 export type ObStep = "welcome" | "name" | "age" | "miccheck" | "placement";
 
@@ -25,7 +24,7 @@ export function OnboardingFlow({
   /** Persists the learner; resolves false when the backend rejected the name. */
   onSaveLearner: (name: string, age: number | null) => Promise<boolean>;
   /** Runs the recorded first answer as a real conversation turn. */
-  onPlacement: (capture: VoiceCaptureResult) => Promise<PlacementResult | null>;
+  onPlacement: (capture: VoiceCaptureResult) => Promise<void>;
   onDone: () => void;
 }) {
   const [step, setStep] = useState<ObStep>("welcome");
@@ -241,7 +240,7 @@ const MIC_HINT: Record<MicState, string> = {
   idle: "Tap the mic and say hello",
   requesting: "Opening your microphone…",
   listening: "Listening… say anything",
-  done: "Perfect — Ella can hear you.",
+  done: "Perfect! Ella can hear you.",
   error: "Let’s try that once more",
 };
 
@@ -319,7 +318,7 @@ function MicCheckStep({ onNext }: { onNext: () => void }) {
 
   const ellaState: EllaState =
     mic === "requesting" ? "thinking" : mic === "listening" ? "listening" : "resting";
-  const hint = mic === "listening" && heardSignal ? "I hear you — that sounds clear!" : MIC_HINT[mic];
+  const hint = mic === "listening" && heardSignal ? "I hear you, that sounds clear!" : MIC_HINT[mic];
 
   return (
     <div className="ob-step" data-screen="onboarding-miccheck">
@@ -398,10 +397,11 @@ function MicCheckStep({ onNext }: { onNext: () => void }) {
 type PlacementCall = "prompt" | "listening" | "working" | "done";
 
 /**
- * The placement talk. Ella asks one open question and the recorded answer runs
- * through the ordinary pipeline as a real first conversation, so the level
- * shown afterwards reflects a turn the learner actually took. Skipping, or
- * having no microphone, falls back to the app's default band.
+ * The first talk. Ella asks one open question and the recorded answer runs
+ * through the ordinary pipeline as a real conversation, so the learner arrives
+ * home having already spoken once. Skipping, or having no microphone, simply
+ * moves on. Nothing is graded: the proficiency level this step used to
+ * announce left with the garden and is being rethought.
  */
 function PlacementStep({
   greetName,
@@ -411,12 +411,10 @@ function PlacementStep({
 }: {
   greetName: string;
   busy: boolean;
-  onPlacement: (capture: VoiceCaptureResult) => Promise<PlacementResult | null>;
+  onPlacement: (capture: VoiceCaptureResult) => Promise<void>;
   onDone: () => void;
 }) {
   const [call, setCall] = useState<PlacementCall>("prompt");
-  const [level, setLevel] = useState(0);
-  const [result, setResult] = useState<PlacementResult | null>(null);
   const voice = useRef(createVoiceCapture());
 
   useEffect(
@@ -430,14 +428,13 @@ function PlacementStep({
     if (call === "done" || call === "working") return;
     if (call === "listening") {
       setCall("working");
-      setLevel(0);
       const capture = await voice.current.stop();
-      setResult(await onPlacement(capture));
+      await onPlacement(capture);
       setCall("done");
       return;
     }
     try {
-      await voice.current.start(() => undefined, setLevel);
+      await voice.current.start(() => undefined, () => undefined);
       setCall("listening");
     } catch {
       // No microphone here — the answer is optional, so move on gracefully.
@@ -450,11 +447,7 @@ function PlacementStep({
   return (
     <div className="screen screen--talk ob-placement" data-screen="onboarding-placement">
       <header className="talk-head">
-        <span className="pill pill--white">
-          First talk
-          <span className="pill__dot">·</span>
-          <b className="pill__accent">Ella finds your level</b>
-        </span>
+        <span className="pill pill--white">First talk</span>
         <button className="btn btn--quiet" onClick={onDone} disabled={busy || call === "working"}>
           Skip for now
         </button>
@@ -464,10 +457,6 @@ function PlacementStep({
         {call === "done" ? (
           <>
             <p className="talk-prompt">That was lovely, {greetName}!</p>
-            <p className="level-badge">
-              <span className="mono">YOUR LEVEL</span>
-              <b>{result?.level ?? "A2"}</b>
-            </p>
             <button className="btn btn--green" onClick={onDone} disabled={busy}>
               Start talking
             </button>
@@ -503,10 +492,6 @@ function PlacementStep({
                   <MicGlyph />
                 </button>
               </div>
-              <p className="mic-hint">
-                {call === "listening" ? "Listening… tap when you finish" : "Tap to speak"}
-              </p>
-              {call === "listening" && <VoiceMeter level={level} />}
             </div>
           )}
         </EllaMascot>

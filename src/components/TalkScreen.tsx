@@ -4,7 +4,6 @@ import {
   EllaMascot,
   SpeakingWave,
   ThinkingDots,
-  VoiceMeter,
   type EllaReaction,
   type EllaState,
 } from "./EllaMascot";
@@ -55,6 +54,9 @@ export function TalkScreen({
   const [micStarting, setMicStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastTurn, setLastTurn] = useState<TurnResult | null>(null);
+  /** Held from the moment the last turn arrives until Ella has finished saying
+   * it, so the summary does not replace the screen mid-sentence. */
+  const [pendingSummary, setPendingSummary] = useState<SessionSummary | null>(null);
   const [reaction, setReaction] = useState<EllaReaction>(null);
   // Ella's words in speaking order, and which one she is on. Both arrive with
   // the audio, sentence by sentence, so the reply appears as it is spoken
@@ -198,6 +200,17 @@ export function TalkScreen({
   }
 
   /** What every queue on this screen reports back, live turn or replay alike. */
+  // A conversation that has reached its last turn ends itself. The session is
+  // already closed in the database by the time the turn arrives, so all that is
+  // left is to wait for Ella to stop speaking and show the summary — rather
+  // than leave the microphone open and let her wish the learner well again on
+  // every further turn, which is what the cab transcript did.
+  useEffect(() => {
+    if (!pendingSummary) return;
+    if (state === "speaking" || state === "thinking") return;
+    onComplete(pendingSummary);
+  }, [pendingSummary, state, onComplete]);
+
   function queueCallbacks(generation: number, label: string): SpeechQueueCallbacks {
     const live = (): boolean => mounted.current && playbackGeneration.current === generation;
     const rest = () => {
@@ -476,6 +489,10 @@ export function TalkScreen({
     });
     setLastTurn(result);
     flashReaction("success");
+    // The backend has already closed the session, but Ella's last line has not
+    // been heard yet. Hold the summary until she has finished saying it — see
+    // the effect below.
+    if (result.session_summary) setPendingSummary(result.session_summary);
     playElla(result.ella_message.content, result);
   }
 
@@ -700,7 +717,6 @@ export function TalkScreen({
                   type="button"
                   disabled={interactionLocked}
                   aria-pressed={state === "listening"}
-                  aria-describedby="talk-mic-hint"
                   aria-label={
                     micStarting
                       ? "Opening the microphone"
@@ -715,10 +731,6 @@ export function TalkScreen({
                   {micStarting ? <LoaderCircle className="spin" size={26} /> : <MicGlyph />}
                 </button>
               </div>
-              <p className="mic-hint" id="talk-mic-hint">
-                {micHint}
-              </p>
-              {state === "listening" && <VoiceMeter level={voiceLevel} />}
               <button
                 type="button"
                 className="link-button"

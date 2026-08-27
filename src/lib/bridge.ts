@@ -182,6 +182,25 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
     return session;
   };
 
+  /** Closes a session and builds its summary. Shared so a conversation that
+   * ends on its own last turn and one the learner ends by hand produce the
+   * same thing. */
+  const closeSession = (state: BrowserState, sessionId: string): SessionSummary => {
+    const session = getSessionOrThrow(state, sessionId);
+    session.status = "complete";
+    session.completed_at = new Date().toISOString();
+    state.conversations += 1;
+    const learners = session.messages.filter((message) => message.speaker === "learner");
+    return {
+      session_id: session.id,
+      topic_label: session.topic_label,
+      turns: learners.length,
+      headline:
+        learners.length >= 3 ? "You kept that conversation going" : "Every answer counts",
+      encouragement: `You kept a real conversation about ${session.topic_label.toLowerCase()} going. That is brave practice.`,
+    };
+  };
+
   const send = async (sessionId: string, text: string): Promise<TurnResult> => {
     const clean = text.trim();
     if (!clean) throw new Error("Say or type something first.");
@@ -206,12 +225,16 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
     };
     session.messages.push(learnerMessage, ellaMessage);
 
+    // Mirrors FREE_TOPIC_TURNS in engines.rs: the sixth turn is the last one,
+    // and the session closes itself rather than saying goodbye again.
+    const sessionSummary = turn >= 6 ? closeSession(state, session.id) : null;
     write(state);
     return {
       learner_message: learnerMessage,
       ella_message: ellaMessage,
       correction: gentleCorrection(clean),
       suggested_complete: turn >= 3,
+      session_summary: sessionSummary,
       // The browser bridge has no Piper, so nothing streams ahead of the turn
       // and there are no timings to highlight against.
       streamed_segments: 0,
@@ -278,20 +301,9 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
     },
     async completeSession(sessionId) {
       const state = read();
-      const session = getSessionOrThrow(state, sessionId);
-      session.status = "complete";
-      session.completed_at = new Date().toISOString();
-      state.conversations += 1;
-      const learners = session.messages.filter((message) => message.speaker === "learner");
+      const summary = closeSession(state, sessionId);
       write(state);
-      return {
-        session_id: session.id,
-        topic_label: session.topic_label,
-        turns: learners.length,
-        headline:
-          learners.length >= 3 ? "You kept that conversation going" : "Every answer counts",
-        encouragement: `You kept a real conversation about ${session.topic_label.toLowerCase()} going. That is brave practice.`,
-      };
+      return summary;
     },
     async resetDemoData() {
       storage.removeItem(storageKey);

@@ -122,6 +122,9 @@ export interface TurnResult {
   ella_message: Message;
   correction?: string | null;
   suggested_complete: boolean;
+  /** Set once the conversation is over and the backend has already closed the
+   * session. The shell shows the summary instead of asking for another turn. */
+  session_summary?: SessionSummary | null;
   audio?: AudioPayload | null;
   timings?: TurnTimings | null;
   ledger?: LedgerView | null;

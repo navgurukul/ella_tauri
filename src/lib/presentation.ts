@@ -6,7 +6,7 @@
  * Derived from real data:  level ratio, skills done/total, weekly talks and
  *                          blooms, unit states for the first three units, the
  *                          streak length and week strip.
- * Placeholder (marked):    CEFR band, "new words" count, unit names and their
+ * Placeholder (marked):    the "new words" count, unit names and their
  *                          coordinates on the path, per-topic category and
  *                          duration.
  *
@@ -15,7 +15,7 @@
  */
 import type {
   AppSnapshot,
-  LevelInfo,
+  Learner,
   SessionListItem,
   Streak,
   StreakDay,
@@ -24,12 +24,6 @@ import type {
   TopicSlot,
   WeeklyDigest,
 } from "../types";
-
-/** PLACEHOLDER — the backend stores a level name, not a CEFR band. */
-const CEFR_BY_LEVEL_NAME: Record<string, string> = {
-  "Morning Meadow": "A2",
-};
-const DEFAULT_CEFR = "A2";
 
 /** PLACEHOLDER — no vocabulary ledger exists yet, so this is a stand-in figure. */
 const WORDS_PER_EVIDENCE = 3;
@@ -132,15 +126,6 @@ export const CATEGORY_LABEL: Record<TopicPresentation["category"], string> = {
 export function topicMeta(topicId: string): string {
   const presentation = topicPresentation(topicId);
   return `${CATEGORY_LABEL[presentation.category]} · ~${presentation.minutes} MIN`;
-}
-
-/**
- * The CEFR band shown beside the learner's name. Still a PLACEHOLDER map off
- * `level_name`; the skill-derived progress that used to ride along here left
- * with the garden, and how progress is shown is being rethought.
- */
-export function levelInfo(levelName?: string): LevelInfo {
-  return { code: CEFR_BY_LEVEL_NAME[levelName ?? ""] ?? DEFAULT_CEFR };
 }
 
 const DAY_INITIALS = ["S", "M", "T", "W", "T", "F", "S"];

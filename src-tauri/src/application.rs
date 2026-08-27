@@ -17,7 +17,7 @@ use crate::{
     infrastructure::{
         audio::{quietest_cut_index, trim_to_speech},
         database::Database,
-        engines::{SpeechSegment, SpeechSink, TutorEngine},
+        engines::{SpeechSegment, SpeechSink, TutorEngine, FREE_TOPIC_TURNS},
     },
     telemetry::LatencyTrace,
 };
@@ -823,11 +823,35 @@ impl AppService {
             None => turn >= 3,
         };
 
+        // Over for good, not merely a fine place to stop. Ella has just spoken
+        // the closing line `free_closing_note` asked her for, so the session is
+        // closed here instead of waiting for a button nothing was pressing:
+        // that note fires on every turn from `FREE_TOPIC_TURNS` onward, and
+        // with nothing acting on it the cab conversation wished the learner
+        // well on turn 6 and then again on turn 7.
+        //
+        // Only the hard endings close the session. `[DEAL]` is deliberately not
+        // one of them: the deposit bench ran one more turn after signing off and
+        // spent it on "Thank you for understanding", which is a conversation
+        // ending the way conversations do. `suggested_complete` already offers
+        // the learner the way out at that point.
+        let conversation_over = match chore_context.as_ref() {
+            Some(context) => turn >= context.max_turns,
+            None => turn >= FREE_TOPIC_TURNS,
+        };
+        // `persist_turn` above already wrote this turn, so the summary counts it.
+        let session_summary = if conversation_over {
+            Some(self.complete_session(session_id)?)
+        } else {
+            None
+        };
+
         Ok(TurnResult {
             learner_message,
             ella_message,
             correction: gentle_correction(clean),
             suggested_complete,
+            session_summary,
             audio,
             timings: None,
             ledger: ledger_view,
@@ -1059,6 +1083,37 @@ mod tests {
         assert_eq!(saved.messages.len(), 3);
         assert_eq!(saved.messages[1].speaker, Speaker::Learner);
         assert_eq!(saved.messages[2].speaker, Speaker::Ella);
+    }
+
+    #[test]
+    fn a_free_conversation_closes_itself_on_its_last_turn() {
+        // The cab transcript wished the learner well on turn 6 and again on
+        // turn 7, because `free_closing_note` said "this is your last reply"
+        // from turn 6 onward and nothing ever ended the session.
+        let service = service();
+        service.save_learner("Souvik", Some(16)).unwrap();
+        let session = service.start_session("booking-a-cab").unwrap();
+        for turn in 1..FREE_TOPIC_TURNS {
+            let result = service.send_text_turn(&session.id, "I need to go to the station").unwrap();
+            assert!(
+                result.session_summary.is_none(),
+                "turn {turn} is not the end of the conversation"
+            );
+        }
+        let last = service
+            .send_text_turn(&session.id, "Thank you, see you tomorrow")
+            .unwrap();
+        let summary = last
+            .session_summary
+            .expect("the last turn has to hand back a summary");
+        assert_eq!(summary.turns, FREE_TOPIC_TURNS);
+        assert_eq!(service.get_session(&session.id).unwrap().status, "complete");
+        // And no seventh goodbye: the session is closed, so there is no turn
+        // left to say one on.
+        assert!(
+            service.send_text_turn(&session.id, "Hello again").is_err(),
+            "a closed conversation cannot be spoken to"
+        );
     }
 
     #[test]

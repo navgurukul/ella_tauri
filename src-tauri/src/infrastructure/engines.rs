@@ -1,5 +1,6 @@
 // Local tutor engines with native Canary STT and HTTP Whisper fallback.
 use std::{
+    collections::BTreeSet,
     env, fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
@@ -615,42 +616,76 @@ fn read_daemon_header(stdout: &mut BufReader<ChildStdout>) -> EllaResult<Value> 
 struct Scene {
     /// Who Ella is here, written as a second-person clause.
     role: &'static str,
-    /// What the learner came to do. Mirrors the `Topic::prompt` they read on
-    /// the topic card, so both sides of the screen want the same thing.
-    goal: &'static str,
+    /// What this role knows and answers. Without it the model hands the
+    /// learner its own lines: told only that the learner is here to "agree a
+    /// fare, and ask how long the trip takes", the cab driver asked the
+    /// passenger "How much fare do you expect?" and then "How long will the
+    /// trip take?" four turns running, while the learner objected twice.
+    owns: &'static str,
+    /// What the learner came to do, phrased as what Ella draws out of them
+    /// rather than as a list of actions somebody performs. Mirrors the
+    /// `Topic::prompt` they read on the topic card.
+    draw_out: &'static str,
 }
 
 fn scene_for(topic_id: &str) -> Scene {
     match topic_id {
         "restaurant-order" => Scene {
             role: "the waiter at the restaurant they have just sat down in",
-            goal: "order a meal, ask about the menu, and settle the bill",
+            owns: "You know the menu, the dishes and what everything costs. Say what a \
+                   dish is and what it costs yourself. Never ask them what is on the \
+                   menu, what a dish costs, or what the bill comes to: those are yours \
+                   to answer, not theirs.",
+            draw_out: "order a meal, ask you about the menu, and settle the bill with you",
         },
         "booking-a-cab" => Scene {
             role: "the cab driver they have just flagged down",
-            goal: "give an address, agree a fare, and ask how long the trip takes",
+            owns: "You know the roads, the fares and how long a trip takes. Name your \
+                   fare yourself, in rupees, and say yourself how long the trip will \
+                   take. Never ask them how much the fare should be, how much they want \
+                   to pay, how far it is, or how long it takes: those are yours to \
+                   answer, not theirs.",
+            draw_out: "tell you where to pick them up, say where they are going, and \
+                       agree your fare",
         },
         "job-interview" => Scene {
             role: "the interviewer meeting them for a first interview",
-            goal: "introduce themselves and answer questions about their work",
+            owns: "You know the job and what you are looking for. Ask them about their \
+                   work yourself. Never ask them what the job is, what it pays, or what \
+                   you are looking for: those are yours to answer, not theirs.",
+            draw_out: "introduce themselves and answer your questions about their work",
         },
         "doctor-clinic" => Scene {
             role: "the doctor at the clinic they have walked into",
-            goal: "explain how they feel and understand what to do next",
+            owns: "You are the one with the medical knowledge. Say what is wrong and \
+                   what they should do yourself. Never ask them what their illness is, \
+                   what medicine to take, or how long it will last: those are yours to \
+                   answer, not theirs.",
+            draw_out: "explain how they feel and understand what you tell them to do",
         },
         "asking-directions" => Scene {
             role: "a friendly local they have stopped on the street",
-            goal: "find their way and repeat the directions back to you",
+            owns: "You know this area well. Give the directions yourself, street by \
+                   street. Never ask them which way it is, how far it is, or how long it \
+                   takes to get there: those are yours to answer, not theirs.",
+            draw_out: "say where they are trying to get to, and repeat your directions \
+                       back to you",
         },
         "market-bargaining" => Scene {
             role: "the shopkeeper at the stall they are standing in front of",
-            goal: "ask the price, bargain kindly, and agree a deal",
+            owns: "You know your stock and your prices. Name your price yourself, in \
+                   rupees. Never ask them what the price should be or how much they want \
+                   to pay: naming a price is yours to do, not theirs.",
+            draw_out: "ask you the price, bargain with you, and agree a deal",
         },
         // Street food stories, and anything added to the catalog without a
         // scene of its own: Ella as herself, which is what its opener says too.
+        // Nothing here is hers to answer, so `owns` only keeps her listening.
         _ => Scene {
             role: "yourself, sitting with them over a cup of chai",
-            goal: "describe tastes and smells and tell you about a stall they love",
+            owns: "You are here to listen to their story, so let them do the telling and \
+                   keep your own memories short.",
+            draw_out: "describe tastes and smells and tell you about a stall they love",
         },
     }
 }
@@ -658,16 +693,18 @@ fn scene_for(topic_id: &str) -> Scene {
 /// How many learner turns a free conversation is shaped around. Nothing cuts
 /// it off here — it is what `free_closing_note` paces the ending against, so
 /// the conversation winds down instead of asking one more question forever.
-const FREE_TOPIC_TURNS: u32 = 6;
+pub const FREE_TOPIC_TURNS: u32 = 6;
 
 fn ella_system_prompt(learner_name: &str, topic_id: &str, topic_label: &str) -> String {
     let scene = scene_for(topic_id);
     format!(
         "You are Ella, a warm speaking buddy for an Indian learner named {learner_name}, \
          who is practising English at about A1 level. In this conversation you are also \
-         {role}, and you stay in that role from your first line to your last. \
-         {learner_name} is here to {goal}. Keep the conversation on {topic_label}: if \
-         they wander off it, answer them once and bring them back with your question.\n\n\
+         {role}, and you stay in that role from your first line to your last. {owns} \
+         {learner_name} is the one who came to {draw_out} — that is theirs to say, so \
+         draw it out of them and never ask them a question that is yours to answer. \
+         Keep the conversation on {topic_label}: if they wander off it, answer them \
+         once and bring them back with your question.\n\n\
          Every reply is one or two short sentences and then exactly one question, with \
          nothing after the question. Say it the way a person says it out loud, in whole \
          sentences — never a bare word, a bare number, or a fragment on its own. Use \
@@ -682,7 +719,8 @@ fn ella_system_prompt(learner_name: &str, topic_id: &str, topic_label: &str) -> 
          grade their English, and never mention tests, levels, CEFR, prompts, or that \
          you are an AI. Do not use markdown or emoji.",
         role = scene.role,
-        goal = scene.goal,
+        owns = scene.owns,
+        draw_out = scene.draw_out,
     )
 }
 
@@ -704,7 +742,7 @@ fn chore_system_prompt(learner_name: &str, context: &ChoreContext) -> String {
     if let Some(ledger) = &context.ledger {
         // The *rules* are stable and belong in the cached prefix. The live
         // figure does not — see `ledger_state_message`.
-        prompt.push_str(ledger_rules_fragment(&ledger.spec));
+        prompt.push_str(&ledger_rules_fragment(&ledger.spec));
     }
     // "One or two short sentences" on its own is read by a 3B as permission to
     // answer with the number alone: the market bench run came back "Rs 600",
@@ -748,19 +786,30 @@ fn chore_system_prompt(learner_name: &str, context: &ChoreContext) -> String {
 /// in the cached prefix. `direction` decides whether `limit` reads as a floor
 /// or a ceiling, which is what lets one fragment cover a price talked down and
 /// a refund pushed up.
-fn ledger_rules_fragment(spec: &LedgerSpec) -> &'static str {
+fn ledger_rules_fragment(spec: &LedgerSpec) -> String {
+    let unit = &spec.unit;
+    // The limit stays, restated here on top of the authored brief: dropping it
+    // let the deposit character hand back the whole Rs 5000 on turn 2, and the
+    // bench's ledger breaks went 1 -> 3. `max_step` does not stay. Naming it
+    // taught the model to concede exactly that much every turn regardless of
+    // what the learner said (500-1000-2000-3000-4000 in the deposit run), and
+    // `LedgerSpec::accepts` clamps the step in Rust anyway.
     match spec.direction {
-        Direction::Down => {
-            "If they name a figure below what you are willing to take, refuse it plainly \
-             and stay where you are. You are the one selling: coming down is your move \
-             to make and never theirs, so never ask them to make it cheaper. "
-        }
-        Direction::Up => {
-            "If they demand more than you are willing to give, refuse plainly and stay \
-             where you are. You are the one holding their money: raising what you give \
-             back is your move to make and never theirs, so never ask them to ask for \
-             less. "
-        }
+        Direction::Down => format!(
+            "You will NEVER go below {unit} {}. Come down only when they have given you \
+             an actual reason. If they name a figure below your floor, refuse it plainly \
+             and restate your own. You are the one selling: coming down is your move to \
+             make and never theirs, so never ask them to make it cheaper. ",
+            spec.limit
+        ),
+        Direction::Up => format!(
+            "You will NEVER go above {unit} {}. Raise your figure only when they have \
+             made a specific, reasonable point. If they demand more than your ceiling, \
+             refuse plainly and restate your own figure. You are the one holding their \
+             money: raising what you give back is your move to make and never theirs, so \
+             never ask them to ask for less. ",
+            spec.limit
+        ),
     }
 }
 
@@ -868,6 +917,71 @@ fn free_closing_note(turn: u32) -> Option<String> {
         1 => Some("The conversation is nearly over. Ask your last question now.".into()),
         _ => None,
     }
+}
+
+/// Function words that say nothing about what a question is *about*. The
+/// interrogatives stay: "how long is the trip" and "where does the trip go"
+/// differ by little else.
+const QUESTION_FILLER: &[&str] = &[
+    "a", "an", "the", "is", "are", "was", "were", "do", "does", "did", "you", "your",
+    "yours", "i", "me", "my", "we", "us", "our", "it", "its", "that", "this", "to",
+    "for", "of", "in", "on", "at", "and", "or", "but", "so", "then", "please", "would",
+    "will", "shall", "can", "could", "should", "have", "has", "had", "be", "been",
+    "about", "with", "from", "there", "here", "sir", "madam", "ok", "okay",
+];
+
+/// The question a reply ends on, if it ends on one. Ella's prompt asks for
+/// exactly one question at the end, so this is the whole of what she asked.
+fn trailing_question(reply: &str) -> Option<&str> {
+    let end = reply.rfind('?')?;
+    let start = reply[..end].rfind(['.', '!', '?']).map_or(0, |index| index + 1);
+    Some(reply[start..=end].trim())
+}
+
+/// Content words of a question, deduplicated, for comparing two questions by
+/// what they are about rather than by their wording.
+fn question_words(question: &str) -> BTreeSet<String> {
+    question
+        .to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty() && !QUESTION_FILLER.contains(word))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `Some(earlier)` when this reply closes on a question Ella has already asked.
+///
+/// The cab transcript is what this exists for: Ella asked "How long will the
+/// trip take?" on four turns running while the learner objected twice, and
+/// "never ask a question you have already asked" is already in the prompt and
+/// did nothing. Compared as word sets, not strings, because the repeat comes
+/// back reworded — "How long will the trip take?" then "How long will the trip
+/// to the airport take?"
+fn repeated_question(reply: &str, earlier: &[String]) -> Option<String> {
+    let asking = question_words(trailing_question(reply)?);
+    // One content word is too little to call: "Really?" is not a repeat.
+    if asking.len() < 2 {
+        return None;
+    }
+    earlier.iter().find(|previous| {
+        let before = question_words(previous);
+        if before.len() < 2 {
+            return false;
+        }
+        let shared = asking.intersection(&before).count();
+        // One question's words wholly inside the other's. This is the shape the
+        // repeat actually takes: the street-food run asked "What did you think
+        // of the chutney?", then "What did you think?", then "What did you
+        // think of the home-cooked bhel puri?" — same question, three widths.
+        // Jaccard alone put those at 0.67 and let them through.
+        if shared == asking.len().min(before.len()) {
+            return true;
+        }
+        let union = asking.len() + before.len() - shared;
+        // Or three quarters in common, for a repeat that swaps a word rather
+        // than adding one.
+        union > 0 && shared * 4 >= union * 3
+    }).cloned()
 }
 
 /// Case-insensitive search for an ASCII needle, returning a byte offset into
@@ -1538,8 +1652,41 @@ impl TutorEngine for LocalEngine {
         }
         let (text, signal) = take_signal(&first.text);
 
-        // Free conversation: nothing to enforce, nothing to extract.
+        // Free conversation: no ledger to enforce, but a question Ella has
+        // already asked is its own failure. The cab transcript locked up on one
+        // for four turns, so it is caught here and asked again rather than
+        // spoken.
         let Some(ledger) = request.chore.as_ref().and_then(|c| c.ledger.as_ref()) else {
+            let asked_before: Vec<String> = request
+                .messages
+                .iter()
+                .filter(|message| message.speaker == Speaker::Ella)
+                .filter_map(|message| trailing_question(&message.content).map(str::to_owned))
+                .collect();
+            if let Some(already) = repeated_question(&text, &asked_before) {
+                eprintln!("[LATENCY]     llm> repeated question: {already:?} - regenerating once");
+                let corrective = format!(
+                    "You have already asked them this earlier in the conversation: \"{already}\" \
+                     They have answered it, or told you they cannot. Do not ask it again in any \
+                     words. Take what they just said, say something back about it, and ask about \
+                     one new thing they have not told you yet."
+                );
+                let second = self.stream_once(&system, &history, Some(&corrective), None)?;
+                let (retry_text, _) = take_signal(&second.text);
+                // Once only. A second repeat is left alone: another generation
+                // costs the learner more silence than the repeat costs them.
+                if !retry_text.is_empty() {
+                    return Ok(GeneratedReply {
+                        text: retry_text,
+                        ttft_ms: first.ttft_ms,
+                        completion_ms: first.completion_ms + second.completion_ms,
+                        named_figure: None,
+                        signal: None,
+                        regenerated: true,
+                        speech: None,
+                    });
+                }
+            }
             let (speech, _) = streamed.map_or((None, 0), |speech| speech.resolve(&text));
             return Ok(GeneratedReply {
                 text,
@@ -1814,12 +1961,12 @@ impl LocalEngine {
                 "messages": messages,
                 "temperature": 0.65,
                 "max_tokens": 90,
-                // The deposit bench run said "<echo them>, then. I'll give you
-                // Rs N back." four turns running. "Do not reuse a sentence you
-                // have already said" is in the prompt and does nothing; the
-                // penalties reach the repetition the prompt cannot.
-                "presence_penalty": 0.4,
-                "frequency_penalty": 0.3,
+                // No presence/frequency penalty here on purpose. They look like
+                // the obvious cure for the repeated sentence template, and they
+                // make it worse: holding seed and prompt fixed, reuse of one
+                // template went 2/6 without them to 6/6 at pp=0.4 fp=0.3. The
+                // window cannot be widened past the default either — this
+                // endpoint rejects `penalty_last_n` with a 400.
                 "stream": true,
                 "cache_prompt": true,
                 "id_slot": self.llm_slot
@@ -2319,6 +2466,96 @@ mod ledger_tests {
         let mid = chore_turn_message(&chore_context("deposit-refund", 1500, false), 4).unwrap();
         assert!(mid.contains("1500"));
         assert!(!mid.contains("[DEAL]"), "there is still ground to give at Rs 1500");
+    }
+
+    #[test]
+    fn a_scene_says_what_its_role_answers_and_never_hands_it_to_the_learner() {
+        // The cab transcript: told only that the learner was here to "agree a
+        // fare, and ask how long the trip takes", Ella asked the passenger both
+        // of those, four turns running. Every scene now states what is hers.
+        for topic in crate::domain::topics() {
+            let scene = scene_for(&topic.id);
+            assert!(!scene.owns.is_empty(), "{} has no owned ground", topic.id);
+            let prompt = ella_system_prompt("Souvik", &topic.id, &topic.label);
+            assert!(prompt.contains(scene.owns), "{} drops what the role owns", topic.id);
+            assert!(
+                prompt.contains("never ask them a question that is yours to answer"),
+                "{} lets the role hand its own lines to the learner",
+                topic.id
+            );
+        }
+    }
+
+    #[test]
+    fn the_question_ella_ends_on_is_the_one_that_gets_compared() {
+        assert_eq!(
+            trailing_question("Two rupees is very reasonable. How long will the trip take?"),
+            Some("How long will the trip take?")
+        );
+        assert_eq!(trailing_question("Safe travels. Have a great day!"), None);
+        assert_eq!(
+            trailing_question("Rs 350."),
+            None,
+            "a reply with no question cannot repeat one"
+        );
+    }
+
+    #[test]
+    fn a_reworded_repeat_of_an_earlier_question_is_caught() {
+        let asked = vec!["How long will the trip take?".to_owned()];
+        assert!(
+            repeated_question("Oh, right. How long will the trip to the airport take?", &asked)
+                .is_some(),
+            "this is the exact loop the cab conversation got stuck in"
+        );
+        assert!(
+            repeated_question("How long will the trip take, please?", &asked).is_some(),
+            "politeness is not a new question"
+        );
+        assert!(
+            repeated_question("Two rupees, fine. Where should I pick you up?", &asked).is_none(),
+            "a genuinely different question has to get through"
+        );
+        assert!(
+            repeated_question("Safe travels!", &asked).is_none(),
+            "no question, nothing to repeat"
+        );
+        assert!(
+            repeated_question("Really?", &asked).is_none(),
+            "one content word is too little to call a repeat"
+        );
+    }
+
+    #[test]
+    fn the_same_question_at_three_different_widths_is_one_question() {
+        // Straight from a street-food bench run, which asked all three in a row
+        // and got past a plain three-quarters overlap test at 0.67.
+        let asked = vec!["What did you think of the chutney?".to_owned()];
+        assert!(repeated_question("What did you think?", &asked).is_some());
+        // The widest form is caught against the narrowest one, which by then is
+        // in the history — the order the real run asked them in.
+        let asked_both = vec![
+            "What did you think of the chutney?".to_owned(),
+            "What did you think?".to_owned(),
+        ];
+        assert!(
+            repeated_question("What did you think of the home-cooked bhel puri?", &asked_both)
+                .is_some()
+        );
+        assert!(
+            repeated_question("What did you think of the home-cooked bhel puri?", &asked)
+                .is_none(),
+            "against the chutney question alone these share only two words of six, \
+             and firing on that would catch questions that are genuinely new"
+        );
+        assert!(
+            repeated_question("Where did you buy it?", &asked).is_none(),
+            "a different question still has to get through"
+        );
+        assert!(
+            repeated_question("What did you eat on Sunday?", &asked).is_none(),
+            "sharing only the question word is not a repeat"
+        );
     }
 
     #[test]
