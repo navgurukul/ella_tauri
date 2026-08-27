@@ -295,6 +295,8 @@ fn run_topic(options: &Options, topic_id: &str) -> Result<(), String> {
             .map_err(|error| format!("turn {} failed: {error}", index + 1))?;
         let total_ms = started.elapsed().as_secs_f64() * 1_000.0;
         let timings = result.timings.as_ref();
+        // Only the opening streams now; a reply is released whole, so the
+        // recorder stays empty here and `first_speech_ms` reads as "-".
         let (first_segment_ms, segments) = recorder.take();
         // Both clocks start within a millisecond of each other at the top of
         // the generation, so they compare directly: how long until Ella starts
@@ -331,7 +333,6 @@ fn run_topic(options: &Options, topic_id: &str) -> Result<(), String> {
             "total_ms": total_ms.round(),
             "llm_ttft_ms": timings.and_then(|t| t.llm_ttft_ms),
             "llm_completion_ms": timings.and_then(|t| t.llm_completion_ms),
-            "streamed_segments": result.streamed_segments,
             "first_speech_ms": first_segment_ms.map(|ms| ms.round()),
             "saved_ms": saved.map(|ms| ms.round()),
         }));
@@ -353,12 +354,6 @@ fn run_topic(options: &Options, topic_id: &str) -> Result<(), String> {
         .iter()
         .filter_map(|turn| turn["saved_ms"].as_f64())
         .collect();
-    // A turn whose whole reply is one sentence cannot start early: there is no
-    // earlier sentence to start on. Worth counting separately from a failure.
-    let single = turns
-        .iter()
-        .filter(|turn| turn["streamed_segments"].as_u64() == Some(1))
-        .count();
 
     println!("\n─── result ───");
     println!("turns                    {}", turns.len());
@@ -377,7 +372,7 @@ fn run_topic(options: &Options, topic_id: &str) -> Result<(), String> {
             "median head start        {:.0} ms   (Ella starts talking this much earlier)",
             median(&saved)
         );
-        println!("single-sentence replies  {single} (nothing to start early on)");
+
     }
 
     if let Some(path) = &options.output {

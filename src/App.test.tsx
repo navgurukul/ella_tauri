@@ -116,13 +116,13 @@ describe("Ella learner flow", () => {
   });
 
   /**
-   * Piper now speaks a sentence before the turn returns, which means the reply
-   * would otherwise be heard several seconds before it appeared on screen. The
-   * segment events carry their own text so it lands with the voice.
+   * The reply is released whole: its sentences are synthesized while the model
+   * writes but held back until all of them are ready. Nothing of it may reach
+   * the screen before then — a reply that arrives in pieces cannot be centred
+   * without the words already being read jumping as each piece lands.
    */
-  it("shows each sentence on screen as it is spoken, before the turn returns", async () => {
-    // The Tauri bridge streams; the browser one does not, so stand one in. It
-    // has to exist before the talk screen mounts, which is when it subscribes.
+  it("shows the whole reply at once when the turn returns, and nothing before", async () => {
+    // The opening streams, so the subscription exists; a reply must not use it.
     let emit: ((segment: SpeechSegment) => void) | undefined;
     (bridge as EllaBridge).onSpeechSegment = async (handler) => {
       emit = handler;
@@ -133,7 +133,8 @@ describe("Ella learner flow", () => {
     await onboard("Aarav");
     fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
     await screen.findByText("End talk");
-    // Hold the turn open so "before the turn returns" is a real claim.
+
+    // Hold the turn open so "before it returns" is a real claim.
     let release: ((result: TurnResult) => void) | undefined;
     let turnSession = "";
     const real = bridge.sendTextTurn.bind(bridge);
@@ -143,19 +144,21 @@ describe("Ella learner flow", () => {
         turnSession = sessionId;
         const result = await real(sessionId, text);
         return new Promise<TurnResult>((resolve) => {
-          release = () => resolve({ ...result, streamed_segments: 2 });
+          release = () => resolve(result);
         });
       });
 
     try {
+      const opening = promptText();
       fireEvent.click(screen.getByRole("button", { name: /type instead/i }));
       fireEvent.change(screen.getByLabelText("Your answer"), {
         target: { value: "I ate vada pav near the station" },
       });
       fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
-      await waitFor(() => expect(emit).toBeDefined());
+      await waitFor(() => expect(held.mock.calls).toHaveLength(1));
 
-      const opening = promptText();
+      // A stray segment mid-turn must not put anything on screen: no queue is
+      // open for a reply, so there is nothing for it to feed.
       emit?.({
         session_id: turnSession,
         turn: 1,
@@ -163,71 +166,22 @@ describe("Ella learner flow", () => {
         text: "That sounds delicious!",
         audio: { mime_type: "audio/wav", base64: "AAAA" },
         ready_ms: 900,
-        words: [
-          { text: "That", start_ms: 0, end_ms: 300 },
-          { text: "sounds", start_ms: 300, end_ms: 700 },
-          { text: "delicious!", start_ms: 700, end_ms: 1300 },
-        ],
+        words: [{ text: "That", start_ms: 0, end_ms: 300 }],
       });
-
-      // The sentence is on screen while the turn is still in flight.
-      await waitFor(() => expect(promptText()).toMatch(/that sounds delicious/i));
-      expect(promptText()).not.toBe(opening);
-      // Real spaces, not CSS-generated ones: the sentence must be readable and
-      // copyable, not run together.
-      expect(promptText()).toContain("That sounds delicious!");
-      // Every word is its own element so one of them can be marked.
-      expect(document.querySelectorAll(".talk-prompt .talk-word")).toHaveLength(3);
-
-      // The second sentence arrives while the first is still being spoken, and
-      // joins the same left-aligned paragraph. What matters is that the first
-      // sentence is untouched by it — a centred paragraph re-centred instead,
-      // which is what made "Sounds nice." jump sideways mid-read.
-      const first = document.querySelector(".talk-sentence")?.textContent;
-      emit?.({
-        session_id: turnSession,
-        turn: 1,
-        index: 1,
-        text: "What did you like about it?",
-        audio: { mime_type: "audio/wav", base64: "AAAA" },
-        ready_ms: 1600,
-        words: [
-          { text: "What", start_ms: 0, end_ms: 200 },
-          { text: "did", start_ms: 200, end_ms: 400 },
-          { text: "you", start_ms: 400, end_ms: 600 },
-          { text: "like", start_ms: 600, end_ms: 800 },
-          { text: "about", start_ms: 800, end_ms: 1000 },
-          { text: "it?", start_ms: 1000, end_ms: 1400 },
-        ],
-      });
-      await waitFor(() =>
-        expect(document.querySelectorAll(".talk-prompt .talk-sentence")).toHaveLength(2),
-      );
-      const blocks = document.querySelectorAll(".talk-prompt .talk-sentence");
-      expect(blocks[0].textContent).toBe(first);
-      expect(blocks[1].textContent).toBe("What did you like about it?");
-      // Sentences flow together, so a real space has to join them.
-      expect(promptText()).toContain("delicious! What did you like about it?");
-      // Word numbering continues across the sentence break, because the
-      // highlight counts words through the whole reply.
-      expect(document.querySelectorAll(".talk-prompt .talk-word")).toHaveLength(9);
+      expect(promptText()).toBe(opening);
 
       release?.({} as TurnResult);
-      await waitFor(() => expect(held).toHaveResolved());
+      await waitFor(() => expect(promptText()).toMatch(/that sounds delicious/i));
 
-      // Sending the next turn must not restack the reply already on screen.
-      // Clearing the grouping re-rendered the same words as one centred
-      // paragraph, so the subtitles jumped the moment recording stopped.
-      const settled = [...document.querySelectorAll(".talk-prompt .talk-sentence")].map(
-        (block) => block.textContent,
+      // Whole reply, in one piece, with every word its own element so one of
+      // them can be marked as spoken.
+      const shown = promptText();
+      expect(shown).toMatch(/who would you like to share that with/i);
+      expect(document.querySelectorAll(".talk-prompt .talk-word")).toHaveLength(
+        shown.split(/\s+/).filter(Boolean).length,
       );
-      expect(settled).toHaveLength(2);
-      fireEvent.change(screen.getByLabelText("Your answer"), { target: { value: "It was hot" } });
-      fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
-      await waitFor(() => expect(held.mock.calls).toHaveLength(2));
-      expect(
-        [...document.querySelectorAll(".talk-prompt .talk-sentence")].map((b) => b.textContent),
-      ).toEqual(settled);
+      // Real spaces, not CSS-generated ones, so the reply stays copyable.
+      expect(shown).toContain("That sounds delicious!");
     } finally {
       held.mockRestore();
       delete (bridge as EllaBridge).onSpeechSegment;

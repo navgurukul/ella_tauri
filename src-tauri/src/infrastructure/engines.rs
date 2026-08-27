@@ -48,9 +48,6 @@ pub struct GeneratedReply {
     /// while this reply was still generating. `None` means the caller has to
     /// synthesize `text` itself, exactly as before sentence streaming existed.
     pub speech: Option<SynthesizedAudio>,
-    /// How many sentences were streamed to the speaker mid-generation. Zero
-    /// means the learner heard nothing until the turn returned.
-    pub streamed_segments: u32,
 }
 
 impl GeneratedReply {
@@ -63,7 +60,6 @@ impl GeneratedReply {
             signal: None,
             regenerated: false,
             speech: None,
-            streamed_segments: 0,
         }
     }
 }
@@ -1202,15 +1198,13 @@ pub trait TutorEngine: Send + Sync {
 
     /// Generate one reply.
     ///
-    /// `speech` receives finished sentences while the rest of the reply is
-    /// still being written, so playback can start before the model stops.
-    /// Engines may ignore it; `GeneratedReply::speech` then stays `None` and
-    /// the caller synthesizes the whole reply itself.
-    fn reply(
-        &self,
-        request: &TutorRequest,
-        speech: Option<Arc<dyn SpeechSink>>,
-    ) -> EllaResult<GeneratedReply>;
+    /// Its sentences are synthesized while the rest is still being written, so
+    /// Piper's time overlaps the model's instead of following it — but none of
+    /// it reaches the learner until the whole reply is ready. Releasing
+    /// sentence by sentence got Ella talking sooner and was not worth it: the
+    /// text arrived in pieces, which meant it could not be centred without
+    /// jumping as each piece landed.
+    fn reply(&self, request: &TutorRequest) -> EllaResult<GeneratedReply>;
 
     /// The character's first line, in role. The default is an authored opener,
     /// which is what demo mode uses; `LocalEngine` generates it so the setting
@@ -1282,11 +1276,7 @@ impl TutorEngine for DemoEngine {
         Ok(opening_for(&topic.id, learner_name))
     }
 
-    fn reply(
-        &self,
-        request: &TutorRequest,
-        _speech: Option<Arc<dyn SpeechSink>>,
-    ) -> EllaResult<GeneratedReply> {
+    fn reply(&self, request: &TutorRequest) -> EllaResult<GeneratedReply> {
         let started = Instant::now();
         let lead = request
             .learner_text
@@ -1498,11 +1488,7 @@ impl TutorEngine for LocalEngine {
         Ok(text)
     }
 
-    fn reply(
-        &self,
-        request: &TutorRequest,
-        speech: Option<Arc<dyn SpeechSink>>,
-    ) -> EllaResult<GeneratedReply> {
+    fn reply(&self, request: &TutorRequest) -> EllaResult<GeneratedReply> {
         let system = match &request.chore {
             Some(context) => chore_system_prompt(&request.learner_name, context),
             None => ella_system_prompt(
@@ -1526,24 +1512,16 @@ impl TutorEngine for LocalEngine {
             );
         }
 
-        // A ledger turn can be thrown away and generated again, so nothing from
-        // it may reach the speaker before the figure has been checked. Every
-        // other turn is final the moment it is written, so its sentences can be
-        // spoken as they arrive. Sentence streaming needs the resident Piper:
-        // one-shot Piper reloads the voice per call, which would cost more per
-        // sentence than the whole reply saves.
-        let retractable = request
-            .chore
-            .as_ref()
-            .and_then(|context| context.ledger.as_ref())
-            .is_some();
+        // Sentences are synthesized as the model writes them but held back:
+        // Piper's time overlaps the model's, and the learner still gets the
+        // whole reply at once. Nothing streams, so a ledger turn that has to be
+        // generated again is no different from any other here.
+        //
+        // Needs the resident Piper; one-shot Piper reloads the voice per call,
+        // which would cost more per sentence than the overlap saves.
         let generation_started = Instant::now();
         let mut pipeline = self.piper_daemon.as_ref().map(|daemon| {
-            SpeechPipeline::start(
-                Arc::clone(daemon),
-                if retractable { None } else { speech },
-                generation_started,
-            )
+            SpeechPipeline::start(Arc::clone(daemon), None, generation_started)
         });
 
         let first = self.stream_once(&system, &history, None, pipeline.as_mut())?;
@@ -1562,8 +1540,7 @@ impl TutorEngine for LocalEngine {
 
         // Free conversation: nothing to enforce, nothing to extract.
         let Some(ledger) = request.chore.as_ref().and_then(|c| c.ledger.as_ref()) else {
-            let (speech, streamed_segments) =
-                streamed.map_or((None, 0), |speech| speech.resolve(&text));
+            let (speech, _) = streamed.map_or((None, 0), |speech| speech.resolve(&text));
             return Ok(GeneratedReply {
                 text,
                 ttft_ms: first.ttft_ms,
@@ -1572,7 +1549,6 @@ impl TutorEngine for LocalEngine {
                 signal,
                 regenerated: false,
                 speech,
-                streamed_segments,
             });
         };
 
@@ -1588,8 +1564,7 @@ impl TutorEngine for LocalEngine {
             let final_text = voiced(text, signal, &ledger.spec);
             // The figure held, so the audio synthesized ahead is the audio for
             // the reply being returned — unless `voiced` substituted the
-            // authored line for a wordless turn, which `resolve` catches. A
-            // ledger turn never streams, so the count is always zero.
+            // authored line for a wordless turn, which `resolve` catches.
             let (speech, _) = streamed.map_or((None, 0), |speech| speech.resolve(&final_text));
             return Ok(GeneratedReply {
                 speech,
@@ -1599,7 +1574,6 @@ impl TutorEngine for LocalEngine {
                 regenerated: false,
                 ttft_ms: first.ttft_ms,
                 completion_ms: first.completion_ms,
-                streamed_segments: 0,
             });
         }
         drop(streamed);
@@ -1645,7 +1619,6 @@ impl TutorEngine for LocalEngine {
                 ttft_ms: first.ttft_ms,
                 completion_ms: first.completion_ms + second.completion_ms,
                 speech: None,
-                streamed_segments: 0,
             });
         }
 
@@ -1661,7 +1634,6 @@ impl TutorEngine for LocalEngine {
             ttft_ms: first.ttft_ms,
             completion_ms: first.completion_ms + second.completion_ms,
             speech: None,
-            streamed_segments: 0,
         })
     }
     fn uses_native_stt(&self) -> bool {
@@ -2126,7 +2098,7 @@ mod tests {
                 learner_text: "I played football with friends".into(),
                 turn: 1,
                 chore: None,
-            }, None)
+            })
             .unwrap();
         assert!(reply.text.ends_with('?'));
         assert!(reply.text.len() < 180);
@@ -2163,7 +2135,7 @@ mod tests {
                 learner_text: transcript.text,
                 turn: 1,
                 chore: None,
-            }, None)
+            })
             .unwrap();
         assert!(!reply.text.is_empty());
         assert!(reply.text.contains('?'));

@@ -130,43 +130,33 @@ Canary adapter, so a future Parakeet streaming adapter does not change the
 application or UI contracts.
 
 Piper runs a sentence behind the language model rather than after it. Whole
-sentences leave the token stream as they complete, are synthesized on a worker
-thread, and reach the window as `ella://speech-segment` events, which the
-WebView plays back-to-back on one AudioContext clock. Ella starts talking
-roughly 300-700 ms before the reply has finished being written, and Piper is
-about nine times faster than speech, so playback never runs dry once it starts.
+sentences leave the token stream as they complete and are synthesized on a
+worker thread, so Piper's time overlaps the model's instead of following it —
+about 300 ms off a turn. They are held back until the whole reply is ready:
+released sentence by sentence, Ella started talking sooner still, but the text
+then arrived in pieces, and a reply that gains words cannot be centred without
+the words being read jumping as each piece lands. Ella's opening is the
+exception and does stream, because its text is on screen from the moment the
+conversation opens, so there is nothing to stage — `speak_opening` is a separate
+command from `start_session` so the screen appears before Piper is asked for
+anything.
 
-A turn that could still be thrown away does not stream: a ledger chore may
-regenerate its reply when the character breaks its own limit, so its sentences
-are synthesized ahead but held back, and the audio is only reused when it says
-exactly what the reply says. Nothing the learner hears is ever retracted.
+A turn that could be thrown away is safe either way: a ledger chore may
+regenerate its reply when the character breaks its own limit, and the audio is
+only reused when it says exactly what the reply says. Nothing the learner hears
+is ever retracted.
 
-Each segment carries its own text and word timings, so the reply appears on
-screen as it is spoken rather than arriving whole when the turn returns. Words
-Ella has not reached yet are dimmed rather than hidden: they hold their place so
-the line never re-wraps mid-sentence, they can be read ahead of the voice, and a
-sentence that Piper finishes mid-reply fades in faint instead of appearing at
-full contrast. The reply is one left-aligned paragraph
-with ordinary greedy wrapping inside a height-reserved block, because that is
-the only arrangement that can gain text without moving what is on screen: a
-centred line sits where its own content puts it, so "Sounds nice." jumped some
-170px left mid-read as "What did you like about it?" joined it, and balancing
-re-breaks every line in the paragraph. Giving each sentence its own line was
-stable too, but wrapped each one separately and read narrow. `sentenceGroups` in `lib/speech.ts` mirrors
-the backend splitter so a reply is already in its spoken shape before the audio
-reaches it; the two are kept in step by matching test cases on both sides, and
-where they disagree the cost is one reflow. Ella's opening goes through the same pipeline — `speak_opening`
-is a separate command from `start_session` so the conversation is on screen
-before Piper is asked for anything. Piper hands back audio without timings;
+The reply carries word timings, so the word being spoken is highlighted and the
+words ahead of it are dimmed. Piper hands back audio without timings, so
 `infrastructure/speech_timing.rs` estimates them from syllables, characters and
 punctuation, anchored to the sentence's exact duration and to the leading and
 trailing silence measured off the PCM. Fitted and measured against real Piper
-phoneme alignments: onset error mean ~70 ms, p90 ~160 ms, roughly three
-quarters of words inside 100 ms. Swapping in exact alignments is a change to
-that module alone — it costs a 68 MB `onnx` dependency, ~30 ms per sentence, and
-still needs this estimator as a fallback, because espeak merges words ("in the"
-becomes one phoneme group) in about 8% of sentences and leaves no safe
-positional mapping back to the text.
+phoneme alignments: onset error mean ~70 ms, p90 ~160 ms, roughly three quarters
+of words inside 100 ms. Swapping in exact alignments is a change to that module
+alone — it costs a 68 MB `onnx` dependency, ~30 ms per sentence, and still needs
+this estimator as a fallback, because espeak merges words ("in the" becomes one
+phoneme group) in about 8% of sentences and leaves no safe positional mapping
+back to the text.
 
 Environment overrides:
 

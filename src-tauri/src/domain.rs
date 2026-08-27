@@ -184,11 +184,6 @@ pub struct TurnResult {
     pub ledger: Option<LedgerView>,
     /// `Some` once the character has agreed or walked away.
     pub signal: Option<TurnSignal>,
-    /// How many `SpeechStreamEvent`s this turn already sent. Above zero, the
-    /// reply has been playing since before this result arrived, and `audio` is
-    /// the same recording kept for the replay button — playing it again would
-    /// repeat the turn.
-    pub streamed_segments: u32,
     /// When each word of the whole reply is spoken, from the start of `audio`.
     /// Empty when there are no timings, which is also how "no audio" reads.
     pub speech_words: Vec<WordSpan>,

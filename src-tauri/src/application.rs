@@ -716,14 +716,7 @@ impl AppService {
             "llm:start",
             &format!("requesting tutor reply for turn {turn} ({} history messages)", request.messages.len()),
         );
-        let speech: Option<Arc<dyn SpeechSink>> = self.speech_broadcast().map(|broadcast| {
-            Arc::new(TurnSpeech {
-                broadcast,
-                session_id: session_id.to_owned(),
-                turn,
-            }) as Arc<dyn SpeechSink>
-        });
-        let mut generated = self.engine.reply(&request, speech)?;
+        let mut generated = self.engine.reply(&request)?;
         trace.record_llm(generated.ttft_ms, generated.completion_ms);
         trace.stage(
             "llm:done",
@@ -774,11 +767,9 @@ impl AppService {
             Some(synthesized) => {
                 trace.record_tts(synthesized.first_audio_ms, synthesized.completion_ms);
                 trace.stage(
-                    "tts:streamed",
+                    "tts:overlapped",
                     &format!(
-                        "{} sentence{} synthesized during generation | first_audio={} completion={}",
-                        generated.streamed_segments,
-                        if generated.streamed_segments == 1 { "" } else { "s" },
+                        "reply synthesized during generation | first_audio={} completion={}",
                         synthesized
                             .first_audio_ms
                             .map(|ms| format!("{ms:.1} ms"))
@@ -841,7 +832,6 @@ impl AppService {
             timings: None,
             ledger: ledger_view,
             signal: generated.signal,
-            streamed_segments: generated.streamed_segments,
             speech_words,
         })
     }

@@ -13,7 +13,6 @@ import { bridge } from "../lib/bridge";
 import {
   createSpeechQueue,
   createVoiceCapture,
-  sentenceGroups,
   speakText,
   type SpeechQueue,
   type SpeechQueueCallbacks,
@@ -60,11 +59,11 @@ export function TalkScreen({
   // Ella's words in speaking order, and which one she is on. Both arrive with
   // the audio, sentence by sentence, so the reply appears as it is spoken
   // instead of all at once when the turn returns.
-  // Ella's reply grouped by sentence, and which word she is on. Sentences are
-  // kept apart because each one arrives whole: given its own line, an arriving
-  // sentence cannot re-centre the ones already on screen.
-  const [spokenSentences, setSpokenSentences] = useState<string[][]>([]);
+  // Which word Ella is on, and whether there is a schedule to follow at all.
+  // The reply itself is drawn from the conversation, never from the audio: it
+  // arrives whole, so there is nothing to reveal.
   const [spokenIndex, setSpokenIndex] = useState(-1);
+  const [following, setFollowing] = useState(false);
   // Ella's opening, kept so "Hear it again" can replay it with its timings
   // instead of dropping to the system voice.
   const [openingLine, setOpeningLine] = useState<SpokenLine | null>(null);
@@ -153,6 +152,8 @@ export function TalkScreen({
     stopSpeech.current = () => undefined;
     speechQueue.current?.queue.cancel();
     speechQueue.current = null;
+    setSpokenIndex(-1);
+    setFollowing(false);
     if (playbackWatchdog.current !== null) window.clearTimeout(playbackWatchdog.current);
     playbackWatchdog.current = null;
   }
@@ -171,7 +172,6 @@ export function TalkScreen({
       return;
     }
     stopPlayback();
-    setSpokenIndex(-1);
     setError(null);
     setState("speaking");
     const generation = playbackGeneration.current;
@@ -206,9 +206,10 @@ export function TalkScreen({
       playbackWatchdog.current = null;
       setState("resting");
       setSpokenIndex(-1);
+      setFollowing(false);
     };
     return {
-      onSentences: (sentences) => live() && setSpokenSentences(sentences),
+      onWords: () => live() && setFollowing(true),
       onSpokenWord: (index) => live() && setSpokenIndex(index),
       onStart: () => {
         if (!live()) return;
@@ -222,30 +223,6 @@ export function TalkScreen({
         flashReaction("error", 1800);
         setError("Ella could not play this aloud. You can still read her message.");
       },
-    };
-  }
-
-  /**
-   * Open the queue that plays this turn sentence by sentence.
-   *
-   * Called before the turn is sent, because the first sentence is synthesized
-   * while the model is still writing the rest of the reply — by the time the
-   * result comes back, Ella has been talking for seconds.
-   */
-  function armSpeechQueue() {
-    if (!bridge.onSpeechSegment) return;
-    stopPlayback();
-    // Drop the highlight, but leave the words: the previous reply stays on
-    // screen while Ella thinks, and clearing the grouping re-rendered that same
-    // text as one paragraph instead of one line per sentence — so the subtitles
-    // visibly re-centred the moment the learner stopped recording. Nothing can
-    // be highlighted in the meantime: the index is cleared here, and drawing
-    // the states at all requires that a clip be playing.
-    setSpokenIndex(-1);
-    const generation = playbackGeneration.current;
-    speechQueue.current = {
-      generation,
-      queue: createSpeechQueue(queueCallbacks(generation, "turn:first-sentence")),
     };
   }
 
@@ -268,7 +245,6 @@ export function TalkScreen({
     // reply again highlights the words the same way saying it the first time
     // did. Only the browser-speech fallback below has no timings to follow.
     if (result?.audio) {
-      setSpokenIndex(-1);
       const queue = createSpeechQueue(queueCallbacks(generation, "playback:replay"));
       speechQueue.current = { generation, queue };
       queue.push(result.audio, result.speech_words);
@@ -385,7 +361,6 @@ export function TalkScreen({
     setSending(true);
     setState("thinking");
     setError(null);
-    armSpeechQueue();
     try {
       const capture = await voice.current.stop();
       captureActive.current = false;
@@ -467,7 +442,6 @@ export function TalkScreen({
     setSending(true);
     setState("thinking");
     setError(null);
-    armSpeechQueue();
     try {
       const ipcStarted = performance.now();
       const result = await bridge.sendTextTurn(session.id, input);
@@ -502,33 +476,6 @@ export function TalkScreen({
     });
     setLastTurn(result);
     flashReaction("success");
-    const streaming = speechQueue.current;
-    // The reply has been playing since before this result arrived. `audio` is
-    // the same recording, kept for the replay button — playing it now would say
-    // the whole turn a second time. If nothing reached the queue, the stream
-    // did not get through and the ordinary one-shot playback still applies.
-    if (
-      streaming &&
-      streaming.generation === playbackGeneration.current &&
-      result.streamed_segments > 0 &&
-      streaming.queue.received > 0
-    ) {
-      llog(
-        "playback:streamed",
-        `${streaming.queue.received}/${result.streamed_segments} sentence(s) already playing`,
-      );
-      streaming.queue.finish(result.streamed_segments);
-      // Defensive fallback for a queue that never reports it finished.
-      playbackWatchdog.current = window.setTimeout(
-        () => {
-          if (mounted.current && playbackGeneration.current === streaming.generation) {
-            setState("resting");
-          }
-        },
-        Math.max(15_000, Math.min(45_000, result.ella_message.content.length * 180)),
-      );
-      return;
-    }
     playElla(result.ella_message.content, result);
   }
 
@@ -578,13 +525,12 @@ export function TalkScreen({
   // While a reply is streaming, the words come from the audio, because the
   // turn's text has not arrived yet. Afterwards the two are the same sentence,
   // so which one renders is invisible.
-  const promptSentences =
-    spokenSentences.length > 0 ? spokenSentences : sentenceGroups(prompt);
+  const promptWords = prompt.split(/\s+/).filter(Boolean);
   // Words are only dimmed while a clip with timings is actually playing. There
   // is a beat of silence before Piper's first word, and treating that as "not
   // playing" would show the reply at full contrast and then dim it the instant
   // she starts, which reads as a flicker.
-  const followingWords = spokenSentences.length > 0 && state === "speaking";
+  const followingWords = following && state === "speaking";
   const interactionLocked = sending || micStarting || state === "thinking";
   // Ella now starts talking while the turn is still committing, so for a moment
   // she is speaking and the microphone is not yet available. Promising an
@@ -647,30 +593,12 @@ export function TalkScreen({
           </div>
 
           <p className="talk-prompt">
-            {promptSentences.map((words, sentence) => {
-              // Where this sentence's words sit in the reply, because the
-              // highlight counts words across the whole thing.
-              const offset = promptSentences
-                .slice(0, sentence)
-                .reduce((total, earlier) => total + earlier.length, 0);
-              return (
-                <Fragment key={`${sentence}-${words[0] ?? ""}`}>
-                  <span className="talk-sentence">
-                    {words.map((word, index) => (
-                      <Fragment key={`${index}-${word}`}>
-                        <span className={wordClass(offset + index, spokenIndex, followingWords)}>
-                          {word}
-                        </span>
-                        {index < words.length - 1 ? " " : ""}
-                      </Fragment>
-                    ))}
-                  </span>
-                  {/* Sentences flow together on a line, so the gap between two
-                      of them is a real space, exactly as between two words. */}
-                  {sentence < promptSentences.length - 1 ? " " : ""}
-                </Fragment>
-              );
-            })}
+            {promptWords.map((word, index) => (
+              <Fragment key={`${index}-${word}`}>
+                <span className={wordClass(index, spokenIndex, followingWords)}>{word}</span>
+                {index < promptWords.length - 1 ? " " : ""}
+              </Fragment>
+            ))}
           </p>
 
           {/* Only Ella's side of the talk is on screen: the learner's own words
