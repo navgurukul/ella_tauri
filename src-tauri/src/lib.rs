@@ -7,10 +7,28 @@ mod telemetry;
 
 use std::sync::Arc;
 
-use application::AppService;
+use application::{AppService, SpeechBroadcast};
+use domain::SpeechStreamEvent;
 use infrastructure::{database::Database, engines::engine_from_environment};
 use ipc::AppState;
-use tauri::Manager;
+use tauri::{AppHandle, Emitter, Manager};
+
+/// The event name the window listens on for mid-turn speech.
+pub const SPEECH_STREAM_EVENT: &str = "ella://speech-segment";
+
+/// Pushes each synthesized sentence to the window the moment Piper finishes it,
+/// so playback starts while the model is still writing the rest of the reply.
+struct WindowSpeech(AppHandle);
+
+impl SpeechBroadcast for WindowSpeech {
+    fn speak(&self, event: SpeechStreamEvent) {
+        if let Err(error) = self.0.emit(SPEECH_STREAM_EVENT, &event) {
+            // Losing a segment costs this sentence's early playback, nothing
+            // else: the whole reply still arrives with the turn result.
+            eprintln!("[LATENCY]     tts> could not push speech segment: {error}");
+        }
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -30,10 +48,12 @@ pub fn run() {
                 std::env::set_var("ELLA_STT_DEBUG_DIR", data_dir.join("stt-failures"));
             }
             let database = Database::open(&data_dir.join("ella.sqlite3"))?;
-            app.manage(AppState(Arc::new(AppService::new(
+            let service = Arc::new(AppService::new(
                 database,
                 engine_from_environment(packaged_engine_root),
-            ))));
+            ));
+            service.set_speech_broadcast(Arc::new(WindowSpeech(app.handle().clone())));
+            app.manage(AppState(service));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

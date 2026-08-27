@@ -261,6 +261,160 @@ export function downsampleToPcm16(
   return output;
 }
 
+/** How far ahead of `currentTime` a segment is scheduled. Enough that the
+ * decode-to-schedule hop never lands in the past, short enough to be inaudible. */
+const SCHEDULE_LEAD_SECONDS = 0.03;
+/** How long to wait for segments the turn said were sent but that have not
+ * arrived. Beyond this the queue finishes with what it has rather than hang. */
+const MISSING_SEGMENT_GRACE_MS = 1500;
+
+export interface SpeechQueue {
+  /** Queue one sentence. Segments play in push order regardless of decode order. */
+  push(audio: AudioPayload): void;
+  /** How many segments have been queued so far. */
+  readonly received: number;
+  /** No more segments are coming beyond `expected` in total. */
+  finish(expected: number): void;
+  /** Stop immediately and drop anything still queued. */
+  cancel(): void;
+}
+
+/**
+ * Plays a reply sentence by sentence as it is synthesized.
+ *
+ * Sentences are scheduled back-to-back on the AudioContext clock rather than
+ * played through an <audio> element each: swapping an element's `src` leaves an
+ * audible gap between sentences, which reads as Ella hesitating mid-thought.
+ */
+export function createSpeechQueue(callbacks: SpeechPlaybackCallbacks = {}): SpeechQueue {
+  const openedAt = performance.now();
+  let context: AudioContext | null = null;
+  let cursor = 0;
+  let received = 0;
+  let played = 0;
+  let expected: number | null = null;
+  let started = false;
+  let settled = false;
+  let graceTimer: number | null = null;
+  // Decoding is async, so without a serial chain a short sentence could be
+  // scheduled ahead of the longer one before it.
+  let chain: Promise<void> = Promise.resolve();
+  const sources = new Set<AudioBufferSourceNode>();
+
+  const settle = (fail?: unknown) => {
+    if (settled) return;
+    settled = true;
+    if (graceTimer !== null) window.clearTimeout(graceTimer);
+    graceTimer = null;
+    if (fail !== undefined) {
+      llog("stream-playback:error", fail instanceof Error ? fail.message : "playback failed");
+      callbacks.onError?.(fail);
+      return;
+    }
+    llog("stream-playback:ended", `${played} sentence(s) played`);
+    callbacks.onEnd?.();
+  };
+
+  const maybeSettle = () => {
+    if (expected !== null && played >= Math.min(expected, received)) settle();
+  };
+
+  const push = (audio: AudioPayload) => {
+    if (settled) return;
+    const index = received;
+    received += 1;
+    if (graceTimer !== null) {
+      window.clearTimeout(graceTimer);
+      graceTimer = null;
+    }
+    chain = chain
+      .then(async () => {
+        if (settled) return;
+        if (!context) {
+          context = new AudioContext();
+          cursor = context.currentTime;
+        }
+        if (context.state === "suspended") await context.resume();
+        const buffer = await context.decodeAudioData(base64ToArrayBuffer(audio.base64));
+        if (settled || !context) return;
+        const source = context.createBufferSource();
+        source.buffer = buffer;
+        source.connect(context.destination);
+        const at = Math.max(context.currentTime + SCHEDULE_LEAD_SECONDS, cursor);
+        source.onended = () => {
+          sources.delete(source);
+          played += 1;
+          maybeSettle();
+        };
+        sources.add(source);
+        source.start(at);
+        cursor = at + buffer.duration;
+        if (!started) {
+          started = true;
+          llog(
+            "stream-playback:first-sentence",
+            `first sentence audible ${(performance.now() - openedAt).toFixed(1)}ms after the turn opened`,
+          );
+          callbacks.onStart?.();
+        }
+      })
+      .catch((reason: unknown) => {
+        // One unreadable sentence should not silence the rest of the reply.
+        llog("stream-playback:segment-failed", `sentence ${index} could not be played`);
+        played += 1;
+        maybeSettle();
+        if (!started && expected !== null) settle(reason);
+      });
+  };
+
+  return {
+    push,
+    get received() {
+      return received;
+    },
+    finish(total: number) {
+      expected = total;
+      if (received >= total) {
+        // Everything is queued; settle once the last one finishes playing.
+        void chain.then(maybeSettle);
+        return;
+      }
+      // The turn says more segments were sent than have arrived. Give the
+      // window a moment to deliver them, then finish with what is here.
+      graceTimer = window.setTimeout(() => {
+        graceTimer = null;
+        expected = received;
+        void chain.then(maybeSettle);
+      }, MISSING_SEGMENT_GRACE_MS);
+    },
+    cancel() {
+      if (settled) return;
+      settled = true;
+      if (graceTimer !== null) window.clearTimeout(graceTimer);
+      graceTimer = null;
+      for (const source of sources) {
+        try {
+          source.stop();
+        } catch {
+          // Already finished; nothing to stop.
+        }
+      }
+      sources.clear();
+      void context?.close().catch(() => undefined);
+      context = null;
+    },
+  };
+}
+
+function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes.buffer;
+}
+
 export function speakText(
   text: string,
   audio?: AudioPayload | null,

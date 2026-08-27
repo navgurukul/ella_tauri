@@ -10,17 +10,45 @@ use uuid::Uuid;
 use crate::{
     domain::{
         find_character, find_chore, topics, topics_for_age, AppSnapshot, ChoreContext, LedgerTurn,
-        LedgerView, Learner, Message, Session, SessionSummary, TurnSignal, WinCondition,
-        Speaker, Topic, TurnResult, TutorRequest,
+        AudioPayload, LedgerView, Learner, Message, Session, SessionSummary, SpeechStreamEvent,
+        TurnSignal, WinCondition, Speaker, Topic, TurnResult, TutorRequest,
     },
     error::{EllaError, EllaResult},
     infrastructure::{
         audio::{quietest_cut_index, trim_to_speech},
         database::Database,
-        engines::TutorEngine,
+        engines::{SpeechSegment, SpeechSink, TutorEngine},
     },
     telemetry::LatencyTrace,
 };
+
+/// How the shell delivers a finished sentence to the window mid-turn.
+///
+/// Registered once at startup. Without one — tests, the chore bench — nothing
+/// streams and every turn returns its audio whole, exactly as before.
+pub trait SpeechBroadcast: Send + Sync {
+    fn speak(&self, event: SpeechStreamEvent);
+}
+
+/// Ties the engine's sentence stream to one session's turn.
+struct TurnSpeech {
+    broadcast: Arc<dyn SpeechBroadcast>,
+    session_id: String,
+    turn: u32,
+}
+
+impl SpeechSink for TurnSpeech {
+    fn segment(&self, segment: SpeechSegment) {
+        self.broadcast.speak(SpeechStreamEvent {
+            session_id: self.session_id.clone(),
+            turn: self.turn,
+            index: segment.index,
+            text: segment.text,
+            audio: segment.audio,
+            ready_ms: segment.ready_ms,
+        });
+    }
+}
 
 /// Dispatch a background chunk once this much un-transcribed audio has
 /// accumulated, cutting at the quietest point of the trailing window. Kept
@@ -50,6 +78,7 @@ pub struct AppService {
     database: Database,
     engine: Arc<dyn TutorEngine>,
     streams: Mutex<HashMap<String, VoiceStream>>,
+    speech: Mutex<Option<Arc<dyn SpeechBroadcast>>>,
 }
 
 impl AppService {
@@ -58,7 +87,24 @@ impl AppService {
             database,
             engine: Arc::from(engine),
             streams: Mutex::new(HashMap::new()),
+            speech: Mutex::new(None),
         }
+    }
+
+    /// Hand the service somewhere to push sentences as they are synthesized.
+    /// Called once, after the window exists.
+    pub fn set_speech_broadcast(&self, broadcast: Arc<dyn SpeechBroadcast>) {
+        *self
+            .speech
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(broadcast);
+    }
+
+    fn speech_broadcast(&self) -> Option<Arc<dyn SpeechBroadcast>> {
+        self.speech
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub fn bootstrap(&self) -> EllaResult<AppSnapshot> {
@@ -634,7 +680,14 @@ impl AppService {
             "llm:start",
             &format!("requesting tutor reply for turn {turn} ({} history messages)", request.messages.len()),
         );
-        let generated = self.engine.reply(&request)?;
+        let speech: Option<Arc<dyn SpeechSink>> = self.speech_broadcast().map(|broadcast| {
+            Arc::new(TurnSpeech {
+                broadcast,
+                session_id: session_id.to_owned(),
+                turn,
+            }) as Arc<dyn SpeechSink>
+        });
+        let mut generated = self.engine.reply(&request, speech)?;
         trace.record_llm(generated.ttft_ms, generated.completion_ms);
         trace.stage(
             "llm:done",
@@ -677,14 +730,19 @@ impl AppService {
         );
         // Voice is an enhancement, not a transaction dependency: if Piper is
         // missing or fails, the persisted text turn remains fully usable.
-        trace.stage("tts:start", "sending reply text to speech synthesis");
-        let audio = match self.engine.synthesize(&reply) {
-            Ok(synthesized) => {
+        //
+        // A reply whose sentences were synthesized during generation is already
+        // recorded — and, when it streamed, already playing. Only turns that
+        // produced no usable pipeline audio pay for Piper on the clock here.
+        let audio = match generated.speech.take() {
+            Some(synthesized) => {
                 trace.record_tts(synthesized.first_audio_ms, synthesized.completion_ms);
                 trace.stage(
-                    "tts:done",
+                    "tts:streamed",
                     &format!(
-                        "first_audio={} completion={} | audio={}",
+                        "{} sentence{} synthesized during generation | first_audio={} completion={}",
+                        generated.streamed_segments,
+                        if generated.streamed_segments == 1 { "" } else { "s" },
                         synthesized
                             .first_audio_ms
                             .map(|ms| format!("{ms:.1} ms"))
@@ -693,27 +751,11 @@ impl AppService {
                             .completion_ms
                             .map(|ms| format!("{ms:.1} ms"))
                             .unwrap_or_else(|| "-".into()),
-                        synthesized
-                            .audio
-                            .as_ref()
-                            .map(|audio| format!("{} base64 chars ({})", audio.base64.len(), audio.mime_type))
-                            .unwrap_or_else(|| "none".into())
                     ),
                 );
                 synthesized.audio
             }
-            Err(error) => {
-                trace.stage("tts:failed", &error.to_string());
-                eprintln!(
-                    "{}",
-                    serde_json::json!({
-                        "event": "tts_degraded",
-                        "error": error.to_string(),
-                    })
-                );
-                trace.record_tts(None, None);
-                None
-            }
+            None => self.synthesize_on_clock(&reply, trace),
         };
         // The app owns the number. `named_figure` is only ever accepted when it
         // is legal for this spec, so a character that concedes too far in prose
@@ -763,7 +805,54 @@ impl AppService {
             timings: None,
             ledger: ledger_view,
             signal: generated.signal,
+            streamed_segments: generated.streamed_segments,
         })
+    }
+
+    /// Synthesize the whole reply with the learner waiting.
+    ///
+    /// The path for turns that produced no usable pipeline audio: demo mode, a
+    /// missing Piper, or a ledger reply that was regenerated after its
+    /// sentences had already been read.
+    fn synthesize_on_clock(&self, reply: &str, trace: &mut LatencyTrace) -> Option<AudioPayload> {
+        trace.stage("tts:start", "sending reply text to speech synthesis");
+        match self.engine.synthesize(reply) {
+            Ok(synthesized) => {
+                trace.record_tts(synthesized.first_audio_ms, synthesized.completion_ms);
+                trace.stage(
+                    "tts:done",
+                    &format!(
+                        "first_audio={} completion={} | audio={}",
+                        synthesized
+                            .first_audio_ms
+                            .map(|ms| format!("{ms:.1} ms"))
+                            .unwrap_or_else(|| "-".into()),
+                        synthesized
+                            .completion_ms
+                            .map(|ms| format!("{ms:.1} ms"))
+                            .unwrap_or_else(|| "-".into()),
+                        synthesized
+                            .audio
+                            .as_ref()
+                            .map(|audio| format!("{} base64 chars ({})", audio.base64.len(), audio.mime_type))
+                            .unwrap_or_else(|| "none".into())
+                    ),
+                );
+                synthesized.audio
+            }
+            Err(error) => {
+                trace.stage("tts:failed", &error.to_string());
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "event": "tts_degraded",
+                        "error": error.to_string(),
+                    })
+                );
+                trace.record_tts(None, None);
+                None
+            }
+        }
     }
 
     pub fn complete_session(&self, session_id: &str) -> EllaResult<SessionSummary> {

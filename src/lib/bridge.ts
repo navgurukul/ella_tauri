@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type {
   AppSnapshot,
   EllaBridge,
@@ -6,6 +7,7 @@ import type {
   Message,
   Session,
   SessionSummary,
+  SpeechSegment,
   Topic,
   TurnResult,
   VoiceStreamFinishInput,
@@ -113,6 +115,13 @@ class TauriBridge implements EllaBridge {
       sampleRate,
       browserTranscript,
     });
+  /** Matches SPEECH_STREAM_EVENT in src-tauri/src/lib.rs. */
+  onSpeechSegment = async (handler: (segment: SpeechSegment) => void) => {
+    const stop = await listen<SpeechSegment>("ella://speech-segment", (event) =>
+      handler(event.payload),
+    );
+    return stop;
+  };
   beginVoiceStream = (sessionId: string) => invoke<string>("begin_voice_stream", { sessionId });
   pushVoiceStream = (streamId: string, samples: number[], sampleRate: number) =>
     invoke<void>("push_voice_stream", { streamId, samples, sampleRate });
@@ -201,6 +210,8 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
       ella_message: ellaMessage,
       correction: gentleCorrection(clean),
       suggested_complete: turn >= 3,
+      // The browser bridge has no Piper, so nothing streams ahead of the turn.
+      streamed_segments: 0,
     };
   };
 

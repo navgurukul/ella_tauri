@@ -10,7 +10,7 @@ import {
 } from "./EllaMascot";
 import { MicGlyph } from "./HomeScreen";
 import { bridge } from "../lib/bridge";
-import { createVoiceCapture, speakText } from "../lib/speech";
+import { createSpeechQueue, createVoiceCapture, speakText, type SpeechQueue } from "../lib/speech";
 import { llog, logServerTimings, markTurnStart, turnElapsed } from "../lib/latency";
 import { levelInfo } from "../lib/presentation";
 import type { AppSnapshot, Session, SessionSummary, TurnResult } from "../types";
@@ -49,6 +49,10 @@ export function TalkScreen({
   const stopSpeech = useRef<() => void>(() => undefined);
   const playbackWatchdog = useRef<number | null>(null);
   const playbackGeneration = useRef(0);
+  /** Receives sentences while the reply is still generating. Armed for the
+   * duration of one turn, and tied to the playback generation so a learner who
+   * interrupts is not spoken over by the turn they cut off. */
+  const speechQueue = useRef<{ queue: SpeechQueue; generation: number } | null>(null);
   const reactionTimer = useRef<number | null>(null);
   const micOperation = useRef(0);
   const captureActive = useRef(false);
@@ -85,6 +89,33 @@ export function TalkScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Sentences arrive here as Piper finishes them, well before the turn result
+  // does. Subscribing on mount means nothing is missed between arming the queue
+  // and the first segment landing.
+  useEffect(() => {
+    let unsubscribe: (() => void) | undefined;
+    let dropped = false;
+    void bridge
+      .onSpeechSegment?.((segment) => {
+        const armed = speechQueue.current;
+        if (!armed || armed.generation !== playbackGeneration.current) return;
+        if (segment.session_id !== session.id) return;
+        // Segments arrive in order on one channel; an index already queued is a
+        // repeat, and queueing it would say the sentence twice.
+        if (segment.index < armed.queue.received) return;
+        armed.queue.push(segment.audio);
+      })
+      .then((stop) => {
+        if (dropped) stop();
+        else unsubscribe = stop;
+      })
+      .catch(() => undefined);
+    return () => {
+      dropped = true;
+      unsubscribe?.();
+    };
+  }, [session.id]);
+
   useEffect(() => {
     if (!typing && focusMicAfterModeSwitch.current) {
       focusMicAfterModeSwitch.current = false;
@@ -96,8 +127,50 @@ export function TalkScreen({
     playbackGeneration.current += 1;
     stopSpeech.current();
     stopSpeech.current = () => undefined;
+    speechQueue.current?.queue.cancel();
+    speechQueue.current = null;
     if (playbackWatchdog.current !== null) window.clearTimeout(playbackWatchdog.current);
     playbackWatchdog.current = null;
+  }
+
+  /**
+   * Open the queue that plays this turn sentence by sentence.
+   *
+   * Called before the turn is sent, because the first sentence is synthesized
+   * while the model is still writing the rest of the reply — by the time the
+   * result comes back, Ella has been talking for seconds.
+   */
+  function armSpeechQueue() {
+    if (!bridge.onSpeechSegment) return;
+    stopPlayback();
+    const generation = playbackGeneration.current;
+    const live = (): boolean => mounted.current && playbackGeneration.current === generation;
+    const rest = () => {
+      if (!live()) return;
+      if (playbackWatchdog.current !== null) window.clearTimeout(playbackWatchdog.current);
+      playbackWatchdog.current = null;
+      setState("resting");
+    };
+    speechQueue.current = {
+      generation,
+      queue: createSpeechQueue({
+        onStart: () => {
+          if (!live()) return;
+          setState("speaking");
+          llog(
+            "turn:first-sentence",
+            `END-TO-END -> Ella starts speaking: ${turnElapsed().toFixed(1)}ms`,
+          );
+        },
+        onEnd: rest,
+        onError: () => {
+          rest();
+          if (!live()) return;
+          flashReaction("error", 1800);
+          setError("Ella could not play this aloud. You can still read her message.");
+        },
+      }),
+    };
   }
 
   function flashReaction(next: Exclude<EllaReaction, null>, duration = 1300) {
@@ -225,6 +298,7 @@ export function TalkScreen({
     setSending(true);
     setState("thinking");
     setError(null);
+    armSpeechQueue();
     try {
       const capture = await voice.current.stop();
       captureActive.current = false;
@@ -283,6 +357,7 @@ export function TalkScreen({
       setLiveTranscript("");
     } catch (reason) {
       llog("turn:error", `voice turn failed after ${turnElapsed().toFixed(1)}ms: ${errorMessage(reason)}`);
+      stopPlayback();
       await cancelVoiceStream();
       captureActive.current = false;
       await voice.current.cancel().catch(() => undefined);
@@ -305,6 +380,7 @@ export function TalkScreen({
     setSending(true);
     setState("thinking");
     setError(null);
+    armSpeechQueue();
     try {
       const ipcStarted = performance.now();
       const result = await bridge.sendTextTurn(session.id, input);
@@ -323,6 +399,7 @@ export function TalkScreen({
       );
     } catch (reason) {
       llog("turn:error", `text turn failed after ${turnElapsed().toFixed(1)}ms: ${errorMessage(reason)}`);
+      stopPlayback();
       setState("resting");
       flashReaction("error", 1800);
       setError(errorMessage(reason));
@@ -338,6 +415,33 @@ export function TalkScreen({
     });
     setLastTurn(result);
     flashReaction("success");
+    const streaming = speechQueue.current;
+    // The reply has been playing since before this result arrived. `audio` is
+    // the same recording, kept for the replay button — playing it now would say
+    // the whole turn a second time. If nothing reached the queue, the stream
+    // did not get through and the ordinary one-shot playback still applies.
+    if (
+      streaming &&
+      streaming.generation === playbackGeneration.current &&
+      result.streamed_segments > 0 &&
+      streaming.queue.received > 0
+    ) {
+      llog(
+        "playback:streamed",
+        `${streaming.queue.received}/${result.streamed_segments} sentence(s) already playing`,
+      );
+      streaming.queue.finish(result.streamed_segments);
+      // Defensive fallback for a queue that never reports it finished.
+      playbackWatchdog.current = window.setTimeout(
+        () => {
+          if (mounted.current && playbackGeneration.current === streaming.generation) {
+            setState("resting");
+          }
+        },
+        Math.max(15_000, Math.min(45_000, result.ella_message.content.length * 180)),
+      );
+      return;
+    }
     playElla(result.ella_message.content, result);
   }
 
@@ -385,6 +489,14 @@ export function TalkScreen({
 
   const prompt = latestElla?.content ?? "";
   const interactionLocked = sending || micStarting || state === "thinking";
+  // Ella now starts talking while the turn is still committing, so for a moment
+  // she is speaking and the microphone is not yet available. Promising an
+  // interrupt the button will not accept reads as a broken control.
+  const micHint = micStarting
+    ? "Opening the microphone…"
+    : state === "speaking" && sending
+      ? "Ella is answering…"
+      : MIC_HINT[state];
   const stateStatus = micStarting
     ? "Opening the microphone…"
     : state === "resting"
@@ -398,9 +510,7 @@ export function TalkScreen({
         : state === "thinking"
           ? "Ella is thinking"
           : "Ella is speaking";
-  const announcedStatus = `${micStarting ? "Opening the microphone." : MIC_HINT[state]}${
-    reaction === "success" ? " Nice work." : ""
-  }`;
+  const announcedStatus = `${micHint}${reaction === "success" ? " Nice work." : ""}`;
 
   return (
     <div className="screen screen--talk" data-screen="talk">
@@ -559,7 +669,7 @@ export function TalkScreen({
                 </button>
               </div>
               <p className="mic-hint" id="talk-mic-hint">
-                {micStarting ? "Opening the microphone…" : MIC_HINT[state]}
+                {micHint}
               </p>
               {state === "listening" && <VoiceMeter level={voiceLevel} />}
               <button

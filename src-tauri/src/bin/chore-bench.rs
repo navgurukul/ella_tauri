@@ -20,14 +20,49 @@
 //!   npm run bench:chore -- --chore market-cloth-price
 //! ```
 
-use std::{env, fs, path::PathBuf, process, time::Instant};
+use std::{
+    env, fs,
+    path::PathBuf,
+    process,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use ella_tauri_lib::{
-    application::AppService,
-    domain::{find_chore, TurnSignal, WinCondition},
+    application::{AppService, SpeechBroadcast},
+    domain::{find_chore, SpeechStreamEvent, TurnSignal, WinCondition},
     infrastructure::{database::Database, engines::engine_from_environment},
 };
 use serde_json::json;
+
+/// Stands in for the window: records when each sentence would have reached the
+/// speaker, which is the number sentence streaming exists to lower.
+#[derive(Default)]
+struct SegmentRecorder {
+    ready_ms: Mutex<Vec<f64>>,
+}
+
+impl SegmentRecorder {
+    /// Milliseconds into the generation that the first sentence became
+    /// audible, and how many sentences the turn produced.
+    fn take(&self) -> (Option<f64>, usize) {
+        let mut ready = self
+            .ready_ms
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let taken = std::mem::take(&mut *ready);
+        (taken.first().copied(), taken.len())
+    }
+}
+
+impl SpeechBroadcast for SegmentRecorder {
+    fn speak(&self, event: SpeechStreamEvent) {
+        self.ready_ms
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(event.ready_ms);
+    }
+}
 
 /// One learner utterance and what it is for, so a failed run reads as a story
 /// rather than a list of strings.
@@ -80,6 +115,10 @@ fn script_for(chore_id: &str) -> &'static [ScriptLine] {
 
 struct Options {
     chore_id: String,
+    /// Set instead of `chore_id` to drive a free conversation on a topic. That
+    /// is the path the app takes today, and the only one where sentences reach
+    /// the speaker live — a ledger chore holds them until the figure is checked.
+    topic_id: Option<String>,
     learner_name: String,
     output: Option<PathBuf>,
     max_turns: usize,
@@ -88,6 +127,7 @@ struct Options {
 fn parse_options() -> Result<Options, String> {
     let mut options = Options {
         chore_id: "market-cloth-price".into(),
+        topic_id: None,
         learner_name: "Souvik".into(),
         output: None,
         max_turns: usize::MAX,
@@ -100,6 +140,7 @@ fn parse_options() -> Result<Options, String> {
         };
         match flag.as_str() {
             "--chore" => options.chore_id = value("--chore")?,
+            "--topic" => options.topic_id = Some(value("--topic")?),
             "--name" => options.learner_name = value("--name")?,
             "--output" => options.output = Some(PathBuf::from(value("--output")?)),
             "--max-turns" => {
@@ -120,8 +161,8 @@ fn parse_options() -> Result<Options, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "chore-bench [--chore <id>] [--name <learner>] [--max-turns <n>] \
-                     [--output <file.json>] [--list]"
+                    "chore-bench [--chore <id> | --topic <id>] [--name <learner>] \
+                     [--max-turns <n>] [--output <file.json>] [--list]"
                 );
                 process::exit(0);
             }
@@ -145,7 +186,175 @@ fn main() {
     }
 }
 
+/// What a learner actually says on a free topic: short answers, a question
+/// back, a longer story. Enough turns for a median that means something.
+const TOPIC_SCRIPT: &[ScriptLine] = &[
+    ScriptLine { intent: "short answer", text: "I ate bhel puri near my college yesterday." },
+    ScriptLine { intent: "detail", text: "It was spicy and a little sweet, with onion and green chutney on top." },
+    ScriptLine { intent: "question back", text: "Have you ever eaten bhel puri? What did you think of it?" },
+    ScriptLine { intent: "longer story", text: "My mother used to make it at home on Sunday evenings, and my sister and I would eat it on the balcony while it was still light outside." },
+    ScriptLine { intent: "opinion", text: "I think the street version tastes better than the one in restaurants." },
+    ScriptLine { intent: "close", text: "Next time I go, I will try the one with extra lemon." },
+];
+
+/// Builds the throwaway database and live engine both harness modes need.
+fn open_service(learner_name: &str) -> Result<AppService, String> {
+    let scratch = env::temp_dir().join("ella-chore-bench.sqlite3");
+    let _ = fs::remove_file(&scratch);
+    let _ = fs::remove_file(scratch.with_extension("sqlite3-wal"));
+    let _ = fs::remove_file(scratch.with_extension("sqlite3-shm"));
+    let database = Database::open(&scratch).map_err(|error| error.to_string())?;
+    let engine = engine_from_environment(None);
+    let status = engine.status();
+    println!("engine: {} ({})", status.label, status.mode);
+    for component in &status.components {
+        println!(
+            "  {:<22} {}  {}",
+            component.name,
+            if component.ready { "ready" } else { "DOWN " },
+            component.detail
+        );
+    }
+    if !status.ready {
+        return Err(
+            "engines are not ready. Start them with `npm run engines:local` and set \
+             ELLA_ENGINE_MODE=local ELLA_ENGINE_ROOT=$PWD/engines"
+                .into(),
+        );
+    }
+    let service = AppService::new(database, engine);
+    service
+        .save_learner(learner_name, Some(22))
+        .map_err(|error| error.to_string())?;
+    Ok(service)
+}
+
+/// Free conversation on a topic, measuring the thing the learner actually
+/// waits for: not when the turn returns, but when Ella starts talking.
+fn run_topic(options: &Options, topic_id: &str) -> Result<(), String> {
+    let service = open_service(&options.learner_name)?;
+    let recorder = Arc::new(SegmentRecorder::default());
+    service.set_speech_broadcast(recorder.clone());
+
+    let session = service
+        .start_session(topic_id)
+        .map_err(|error| error.to_string())?;
+    println!("\ntopic   {}  [{}]", session.topic_label, session.topic_id);
+    println!("\n─── conversation ───");
+    if let Some(opening) = session.messages.first() {
+        println!("  ella     {}", opening.content);
+    }
+
+    let mut turns = Vec::new();
+    for (index, line) in TOPIC_SCRIPT.iter().take(options.max_turns).enumerate() {
+        let started = Instant::now();
+        let result = service
+            .send_text_turn(&session.id, line.text)
+            .map_err(|error| format!("turn {} failed: {error}", index + 1))?;
+        let total_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        let timings = result.timings.as_ref();
+        let (first_segment_ms, segments) = recorder.take();
+        // Both clocks start within a millisecond of each other at the top of
+        // the generation, so they compare directly: how long until Ella starts
+        // talking, against how long until she has finished writing.
+        let completion_ms = timings.and_then(|t| t.llm_completion_ms).unwrap_or(0) as f64;
+        let saved = first_segment_ms.map(|ms| completion_ms - ms);
+
+        println!("\n  learner  {}", line.text);
+        println!("           ({})", line.intent);
+        println!("  ella     {}", result.ella_message.content);
+        println!(
+            "  timing   total {total_ms:.0}ms | ttft {}ms | reply written at {completion_ms:.0}ms | \
+             {segments} sentence(s)",
+            timings.and_then(|t| t.llm_ttft_ms).unwrap_or(0),
+        );
+        println!(
+            "  speech   {}",
+            match (first_segment_ms, saved) {
+                (Some(ms), Some(saved)) => format!(
+                    "starts talking at {ms:.0}ms \u{2014} {saved:.0}ms before the reply is written",
+                ),
+                _ => "nothing streamed".into(),
+            }
+        );
+
+        turns.push(json!({
+            "turn": index + 1,
+            "intent": line.intent,
+            "learner": line.text,
+            "reply": result.ella_message.content,
+            "total_ms": total_ms.round(),
+            "llm_ttft_ms": timings.and_then(|t| t.llm_ttft_ms),
+            "llm_completion_ms": timings.and_then(|t| t.llm_completion_ms),
+            "streamed_segments": result.streamed_segments,
+            "first_speech_ms": first_segment_ms.map(|ms| ms.round()),
+            "saved_ms": saved.map(|ms| ms.round()),
+        }));
+    }
+
+    let totals: Vec<f64> = turns
+        .iter()
+        .filter_map(|turn| turn["total_ms"].as_f64())
+        .collect();
+    let first_speech: Vec<f64> = turns
+        .iter()
+        .filter_map(|turn| turn["first_speech_ms"].as_f64())
+        .collect();
+    let written: Vec<f64> = turns
+        .iter()
+        .filter_map(|turn| turn["llm_completion_ms"].as_f64())
+        .collect();
+    let saved: Vec<f64> = turns
+        .iter()
+        .filter_map(|turn| turn["saved_ms"].as_f64())
+        .collect();
+    // A turn whose whole reply is one sentence cannot start early: there is no
+    // earlier sentence to start on. Worth counting separately from a failure.
+    let single = turns
+        .iter()
+        .filter(|turn| turn["streamed_segments"].as_u64() == Some(1))
+        .count();
+
+    println!("\n─── result ───");
+    println!("turns                    {}", turns.len());
+    println!("median turn              {:.0} ms", median(&totals));
+    println!("median reply written at  {:.0} ms", median(&written));
+    if first_speech.is_empty() {
+        println!("median time to speech    - (no sentence streamed; is the resident Piper up?)");
+    } else {
+        println!(
+            "median time to speech    {:.0} ms   ({} of {} turns streamed)",
+            median(&first_speech),
+            first_speech.len(),
+            turns.len()
+        );
+        println!(
+            "median head start        {:.0} ms   (Ella starts talking this much earlier)",
+            median(&saved)
+        );
+        println!("single-sentence replies  {single} (nothing to start early on)");
+    }
+
+    if let Some(path) = &options.output {
+        let report = json!({
+            "mode": "topic",
+            "topic_id": topic_id,
+            "turns": turns,
+            "median_total_ms": median(&totals).round(),
+            "median_first_speech_ms": (!first_speech.is_empty())
+                .then(|| median(&first_speech).round()),
+        });
+        fs::write(path, serde_json::to_string_pretty(&report).unwrap())
+            .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+        println!("\nreport written to {}", path.display());
+    }
+    Ok(())
+}
+
 fn run(options: &Options) -> Result<(), String> {
+    if let Some(topic_id) = &options.topic_id {
+        return run_topic(options, topic_id);
+    }
     let chore = find_chore(&options.chore_id)
         .ok_or_else(|| format!("no chore called {} (try --list)", options.chore_id))?;
 

@@ -43,6 +43,13 @@ pub struct GeneratedReply {
     /// True when the first generation broke the ledger limit or step and the
     /// turn had to be generated again.
     pub regenerated: bool,
+    /// Whole-reply audio assembled from the sentences that were synthesized
+    /// while this reply was still generating. `None` means the caller has to
+    /// synthesize `text` itself, exactly as before sentence streaming existed.
+    pub speech: Option<SynthesizedAudio>,
+    /// How many sentences were streamed to the speaker mid-generation. Zero
+    /// means the learner heard nothing until the turn returned.
+    pub streamed_segments: u32,
 }
 
 impl GeneratedReply {
@@ -54,6 +61,8 @@ impl GeneratedReply {
             named_figure: None,
             signal: None,
             regenerated: false,
+            speech: None,
+            streamed_segments: 0,
         }
     }
 }
@@ -227,6 +236,347 @@ impl Drop for PiperDaemon {
                 let _ = process.child.kill();
                 let _ = process.child.wait();
             }
+        }
+    }
+}
+
+/// One sentence of the reply, already synthesized, on its way to the speaker
+/// while the language model is still writing the rest of the turn.
+#[derive(Debug, Clone)]
+pub struct SpeechSegment {
+    /// 0-based playback order. The player must not reorder these.
+    pub index: u32,
+    pub text: String,
+    pub audio: AudioPayload,
+    /// Milliseconds from the start of the generation to this segment being
+    /// ready. The first segment's value is the number that decides whether
+    /// streaming was worth it.
+    pub ready_ms: f64,
+}
+
+/// Where finished sentences go while the turn is still generating. The engine
+/// knows nothing about windows or IPC; `application` supplies the adapter.
+pub trait SpeechSink: Send + Sync {
+    fn segment(&self, segment: SpeechSegment);
+}
+
+/// Longest run of text with no sentence break that still gets cut, so a reply
+/// written as one long clause is not held back to the very last token.
+const SPEECH_SOFT_CAP_CHARS: usize = 150;
+/// Shortest segment worth synthesizing on its own. Below this, Piper's output
+/// is a click rather than a phrase, so the text is merged into the next one.
+/// Kept low: replies here are one or two sentences, so merging the opener away
+/// ("Sounds yummy!" is 13 characters) costs the whole head start for that turn.
+const SPEECH_MIN_CHARS: usize = 10;
+/// Trailing tokens that end in '.' without ending a sentence.
+const NON_TERMINAL_ABBREVIATIONS: [&str; 10] = [
+    "rs", "mr", "mrs", "ms", "dr", "st", "no", "vs", "etc", "approx",
+];
+
+/// Pulls whole sentences out of a reply as it streams in.
+///
+/// Everything here exists to avoid cutting mid-thought: Piper reads each
+/// segment as a self-contained utterance, so a bad cut is audible as a wrong
+/// pause or a dropped intonation, not just as odd text.
+#[derive(Default)]
+struct SentenceSplitter {
+    pending: String,
+}
+
+impl SentenceSplitter {
+    fn push(&mut self, delta: &str) -> Vec<String> {
+        self.pending.push_str(delta);
+        let mut ready = Vec::new();
+        while let Some(cut) = self.next_cut() {
+            let sentence = self.pending[..cut].trim().to_string();
+            self.pending = self.pending[cut..].trim_start().to_string();
+            if !sentence.is_empty() {
+                ready.push(sentence);
+            }
+        }
+        ready
+    }
+
+    /// Whatever is left once the stream ends, sentence-final or not.
+    fn flush(&mut self) -> Option<String> {
+        let rest = std::mem::take(&mut self.pending).trim().to_string();
+        (!rest.is_empty()).then_some(rest)
+    }
+
+    /// Byte offset just past a sentence end, or `None` while the pending text
+    /// is still mid-sentence.
+    fn next_cut(&self) -> Option<usize> {
+        // A control token must never straddle a cut: `strip_bracket_tokens`
+        // treats an unbalanced '[' as ordinary text, so half of `[DEAL]` would
+        // be read aloud. While one is open, wait for its close.
+        if self.pending.matches('[').count() > self.pending.matches(']').count() {
+            return None;
+        }
+        let bytes = self.pending.as_bytes();
+        for (index, character) in self.pending.char_indices() {
+            if !matches!(character, '.' | '!' | '?') {
+                continue;
+            }
+            let after = index + character.len_utf8();
+            // A sentence end is only certain once a following character proves
+            // it: "3." could still become "3.5", and "Rs." never ends a
+            // sentence. At the end of the stream `flush` takes care of it.
+            let Some(next) = self.pending[after..].chars().next() else {
+                return None;
+            };
+            if !next.is_whitespace() {
+                continue;
+            }
+            if character == '.' && self.is_abbreviation_or_decimal(index) {
+                continue;
+            }
+            if index + 1 < SPEECH_MIN_CHARS {
+                continue;
+            }
+            // Consume the whitespace run so the next segment starts on a word.
+            let mut end = after;
+            while end < bytes.len() && bytes[end].is_ascii_whitespace() {
+                end += 1;
+            }
+            return Some(end);
+        }
+        self.soft_cap_cut()
+    }
+
+    fn is_abbreviation_or_decimal(&self, dot: usize) -> bool {
+        let before = &self.pending[..dot];
+        let word: String = before
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if word.chars().all(|c| c.is_ascii_digit()) && !word.is_empty() {
+            // "Rs 250." at the end of a sentence is a real break; "3.5" is not.
+            // Only a digit on both sides makes it a decimal.
+            return self.pending[dot + 1..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit());
+        }
+        NON_TERMINAL_ABBREVIATIONS.contains(&word.to_lowercase().as_str())
+    }
+
+    /// A reply with no sentence break at all still has to start playing. Cut at
+    /// the last clause boundary before the cap, and at a word boundary if there
+    /// is no clause boundary either.
+    fn soft_cap_cut(&self) -> Option<usize> {
+        if self.pending.chars().count() < SPEECH_SOFT_CAP_CHARS {
+            return None;
+        }
+        let window_end = self
+            .pending
+            .char_indices()
+            .nth(SPEECH_SOFT_CAP_CHARS)
+            .map_or(self.pending.len(), |(index, _)| index);
+        let window = &self.pending[..window_end];
+        // Offsets come from `char_indices` plus the mark's own width: an em
+        // dash is three bytes, so `index + 1` would land mid-character and
+        // panic when the cut is sliced.
+        let clause = window
+            .char_indices()
+            .filter(|(_, mark)| matches!(mark, ',' | ';' | ':' | '\u{2014}'))
+            .map(|(index, mark)| index + mark.len_utf8())
+            .filter(|end| *end >= SPEECH_MIN_CHARS)
+            .last();
+        let cut = clause.or_else(|| {
+            window
+                .rfind(char::is_whitespace)
+                .filter(|index| *index >= SPEECH_MIN_CHARS)
+        })?;
+        Some(cut)
+    }
+}
+
+/// The text of a segment as Piper should read it. Bracketed control tokens are
+/// dropped; nothing else is touched, because the reply the learner reads is
+/// produced by `take_signal` on the whole text and the two have to agree.
+fn spoken_form(sentence: &str) -> String {
+    if sentence.contains('[') {
+        strip_bracket_tokens(sentence)
+    } else {
+        sentence.trim().to_string()
+    }
+}
+
+/// Whitespace-insensitive comparison, so "spoke exactly what we returned" is
+/// not defeated by a collapsed double space.
+fn same_words(left: &str, right: &str) -> bool {
+    left.split_whitespace().eq(right.split_whitespace())
+}
+
+/// What a finished speech pipeline leaves behind.
+struct StreamedSpeech {
+    /// Concatenation of every segment actually synthesized.
+    spoken: String,
+    /// Whole-reply audio assembled from the segments, for replay.
+    audio: Option<SynthesizedAudio>,
+    segments: u32,
+    first_ready_ms: Option<f64>,
+    /// True when segments were handed to the sink as they finished, so the
+    /// learner has already heard them.
+    live: bool,
+}
+
+impl StreamedSpeech {
+    /// The audio for `text`, and how many segments the learner has already
+    /// heard.
+    ///
+    /// This is the accuracy guarantee. A turn that was regenerated, or replaced
+    /// by the authored refusal, does not match what was synthesized, so its
+    /// audio is dropped and the caller synthesizes the text it is really
+    /// returning. A reported count above zero means the segments the window
+    /// received are the whole reply — anything less and the window must play
+    /// the recording instead, because a half-streamed reply stops mid-thought.
+    fn resolve(self, text: &str) -> (Option<SynthesizedAudio>, u32) {
+        if self.live {
+            // Already spoken. There is nothing to take back, and the window
+            // has played exactly these segments.
+            return (self.audio, self.segments);
+        }
+        if same_words(&self.spoken, text) {
+            // Synthesized ahead of time but never sent, so the window has
+            // played nothing yet and gets the whole recording.
+            return (self.audio, 0);
+        }
+        eprintln!(
+            "[LATENCY]     tts> streamed audio discarded: reply text changed after synthesis"
+        );
+        (None, 0)
+    }
+}
+
+/// Synthesizes sentences on a worker thread while the reply is still being
+/// generated, so Piper's ~200 ms per sentence overlaps the model's seconds of
+/// decode instead of following them.
+struct SpeechPipeline {
+    sentences: Option<std::sync::mpsc::Sender<String>>,
+    worker: Option<thread::JoinHandle<StreamedSpeech>>,
+    splitter: SentenceSplitter,
+}
+
+impl SpeechPipeline {
+    /// `sink` present means the learner hears each sentence as it lands. Pass
+    /// `None` to synthesize ahead but hold the audio back — the right choice
+    /// when the turn might still be regenerated.
+    fn start(daemon: Arc<PiperDaemon>, sink: Option<Arc<dyn SpeechSink>>, started: Instant) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let live = sink.is_some();
+        let worker = thread::spawn(move || {
+            let mut spoken = String::new();
+            let mut pcm = Vec::new();
+            let mut sample_rate = None;
+            let mut segments = 0_u32;
+            let mut first_ready_ms = None;
+            for sentence in rx {
+                let text = spoken_form(&sentence);
+                if !text.chars().any(char::is_alphanumeric) {
+                    continue;
+                }
+                let (chunk, rate, _, synth_ms) = match daemon.synthesize(&text) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        // A failed segment must not leave a hole in the middle
+                        // of the reply, so stop streaming and let the caller
+                        // fall back to synthesizing the whole thing.
+                        eprintln!(
+                            "[LATENCY]     tts> segment {segments} failed ({error}); ending the stream"
+                        );
+                        return StreamedSpeech {
+                            spoken: String::new(),
+                            audio: None,
+                            segments,
+                            first_ready_ms,
+                            live: false,
+                        };
+                    }
+                };
+                let ready_ms = started.elapsed().as_secs_f64() * 1_000.0;
+                if first_ready_ms.is_none() {
+                    first_ready_ms = Some(ready_ms);
+                }
+                eprintln!(
+                    "[LATENCY]     tts> segment {segments} ready at +{ready_ms:.1}ms (synth {synth_ms:.1}ms, {} chars): {text:?}",
+                    text.chars().count()
+                );
+                if !spoken.is_empty() {
+                    spoken.push(' ');
+                }
+                spoken.push_str(&text);
+                sample_rate = Some(rate);
+                if let Some(sink) = sink.as_ref() {
+                    sink.segment(SpeechSegment {
+                        index: segments,
+                        text: text.clone(),
+                        audio: AudioPayload {
+                            mime_type: "audio/wav".into(),
+                            base64: STANDARD.encode(raw_pcm_to_wav(&chunk, rate, 1)),
+                        },
+                        ready_ms,
+                    });
+                }
+                pcm.extend_from_slice(&chunk);
+                segments += 1;
+            }
+            let audio = sample_rate.map(|rate| SynthesizedAudio {
+                audio: Some(AudioPayload {
+                    mime_type: "audio/wav".into(),
+                    base64: STANDARD.encode(raw_pcm_to_wav(&pcm, rate, 1)),
+                }),
+                first_audio_ms: first_ready_ms,
+                completion_ms: Some(started.elapsed().as_secs_f64() * 1_000.0),
+            });
+            StreamedSpeech {
+                spoken,
+                audio,
+                segments,
+                first_ready_ms,
+                live,
+            }
+        });
+        Self {
+            sentences: Some(tx),
+            worker: Some(worker),
+            splitter: SentenceSplitter::default(),
+        }
+    }
+
+    /// Feed one streamed token delta. Complete sentences leave for Piper now.
+    fn push(&mut self, delta: &str) {
+        let Some(tx) = self.sentences.as_ref() else {
+            return;
+        };
+        for sentence in self.splitter.push(delta) {
+            if tx.send(sentence).is_err() {
+                // The worker gave up; stop feeding it.
+                self.sentences = None;
+                return;
+            }
+        }
+    }
+
+    /// Close the stream and wait for the last sentence to finish synthesizing.
+    fn finish(mut self) -> StreamedSpeech {
+        if let (Some(tx), Some(rest)) = (self.sentences.as_ref(), self.splitter.flush()) {
+            let _ = tx.send(rest);
+        }
+        self.sentences = None;
+        match self.worker.take().map(|worker| worker.join()) {
+            Some(Ok(result)) => result,
+            _ => StreamedSpeech {
+                spoken: String::new(),
+                audio: None,
+                segments: 0,
+                first_ready_ms: None,
+                live: false,
+            },
         }
     }
 }
@@ -824,7 +1174,18 @@ fn mentions_alias(text: &str, aliases: &[String]) -> bool {
 pub trait TutorEngine: Send + Sync {
     fn status(&self) -> EngineStatus;
     fn opening(&self, topic: &Topic, learner_name: &str) -> EllaResult<String>;
-    fn reply(&self, request: &TutorRequest) -> EllaResult<GeneratedReply>;
+
+    /// Generate one reply.
+    ///
+    /// `speech` receives finished sentences while the rest of the reply is
+    /// still being written, so playback can start before the model stops.
+    /// Engines may ignore it; `GeneratedReply::speech` then stays `None` and
+    /// the caller synthesizes the whole reply itself.
+    fn reply(
+        &self,
+        request: &TutorRequest,
+        speech: Option<Arc<dyn SpeechSink>>,
+    ) -> EllaResult<GeneratedReply>;
 
     /// The character's first line, in role. The default is an authored opener,
     /// which is what demo mode uses; `LocalEngine` generates it so the setting
@@ -881,7 +1242,11 @@ impl TutorEngine for DemoEngine {
         Ok(opening_for(&topic.id, learner_name))
     }
 
-    fn reply(&self, request: &TutorRequest) -> EllaResult<GeneratedReply> {
+    fn reply(
+        &self,
+        request: &TutorRequest,
+        _speech: Option<Arc<dyn SpeechSink>>,
+    ) -> EllaResult<GeneratedReply> {
         let started = Instant::now();
         let lead = request
             .learner_text
@@ -1091,7 +1456,11 @@ impl TutorEngine for LocalEngine {
         Ok(text)
     }
 
-    fn reply(&self, request: &TutorRequest) -> EllaResult<GeneratedReply> {
+    fn reply(
+        &self,
+        request: &TutorRequest,
+        speech: Option<Arc<dyn SpeechSink>>,
+    ) -> EllaResult<GeneratedReply> {
         let system = match &request.chore {
             Some(context) => chore_system_prompt(&request.learner_name, context),
             None => ella_system_prompt(
@@ -1115,15 +1484,53 @@ impl TutorEngine for LocalEngine {
             );
         }
 
-        let first = self.stream_once(&system, &history, None)?;
+        // A ledger turn can be thrown away and generated again, so nothing from
+        // it may reach the speaker before the figure has been checked. Every
+        // other turn is final the moment it is written, so its sentences can be
+        // spoken as they arrive. Sentence streaming needs the resident Piper:
+        // one-shot Piper reloads the voice per call, which would cost more per
+        // sentence than the whole reply saves.
+        let retractable = request
+            .chore
+            .as_ref()
+            .and_then(|context| context.ledger.as_ref())
+            .is_some();
+        let generation_started = Instant::now();
+        let mut pipeline = self.piper_daemon.as_ref().map(|daemon| {
+            SpeechPipeline::start(
+                Arc::clone(daemon),
+                if retractable { None } else { speech },
+                generation_started,
+            )
+        });
+
+        let first = self.stream_once(&system, &history, None, pipeline.as_mut())?;
+        // Only the first generation feeds the speaker; a regenerated reply
+        // synthesizes from scratch below.
+        let streamed = pipeline.take().map(SpeechPipeline::finish);
+        if let Some(speech) = streamed.as_ref() {
+            if let Some(first_ready_ms) = speech.first_ready_ms {
+                eprintln!(
+                    "[LATENCY]     tts> first sentence audible {:.1}ms into a {:.1}ms generation ({} segments)",
+                    first_ready_ms, first.completion_ms, speech.segments
+                );
+            }
+        }
         let (text, signal) = take_signal(&first.text);
 
         // Free conversation: nothing to enforce, nothing to extract.
         let Some(ledger) = request.chore.as_ref().and_then(|c| c.ledger.as_ref()) else {
+            let (speech, streamed_segments) =
+                streamed.map_or((None, 0), |speech| speech.resolve(&text));
             return Ok(GeneratedReply {
                 text,
+                ttft_ms: first.ttft_ms,
+                completion_ms: first.completion_ms,
+                named_figure: None,
                 signal,
-                ..GeneratedReply::plain(first.text.clone(), first.ttft_ms, first.completion_ms)
+                regenerated: false,
+                speech,
+                streamed_segments,
             });
         };
 
@@ -1136,15 +1543,24 @@ impl TutorEngine for LocalEngine {
         );
         let legal = figure.map_or(true, |value| ledger.spec.accepts(ledger.current, value));
         if legal {
+            let final_text = voiced(text, signal, &ledger.spec);
+            // The figure held, so the audio synthesized ahead is the audio for
+            // the reply being returned — unless `voiced` substituted the
+            // authored line for a wordless turn, which `resolve` catches. A
+            // ledger turn never streams, so the count is always zero.
+            let (speech, _) = streamed.map_or((None, 0), |speech| speech.resolve(&final_text));
             return Ok(GeneratedReply {
-                text: voiced(text, signal, &ledger.spec),
+                speech,
+                text: final_text,
                 named_figure: figure,
                 signal,
                 regenerated: false,
                 ttft_ms: first.ttft_ms,
                 completion_ms: first.completion_ms,
+                streamed_segments: 0,
             });
         }
+        drop(streamed);
 
         // The character named a figure past its own limit, or conceded more in
         // one move than the chore allows. Regenerating costs one extra
@@ -1168,7 +1584,7 @@ impl TutorEngine for LocalEngine {
             ledger.spec.unit,
             ledger.current,
         );
-        let second = self.stream_once(&system, &history, Some(&corrective))?;
+        let second = self.stream_once(&system, &history, Some(&corrective), None)?;
         let (retry_text, retry_signal) = take_signal(&second.text);
         let retry_figure = settled_figure(
             &retry_text,
@@ -1186,6 +1602,8 @@ impl TutorEngine for LocalEngine {
                 regenerated: true,
                 ttft_ms: first.ttft_ms,
                 completion_ms: first.completion_ms + second.completion_ms,
+                speech: None,
+                streamed_segments: 0,
             });
         }
 
@@ -1200,6 +1618,8 @@ impl TutorEngine for LocalEngine {
             regenerated: true,
             ttft_ms: first.ttft_ms,
             completion_ms: first.completion_ms + second.completion_ms,
+            speech: None,
+            streamed_segments: 0,
         })
     }
     fn uses_native_stt(&self) -> bool {
@@ -1308,12 +1728,15 @@ impl LocalEngine {
     }
 
     /// One streamed generation. `corrective` is appended as a system turn when
-    /// re-generating after a ledger break.
+    /// re-generating after a ledger break. `speech` receives token deltas as
+    /// they land so whole sentences can be synthesized without waiting for the
+    /// model to finish.
     fn stream_once(
         &self,
         system: &str,
         history: &[Value],
         corrective: Option<&str>,
+        mut speech: Option<&mut SpeechPipeline>,
     ) -> EllaResult<GeneratedReply> {
         let mut messages = vec![json!({"role": "system", "content": system})];
         messages.extend(history.iter().cloned());
@@ -1374,6 +1797,9 @@ impl LocalEngine {
                         ttft_ms = Some(first_token);
                     }
                     text.push_str(delta);
+                    if let Some(pipeline) = speech.as_deref_mut() {
+                        pipeline.push(delta);
+                    }
                 }
             }
         }
@@ -1611,7 +2037,7 @@ mod tests {
                 learner_text: "I played football with friends".into(),
                 turn: 1,
                 chore: None,
-            })
+            }, None)
             .unwrap();
         assert!(reply.text.ends_with('?'));
         assert!(reply.text.len() < 180);
@@ -1648,7 +2074,7 @@ mod tests {
                 learner_text: transcript.text,
                 turn: 1,
                 chore: None,
-            })
+            }, None)
             .unwrap();
         assert!(!reply.text.is_empty());
         assert!(reply.text.contains('?'));
@@ -2049,5 +2475,213 @@ mod ledger_tests {
         assert!(!prompt.contains("525"), "the live figure leaked into the prefix");
         assert!(prompt.contains("350"), "the floor is stable and belongs in the prefix");
         assert!(ledger_state_message(&spec, 525).contains("525"));
+    }
+}
+
+#[cfg(test)]
+mod speech_stream_tests {
+    use super::*;
+
+    /// Streams `text` in small pieces, the way SSE deltas arrive, and returns
+    /// exactly what Piper would be asked to read — splitter plus the worker's
+    /// filter, so a segment that cleans down to nothing does not appear.
+    fn segments(text: &str, delta_chars: usize) -> Vec<String> {
+        let mut splitter = SentenceSplitter::default();
+        let mut raw = Vec::new();
+        let chars: Vec<char> = text.chars().collect();
+        for piece in chars.chunks(delta_chars) {
+            raw.extend(splitter.push(&piece.iter().collect::<String>()));
+        }
+        raw.extend(splitter.flush());
+        raw.into_iter()
+            .map(|sentence| spoken_form(&sentence))
+            .filter(|text| text.chars().any(char::is_alphanumeric))
+            .collect()
+    }
+
+    /// The whole point: a two-sentence reply hands Piper the first sentence
+    /// before the second one has been written.
+    #[test]
+    fn splits_a_reply_into_sentences() {
+        assert_eq!(
+            segments("That sounds delicious! What did it taste like?", 3),
+            vec!["That sounds delicious!", "What did it taste like?"]
+        );
+    }
+
+    /// Whatever the chunk size, the sentences come out the same — the splitter
+    /// must not depend on where a token boundary happens to fall.
+    #[test]
+    fn chunking_does_not_change_the_split() {
+        let text = "I went to the market. It was very crowded. Did you go too?";
+        let expected = vec![
+            "I went to the market.",
+            "It was very crowded.",
+            "Did you go too?",
+        ];
+        for size in [1, 2, 5, 17, 200] {
+            assert_eq!(segments(text, size), expected, "delta size {size}");
+        }
+    }
+
+    /// Nothing may be lost or added: what Piper reads has to be what the
+    /// learner reads.
+    #[test]
+    fn segments_rejoin_to_the_original_words() {
+        let text = "Rs 250 is my last price. Take it or leave it, my friend!";
+        for size in [1, 4, 13] {
+            assert!(same_words(&segments(text, size).join(" "), text));
+        }
+    }
+
+    /// "Rs." is how the stall owner writes rupees, and it is mid-sentence every
+    /// time. Cutting there would have Piper read "Rs" as a sentence.
+    #[test]
+    fn does_not_split_on_an_abbreviation() {
+        assert_eq!(
+            segments("My price is Rs. 250 for this cloth.", 2),
+            vec!["My price is Rs. 250 for this cloth."]
+        );
+    }
+
+    /// A decimal point is not a sentence end.
+    #[test]
+    fn does_not_split_inside_a_decimal() {
+        assert_eq!(
+            segments("The cloth is 2.5 metres wide and very soft.", 2),
+            vec!["The cloth is 2.5 metres wide and very soft."]
+        );
+    }
+
+    /// A figure at the end of a sentence still ends it, even though the
+    /// character before the full stop is a digit.
+    #[test]
+    fn splits_after_a_sentence_ending_in_a_figure() {
+        assert_eq!(
+            segments("My final price is 250. Do we have a deal?", 2),
+            vec!["My final price is 250.", "Do we have a deal?"]
+        );
+    }
+
+    /// A control token must never be cut in half: `strip_bracket_tokens` reads
+    /// an unbalanced '[' as ordinary text, so Piper would say it out loud.
+    #[test]
+    fn keeps_a_control_token_whole_and_silent() {
+        let out = segments("Fine. Take it for 250. [DEAL]", 2);
+        assert!(
+            out.iter().all(|segment| !segment.contains('[')),
+            "a bracket reached the synthesiser: {out:?}"
+        );
+        // The token is a whole segment that cleans down to nothing, so the
+        // synthesiser is never asked for it.
+        assert_eq!(out, vec!["Fine. Take it for 250."]);
+    }
+
+    /// A reply written as one long clause still has to start playing before the
+    /// last token, so it is cut at a clause boundary.
+    #[test]
+    fn cuts_a_runaway_sentence_at_a_clause_boundary() {
+        let text = "I went to the market early in the morning with my mother and my \
+                    younger sister, and we bought vegetables and some cloth for a new \
+                    shirt before the sun got too hot to walk around";
+        let out = segments(text, 4);
+        assert!(out.len() > 1, "a {}-char clause was never cut", text.len());
+        assert!(same_words(&out.join(" "), text));
+    }
+
+    /// Micro-segments are a click, not a phrase, so a short opener is merged
+    /// into the sentence after it.
+    #[test]
+    fn merges_a_segment_too_short_to_speak() {
+        assert_eq!(
+            segments("Ok. I understand what you mean now.", 2),
+            vec!["Ok. I understand what you mean now."]
+        );
+    }
+
+    /// An ellipsis is a pause inside a thought, not two sentences.
+    #[test]
+    fn treats_an_ellipsis_as_one_sentence() {
+        let out = segments("Well... that is a very low offer for this cloth.", 2);
+        assert_eq!(out.len(), 1, "{out:?}");
+    }
+
+    /// An em dash is three bytes wide. Cutting one byte past it used to slice
+    /// mid-character and panic, and a clause that long is exactly where the
+    /// soft cap looks for a boundary.
+    #[test]
+    fn cuts_safely_around_a_multi_byte_clause_mark() {
+        let text = "I walked all the way to the market before breakfast \u{2014} the one \
+                    behind the bus stand where my aunt buys her vegetables every single \
+                    morning \u{2014} and it was already completely full of people";
+        let out = segments(text, 6);
+        assert!(out.len() > 1, "{out:?}");
+        assert!(same_words(&out.join(" "), text));
+    }
+
+    fn held(spoken: &str, live: bool) -> StreamedSpeech {
+        StreamedSpeech {
+            spoken: spoken.into(),
+            audio: Some(SynthesizedAudio {
+                audio: Some(AudioPayload {
+                    mime_type: "audio/wav".into(),
+                    base64: "AAAA".into(),
+                }),
+                first_audio_ms: Some(1.0),
+                completion_ms: Some(2.0),
+            }),
+            segments: 2,
+            first_ready_ms: Some(1.0),
+            live,
+        }
+    }
+
+    /// `resolve` is the accuracy guarantee for a turn that could be
+    /// regenerated: audio only survives if it says what the reply says.
+    #[test]
+    fn held_audio_is_only_reused_when_the_text_still_matches() {
+        let (audio, played) = held("Take it for 250.", false).resolve("Take it for 250.");
+        assert!(audio.is_some());
+        // Held back, so the window has heard nothing and gets the recording.
+        assert_eq!(played, 0);
+
+        // Collapsed whitespace is not a change of words.
+        assert!(held("Take it  for 250.", false)
+            .resolve("Take it for 250.")
+            .0
+            .is_some());
+
+        // The authored refusal replaced the reply: the held audio is wrong.
+        assert!(held("Take it for 250.", false)
+            .resolve("That is below what I paid for it.")
+            .0
+            .is_none());
+    }
+
+    /// Once a segment has been spoken there is nothing to take back, so live
+    /// audio is always the audio for the turn.
+    #[test]
+    fn live_audio_is_never_discarded() {
+        let (audio, played) = held("Hello there.", true).resolve("Something else entirely.");
+        assert!(audio.is_some());
+        assert_eq!(played, 2);
+    }
+
+    /// A stream that dies partway through must not report segments: the window
+    /// would play half a reply and stop mid-thought. Reporting zero makes it
+    /// drop what it has and play the complete recording instead.
+    #[test]
+    fn an_aborted_stream_reports_nothing_played() {
+        // What the worker returns when Piper fails on a later sentence.
+        let aborted = StreamedSpeech {
+            spoken: String::new(),
+            audio: None,
+            segments: 1,
+            first_ready_ms: Some(180.0),
+            live: false,
+        };
+        let (audio, played) = aborted.resolve("Hello there. How was your day?");
+        assert!(audio.is_none(), "aborted audio must not be reused");
+        assert_eq!(played, 0, "the window must not think it has the whole reply");
     }
 }

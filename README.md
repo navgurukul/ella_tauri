@@ -122,12 +122,24 @@ The native voice route is:
 WebAudio PCM -> stop-time energy VAD -> SpeechToTextEngine
                                       -> Canary/transcribe.cpp (primary)
                                       -> Whisper HTTP (fallback)
-             -> streamed llama.cpp -> Piper -> WebView playback
+             -> streamed llama.cpp -> Piper (per sentence) -> WebView playback
 ```
 
 `SpeechToTextEngine` and `SttRouter` keep the STT boundary independent of the
 Canary adapter, so a future Parakeet streaming adapter does not change the
 application or UI contracts.
+
+Piper runs a sentence behind the language model rather than after it. Whole
+sentences leave the token stream as they complete, are synthesized on a worker
+thread, and reach the window as `ella://speech-segment` events, which the
+WebView plays back-to-back on one AudioContext clock. Ella starts talking
+roughly 300-700 ms before the reply has finished being written, and Piper is
+about nine times faster than speech, so playback never runs dry once it starts.
+
+A turn that could still be thrown away does not stream: a ledger chore may
+regenerate its reply when the character breaks its own limit, so its sentences
+are synthesized ahead but held back, and the audio is only reused when it says
+exactly what the reply says. Nothing the learner hears is ever retracted.
 
 Environment overrides:
 

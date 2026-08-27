@@ -121,6 +121,21 @@ pub struct TurnTimings {
     pub total_ms: u64,
 }
 
+/// One sentence of a reply, synthesized and pushed to the window while the
+/// rest of the turn is still being written. Playback starts on the first of
+/// these instead of waiting for the whole reply, which is most of the turn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SpeechStreamEvent {
+    pub session_id: String,
+    pub turn: u32,
+    /// 0-based playback order. Segments must be played in this order.
+    pub index: u32,
+    pub text: String,
+    pub audio: AudioPayload,
+    /// Milliseconds from the start of the generation to this segment.
+    pub ready_ms: f64,
+}
+
 /// What the live progress bar draws, and what the app decided this turn. Sent
 /// only for ledger chores.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -148,6 +163,11 @@ pub struct TurnResult {
     pub ledger: Option<LedgerView>,
     /// `Some` once the character has agreed or walked away.
     pub signal: Option<TurnSignal>,
+    /// How many `SpeechStreamEvent`s this turn already sent. Above zero, the
+    /// reply has been playing since before this result arrived, and `audio` is
+    /// the same recording kept for the replay button — playing it again would
+    /// repeat the turn.
+    pub streamed_segments: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

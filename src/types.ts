@@ -86,6 +86,19 @@ export interface LedgerView {
 /** How a chore character signed off. */
 export type TurnSignal = "deal" | "walk";
 
+/** One sentence of a reply, synthesized and pushed while the rest of the turn
+ * is still being written. Playback starts on the first of these. */
+export interface SpeechSegment {
+  session_id: string;
+  turn: number;
+  /** 0-based playback order. Segments must be played in this order. */
+  index: number;
+  text: string;
+  audio: AudioPayload;
+  /** Milliseconds from the start of the generation to this segment. */
+  ready_ms: number;
+}
+
 export interface TurnResult {
   learner_message: Message;
   ella_message: Message;
@@ -95,6 +108,10 @@ export interface TurnResult {
   timings?: TurnTimings | null;
   ledger?: LedgerView | null;
   signal?: TurnSignal | null;
+  /** How many `SpeechSegment`s this turn already sent. Above zero, the reply
+   * has been playing since before this result arrived, and `audio` is the same
+   * recording kept for the replay button — playing it again repeats the turn. */
+  streamed_segments: number;
 }
 
 export interface TurnTimings {
@@ -146,6 +163,9 @@ export interface EllaBridge {
   getSession(sessionId: string): Promise<Session>;
   sendTextTurn(sessionId: string, text: string): Promise<TurnResult>;
   sendVoiceTurn(input: VoiceTurnInput): Promise<TurnResult>;
+  /** Sentence audio arriving mid-turn. Resolves to an unsubscribe function.
+   * Only the Tauri bridge streams; in the browser a turn speaks when it ends. */
+  onSpeechSegment?(handler: (segment: SpeechSegment) => void): Promise<() => void>;
   /** Live chunked STT while recording; only implemented by the Tauri bridge. */
   beginVoiceStream?(sessionId: string): Promise<string>;
   pushVoiceStream?(streamId: string, samples: number[], sampleRate: number): Promise<void>;

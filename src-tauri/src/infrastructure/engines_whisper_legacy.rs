@@ -371,7 +371,7 @@ mod tests {
                 learner_text: "I played football with friends".into(),
                 turn: 1,
                             chore: None,
-            })
+            }, None)
             .unwrap();
         assert!(reply.ends_with('?'));
         assert!(reply.len() < 180);
@@ -403,7 +403,7 @@ mod tests {
                 learner_text: transcript,
                 turn: 1,
                             chore: None,
-            })
+            }, None)
             .unwrap();
         assert!(!reply.is_empty());
         assert!(reply.contains('?'));
