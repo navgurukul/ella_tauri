@@ -1804,6 +1804,22 @@ button { font-family: inherit; }
 }
 .ob-welcome__login .link-button { font-size: 14px; }
 
+/* Short laptop screens: at full size the close-up rises past the title and
+   swallows it, so she shrinks and sits lower to keep the copy readable. */
+@media (max-height: 820px) {
+  .ob-welcome__title { top: 96px; font-size: 54px; }
+  .ella--ob-hero { bottom: -56px; --ella-scale: 0.8 !important; }
+  .ob-welcome__foot { bottom: 44px; gap: 12px; }
+  .ob-welcome__cta { width: 300px; height: 54px; font-size: 16px; }
+}
+
+@media (max-height: 680px) {
+  .ob-welcome__title { top: 54px; font-size: 42px; }
+  .ella--ob-hero { bottom: -44px; --ella-scale: 0.62 !important; }
+  .ob-welcome__foot { bottom: 26px; }
+  .ob-welcome__cta { width: 268px; height: 50px; }
+}
+
 /* the three form steps share a chrome: back button, progress dots, corner Ella */
 .ob__back {
   position: absolute;
