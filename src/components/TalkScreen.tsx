@@ -18,8 +18,17 @@ import {
   type SpeechQueueCallbacks,
 } from "../lib/speech";
 import { llog, logServerTimings, markTurnStart, turnElapsed } from "../lib/latency";
-import { levelName } from "../lib/presentation";
-import type { AppSnapshot, Session, SessionSummary, TurnResult } from "../types";
+import type {
+  AudioPayload,
+  Session,
+  SessionSummary,
+  SpokenLine,
+  TurnResult,
+  WordSpan,
+} from "../types";
+
+/** Anything that can be played with its word timings: a turn, or the opening. */
+type Playback = { audio?: AudioPayload | null; speech_words: WordSpan[] };
 
 const MIC_HINT: Record<EllaState, string> = {
   resting: "Tap to speak",
@@ -30,12 +39,10 @@ const MIC_HINT: Record<EllaState, string> = {
 
 export function TalkScreen({
   session,
-  snapshot,
   onSessionChange,
   onComplete,
 }: {
   session: Session;
-  snapshot: AppSnapshot;
   onSessionChange: (session: Session) => void;
   onComplete: (summary: SessionSummary) => void;
 }) {
@@ -54,6 +61,9 @@ export function TalkScreen({
   // instead of all at once when the turn returns.
   const [spokenWords, setSpokenWords] = useState<string[]>([]);
   const [spokenIndex, setSpokenIndex] = useState(-1);
+  // Ella's opening, kept so "Hear it again" can replay it with its timings
+  // instead of dropping to the system voice.
+  const [openingLine, setOpeningLine] = useState<SpokenLine | null>(null);
 
   const voice = useRef(createVoiceCapture());
   const voiceStreamId = useRef<string | null>(null);
@@ -73,7 +83,6 @@ export function TalkScreen({
   const focusMicAfterModeSwitch = useRef(false);
   const mounted = useRef(true);
 
-  const level = levelName(snapshot.learner);
   const latestElla = [...session.messages].reverse().find((message) => message.speaker === "ella");
 
   async function cancelVoiceStream() {
@@ -87,7 +96,7 @@ export function TalkScreen({
 
   useEffect(() => {
     mounted.current = true;
-    if (session.messages.length === 1 && latestElla) playElla(latestElla.content);
+    if (session.messages.length === 1 && latestElla) speakOpening(latestElla.content);
     return () => {
       mounted.current = false;
       micOperation.current += 1;
@@ -142,6 +151,47 @@ export function TalkScreen({
     speechQueue.current = null;
     if (playbackWatchdog.current !== null) window.clearTimeout(playbackWatchdog.current);
     playbackWatchdog.current = null;
+  }
+
+  /**
+   * Say Ella's opening aloud.
+   *
+   * The text is already on screen, so unlike a reply there is nothing to
+   * reveal — but it goes through the same queue so that it is spoken by Piper
+   * rather than the system voice, and highlighted word by word like everything
+   * after it. Falls back to `playElla` wherever the backend cannot speak.
+   */
+  function speakOpening(text: string) {
+    if (!bridge.speakOpening || !bridge.onSpeechSegment) {
+      playElla(text);
+      return;
+    }
+    stopPlayback();
+    setSpokenWords([]);
+    setSpokenIndex(-1);
+    setError(null);
+    setState("speaking");
+    const generation = playbackGeneration.current;
+    const queue = createSpeechQueue(queueCallbacks(generation, "opening:first-sentence"));
+    speechQueue.current = { generation, queue };
+    void bridge
+      .speakOpening(session.id)
+      .then((line) => {
+        if (!mounted.current || playbackGeneration.current !== generation) return;
+        // Keep it for the replay button, which otherwise has no audio for the
+        // opening and would fall back to the system voice.
+        setOpeningLine(line);
+        if (line.streamed_segments > 0 && queue.received > 0) {
+          queue.finish(line.streamed_segments);
+          return;
+        }
+        // Nothing streamed: play the recording, or the system voice.
+        playElla(text, line.audio ? line : undefined);
+      })
+      .catch(() => {
+        if (!mounted.current || playbackGeneration.current !== generation) return;
+        playElla(text);
+      });
   }
 
   /** What every queue on this screen reports back, live turn or replay alike. */
@@ -202,7 +252,7 @@ export function TalkScreen({
     }, duration);
   }
 
-  function playElla(text: string, result?: TurnResult) {
+  function playElla(text: string, result?: Playback) {
     stopPlayback();
     const generation = playbackGeneration.current;
     let playbackSettled = false;
@@ -212,7 +262,6 @@ export function TalkScreen({
     // reply again highlights the words the same way saying it the first time
     // did. Only the browser-speech fallback below has no timings to follow.
     if (result?.audio) {
-      setSpokenWords(text.split(/\s+/).filter(Boolean));
       setSpokenIndex(-1);
       const queue = createSpeechQueue(queueCallbacks(generation, "playback:replay"));
       speechQueue.current = { generation, queue };
@@ -525,6 +574,11 @@ export function TalkScreen({
   // so which one renders is invisible.
   const promptWords =
     spokenWords.length > 0 ? spokenWords : prompt.split(/\s+/).filter(Boolean);
+  // Words are only dimmed while a clip with timings is actually playing. There
+  // is a beat of silence before Piper's first word, and treating that as "not
+  // playing" would show the reply at full contrast and then dim it the instant
+  // she starts, which reads as a flicker.
+  const followingWords = spokenWords.length > 0 && state === "speaking";
   const interactionLocked = sending || micStarting || state === "thinking";
   // Ella now starts talking while the turn is still committing, so for a moment
   // she is speaking and the microphone is not yet available. Promising an
@@ -552,11 +606,7 @@ export function TalkScreen({
   return (
     <div className="screen screen--talk" data-screen="talk">
       <header className="talk-head">
-        <span className="pill pill--white">
-          {session.topic_label}
-          <span className="pill__dot">·</span>
-          <b>{level}</b>
-        </span>
+        <span className="pill pill--white">{session.topic_label}</span>
         <button
           type="button"
           className="btn btn--quiet"
@@ -593,9 +643,7 @@ export function TalkScreen({
           <p className="talk-prompt">
             {promptWords.map((word, index) => (
               <Fragment key={`${index}-${word}`}>
-                <span className={index === spokenIndex ? "talk-word is-spoken" : "talk-word"}>
-                  {word}
-                </span>
+                <span className={wordClass(index, spokenIndex, followingWords)}>{word}</span>
                 {index < promptWords.length - 1 ? " " : ""}
               </Fragment>
             ))}
@@ -620,7 +668,7 @@ export function TalkScreen({
               disabled={interactionLocked || state === "listening"}
               onClick={() => {
                 setReaction(null);
-                playElla(latestElla.content, lastTurn ?? undefined);
+                playElla(latestElla.content, lastTurn ?? openingLine ?? undefined);
               }}
             >
               <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
@@ -733,6 +781,22 @@ export function TalkScreen({
       </div>
     </div>
   );
+}
+
+/**
+ * How one word of the reply is drawn.
+ *
+ * Three states while Ella is talking: said, saying, and not yet said. The words
+ * ahead are dimmed rather than hidden — they hold their place, so the line
+ * never re-wraps as she speaks, they can be read ahead of the voice, and a
+ * sentence arriving mid-reply fades in faint instead of appearing at full
+ * contrast. When she is not talking, or is talking without timings to follow,
+ * the whole reply is drawn plainly.
+ */
+function wordClass(index: number, spoken: number, following: boolean): string {
+  if (!following) return "talk-word";
+  if (index === spoken) return "talk-word is-spoken";
+  return index < spoken ? "talk-word is-said" : "talk-word is-ahead";
 }
 
 function errorMessage(reason: unknown): string {

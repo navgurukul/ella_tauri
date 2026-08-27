@@ -265,6 +265,27 @@ fn run_topic(options: &Options, topic_id: &str) -> Result<(), String> {
     if let Some(opening) = session.messages.first() {
         println!("  ella     {}", opening.content);
     }
+    // The opening is spoken through the same pipeline as a reply, so it should
+    // stream and carry timings too.
+    let opening_started = Instant::now();
+    match service.speak_opening(&session.id) {
+        Ok(line) => {
+            let (first_ms, segments) = recorder.take();
+            println!(
+                "  opening  {} sentence(s), {} word timings, whole line ready in {:.0}ms{}",
+                segments,
+                line.speech_words.len(),
+                opening_started.elapsed().as_secs_f64() * 1_000.0,
+                first_ms
+                    .map(|ms| format!(" | starts talking at {ms:.0}ms"))
+                    .unwrap_or_default(),
+            );
+            for line in recorder.take_words() {
+                println!("  words    {line}");
+            }
+        }
+        Err(error) => println!("  opening  could not be spoken: {error}"),
+    }
 
     let mut turns = Vec::new();
     for (index, line) in TOPIC_SCRIPT.iter().take(options.max_turns).enumerate() {

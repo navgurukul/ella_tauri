@@ -8,6 +8,7 @@ import type {
   Session,
   SessionSummary,
   SpeechSegment,
+  SpokenLine,
   Topic,
   TurnResult,
   VoiceStreamFinishInput,
@@ -106,6 +107,7 @@ class TauriBridge implements EllaBridge {
     invoke<Learner>("save_learner", { name, age: age ?? null });
   startSession = (topicId: string) => invoke<Session>("start_session", { topicId });
   getSession = (sessionId: string) => invoke<Session>("get_session", { sessionId });
+  speakOpening = (sessionId: string) => invoke<SpokenLine>("speak_opening", { sessionId });
   sendTextTurn = (sessionId: string, text: string) =>
     invoke<TurnResult>("send_text_turn", { sessionId, text });
   sendVoiceTurn = ({ sessionId, samples, sampleRate, browserTranscript }: VoiceTurnInput) =>

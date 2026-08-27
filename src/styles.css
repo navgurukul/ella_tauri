@@ -401,7 +401,6 @@ button { font-family: inherit; }
 }
 .profile__text { flex: 1; min-width: 0; }
 .profile__text strong { display: block; font-size: 14px; font-weight: 600; }
-.profile__text small { display: block; font-size: 12px; font-weight: 500; color: var(--ink-48); }
 .profile__reset {
   display: flex;
   align-items: center;
@@ -1353,6 +1352,23 @@ button { font-family: inherit; }
 .talk-word {
   transition: color 90ms linear;
 }
+/* A sentence Piper has finished arrives while the previous one is still being
+   spoken. Fading it in faint is what keeps that from reading as a glitch. */
+.talk-word {
+  animation: talk-word-in 320ms ease-out both;
+}
+@keyframes talk-word-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+/* Words Ella has not reached yet hold their place so the line never re-wraps
+   mid-sentence, and stay readable enough to be read ahead of the voice. */
+.talk-word.is-ahead {
+  color: var(--ink-45);
+}
+.talk-word.is-said {
+  color: var(--ink);
+}
 /* The highlight has to be findable at a glance without turning the sentence
    into stripes: the spoken word takes the accent and full weight, and a soft
    wash behind it survives on a colour-blind or low-contrast screen where the
@@ -1367,6 +1383,7 @@ button { font-family: inherit; }
 @media (prefers-reduced-motion: reduce) {
   .talk-word {
     transition: none;
+    animation: none;
   }
 }
 
@@ -2017,25 +2034,6 @@ button { font-family: inherit; }
 
 /* placement talk reuses the conversation stage */
 .ob-placement { background: var(--canvas); }
-.pill--white b.pill__accent { color: var(--violet); }
-.level-badge {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 0;
-  padding: 10px 22px;
-  border-radius: var(--r-pill);
-  background: var(--lilac);
-  color: var(--violet);
-}
-.level-badge .mono { letter-spacing: 0.12em; font-size: 11px; }
-.level-badge b {
-  font-family: var(--display);
-  font-size: 22px;
-  font-weight: 800;
-  line-height: 1;
-}
-
 .ob__error {
   position: absolute;
   left: 0;

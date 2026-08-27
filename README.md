@@ -142,8 +142,13 @@ are synthesized ahead but held back, and the audio is only reused when it says
 exactly what the reply says. Nothing the learner hears is ever retracted.
 
 Each segment carries its own text and word timings, so the reply appears on
-screen as it is spoken rather than arriving whole when the turn returns, and the
-word being spoken is highlighted. Piper hands back audio without timings;
+screen as it is spoken rather than arriving whole when the turn returns. Words
+Ella has not reached yet are dimmed rather than hidden: they hold their place so
+the line never re-wraps mid-sentence, they can be read ahead of the voice, and a
+sentence that Piper finishes mid-reply fades in faint instead of appearing at
+full contrast. Ella's opening goes through the same pipeline — `speak_opening`
+is a separate command from `start_session` so the conversation is on screen
+before Piper is asked for anything. Piper hands back audio without timings;
 `infrastructure/speech_timing.rs` estimates them from syllables, characters and
 punctuation, anchored to the sentence's exact duration and to the leading and
 trailing silence measured off the PCM. Fitted and measured against real Piper

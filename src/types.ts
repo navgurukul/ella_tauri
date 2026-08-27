@@ -108,6 +108,15 @@ export interface SpeechSegment {
   words: WordSpan[];
 }
 
+/** The result of speaking a line the app already had — Ella's opening. Carries
+ * the same three things a turn does, so the screen highlights it and the replay
+ * button can say it again, exactly as it does for a reply. */
+export interface SpokenLine {
+  audio?: AudioPayload | null;
+  speech_words: WordSpan[];
+  streamed_segments: number;
+}
+
 export interface TurnResult {
   learner_message: Message;
   ella_message: Message;
@@ -171,6 +180,9 @@ export interface EllaBridge {
   bootstrap(): Promise<AppSnapshot>;
   saveLearner(name: string, age?: number | null): Promise<Learner>;
   startSession(topicId: string): Promise<Session>;
+  /** Say Ella's opening aloud, streaming it like a reply. Tauri bridge only;
+   * in the browser the opening falls back to system speech. */
+  speakOpening?(sessionId: string): Promise<SpokenLine>;
   getSession(sessionId: string): Promise<Session>;
   sendTextTurn(sessionId: string, text: string): Promise<TurnResult>;
   sendVoiceTurn(input: VoiceTurnInput): Promise<TurnResult>;
@@ -231,8 +243,3 @@ export interface WeeklyDigest {
   talks: number;
 }
 
-/** What the onboarding placement talk hands back once it has really run. */
-export interface PlacementResult {
-  /** The friendly level name the talk lands the learner on. */
-  level: string;
-}

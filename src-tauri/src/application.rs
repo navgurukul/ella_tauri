@@ -11,7 +11,7 @@ use crate::{
     domain::{
         find_character, find_chore, topics, topics_for_age, AppSnapshot, ChoreContext, LedgerTurn,
         AudioPayload, LedgerView, Learner, Message, Session, SessionSummary, SpeechStreamEvent,
-        TurnSignal, WinCondition, Speaker, Topic, TurnResult, TutorRequest, WordSpan,
+        SpokenLine, TurnSignal, WinCondition, Speaker, Topic, TurnResult, TutorRequest, WordSpan,
     },
     error::{EllaError, EllaResult},
     infrastructure::{
@@ -151,6 +151,41 @@ impl AppService {
         };
         self.database.save_learner(&learner)?;
         Ok(learner)
+    }
+
+    /// Say Ella's opening line aloud.
+    ///
+    /// Kept out of `start_session` so the conversation is on screen before
+    /// Piper is asked for anything: the screen appears immediately and Ella
+    /// starts talking a sentence later, rather than the whole thing waiting on
+    /// synthesis. Sentences stream, so the opening is highlighted word by word
+    /// like every reply after it.
+    pub fn speak_opening(&self, session_id: &str) -> EllaResult<SpokenLine> {
+        let session = self.database.session(session_id)?;
+        let opening = session
+            .messages
+            .iter()
+            .find(|message| message.speaker == Speaker::Ella)
+            .map(|message| message.content.clone())
+            .ok_or_else(|| {
+                EllaError::Conflict("This conversation has no opening line to say.".into())
+            })?;
+        let speech: Option<Arc<dyn SpeechSink>> = self.speech_broadcast().map(|broadcast| {
+            Arc::new(TurnSpeech {
+                broadcast,
+                session_id: session_id.to_owned(),
+                // Turn 0 is the opening: it answers nothing.
+                turn: 0,
+            }) as Arc<dyn SpeechSink>
+        });
+        let synthesized = self.engine.speak(&opening, speech)?;
+        Ok(SpokenLine {
+            // Zero means the window heard nothing yet and has to play the
+            // recording — which is what demo mode and a Piper-less install do.
+            streamed_segments: synthesized.segments,
+            audio: synthesized.audio,
+            speech_words: synthesized.words,
+        })
     }
 
     pub fn start_session(&self, topic_id: &str) -> EllaResult<Session> {

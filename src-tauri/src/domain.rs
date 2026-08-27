@@ -147,6 +147,16 @@ pub struct SpeechStreamEvent {
     pub words: Vec<WordSpan>,
 }
 
+/// The result of speaking a line the app already had — Ella's opening. Carries
+/// the same three things a turn does, so the screen highlights it, and the
+/// replay button can say it again, exactly as it does for a reply.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SpokenLine {
+    pub audio: Option<AudioPayload>,
+    pub speech_words: Vec<WordSpan>,
+    pub streamed_segments: u32,
+}
+
 /// What the live progress bar draws, and what the app decided this turn. Sent
 /// only for ledger chores.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

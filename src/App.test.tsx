@@ -100,6 +100,22 @@ describe("Ella learner flow", () => {
   beforeEach(() => window.localStorage.clear());
 
   /**
+   * With no clip playing there is no current word, so the reply must be drawn
+   * plainly — dimming it would leave the screen looking broken between turns.
+   */
+  it("draws the reply plainly when nothing is being spoken", async () => {
+    await onboard("Aarav");
+    fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
+    await screen.findByText("End talk");
+
+    const words = document.querySelectorAll(".talk-prompt .talk-word");
+    expect(words.length).toBeGreaterThan(3);
+    for (const word of words) {
+      expect(word.className).toBe("talk-word");
+    }
+  });
+
+  /**
    * Piper now speaks a sentence before the turn returns, which means the reply
    * would otherwise be heard several seconds before it appeared on screen. The
    * segment events carry their own text so it lands with the voice.
@@ -160,6 +176,8 @@ describe("Ella learner flow", () => {
       // Real spaces, not CSS-generated ones: the sentence must be readable and
       // copyable, not run together.
       expect(promptText()).toContain("That sounds delicious!");
+      // Every word is its own element so one of them can be marked.
+      expect(document.querySelectorAll(".talk-prompt .talk-word")).toHaveLength(3);
 
       release?.({} as TurnResult);
       await waitFor(() => expect(held).toHaveResolved());

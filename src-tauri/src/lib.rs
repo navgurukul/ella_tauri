@@ -61,6 +61,7 @@ pub fn run() {
             ipc::save_learner,
             ipc::start_session,
             ipc::start_chore,
+            ipc::speak_opening,
             ipc::get_session,
             ipc::send_text_turn,
             ipc::send_voice_turn,

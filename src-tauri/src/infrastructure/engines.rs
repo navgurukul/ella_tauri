@@ -75,6 +75,9 @@ pub struct SynthesizedAudio {
     pub completion_ms: Option<f64>,
     /// When each word of the whole reply is spoken, from the start of `audio`.
     pub words: Vec<WordSpan>,
+    /// How many sentences this was cut into and pushed to the sink. Zero means
+    /// nothing was streamed, so the whole recording still has to be played.
+    pub segments: u32,
 }
 
 const PIPER_DAEMON_SOURCE: &str = include_str!("piper_daemon.py");
@@ -546,6 +549,7 @@ impl SpeechPipeline {
                 first_audio_ms: first_ready_ms,
                 completion_ms: Some(started.elapsed().as_secs_f64() * 1_000.0),
                 words: reply_words,
+                segments,
             });
             StreamedSpeech {
                 spoken,
@@ -704,7 +708,7 @@ fn chore_system_prompt(learner_name: &str, context: &ChoreContext) -> String {
     if let Some(ledger) = &context.ledger {
         // The *rules* are stable and belong in the cached prefix. The live
         // figure does not — see `ledger_state_message`.
-        prompt.push_str(&ledger_rules_fragment(&ledger.spec));
+        prompt.push_str(ledger_rules_fragment(&ledger.spec));
     }
     // "One or two short sentences" on its own is read by a 3B as permission to
     // answer with the number alone: the market bench run came back "Rs 600",
@@ -748,26 +752,19 @@ fn chore_system_prompt(learner_name: &str, context: &ChoreContext) -> String {
 /// in the cached prefix. `direction` decides whether `limit` reads as a floor
 /// or a ceiling, which is what lets one fragment cover a price talked down and
 /// a refund pushed up.
-fn ledger_rules_fragment(spec: &LedgerSpec) -> String {
-    let unit = &spec.unit;
+fn ledger_rules_fragment(spec: &LedgerSpec) -> &'static str {
     match spec.direction {
-        Direction::Down => format!(
-            "You will NEVER go below {unit} {}. Come down by at most {unit} {} in any \
-             single reply, and only when they have given you an actual reason. If they \
-             name a figure below your floor, refuse it plainly and restate your own. \
-             You are the one selling: coming down is your move to make and never \
-             theirs, so never ask them to make it cheaper. ",
-            spec.limit, spec.max_step
-        ),
-        Direction::Up => format!(
-            "You will NEVER go above {unit} {}. Increase your offer by at most {unit} {} \
-             in any single reply, and only when they have made a specific, reasonable \
-             point. If they demand more than your ceiling, refuse plainly and restate \
-             your own figure. You are the one holding their money: raising what you \
-             give back is your move to make and never theirs, so never ask them to \
-             ask for less. ",
-            spec.limit, spec.max_step
-        ),
+        Direction::Down => {
+            "If they name a figure below what you are willing to take, refuse it plainly \
+             and stay where you are. You are the one selling: coming down is your move \
+             to make and never theirs, so never ask them to make it cheaper. "
+        }
+        Direction::Up => {
+            "If they demand more than you are willing to give, refuse plainly and stay \
+             where you are. You are the one holding their money: raising what you give \
+             back is your move to make and never theirs, so never ask them to ask for \
+             less. "
+        }
     }
 }
 
@@ -784,6 +781,12 @@ fn ledger_state_message(spec: &LedgerSpec, current: i32) -> String {
         ),
     }
 }
+
+/// Said last in every ledger turn message, so the model never reads a figure
+/// as the most recent thing in its context. Positive rather than prohibitive:
+/// the leading prompt already forbids bare figures and the 3B ignores it.
+const LEDGER_REPLY_SHAPE: &str = "Begin your reply by answering what they just said, in \
+     your own words. Any figure comes after that, inside a sentence.";
 
 /// Everything about *this* turn that will read differently next turn: where
 /// the figure stands, whether it is time to close, and how much conversation
@@ -807,12 +810,12 @@ fn chore_turn_message(context: &ChoreContext, turn: u32) -> Option<String> {
             // the rules fragment, and the haggling line) and only one says
             // move. A 3B resolves that by never moving at all, which is a
             // chore no learner can win, so the app says when it is time.
-            parts.push(format!(
+            parts.push(
                 "You are still on your opening figure and they have been working on you \
-                 for a while. Give some ground this turn: name a new figure up to {} {} \
-                 from where you are, and say what made you move.",
-                ledger.spec.unit, ledger.spec.max_step
-            ));
+                 for a while. Give some ground this turn: name a new figure and say what \
+                 made you move."
+                    .into(),
+            );
         } else if ledger.spec.reached_target(ledger.current) {
             // The character has conceded as far as the chore asks it to. From
             // here the honest move is to close, not to keep sliding: the
@@ -828,6 +831,14 @@ fn chore_turn_message(context: &ChoreContext, turn: u32) -> Option<String> {
         }
     }
     parts.extend(chore_closing_note(turn, context.max_turns));
+    // A trailing system message that ends on a figure teaches the model to open
+    // its reply with that figure: the market bench run answered "Rs 500 then."
+    // and "Rs 425 then." Same prompt and seeds with this sentence moved after
+    // the number went from 5/5 bare-figure openings to 0/5, so the last thing
+    // the model reads is always the shape of the reply, never the figure.
+    if context.ledger.is_some() {
+        parts.push(LEDGER_REPLY_SHAPE.into());
+    }
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
@@ -1210,6 +1221,21 @@ pub trait TutorEngine: Send + Sync {
     fn uses_native_stt(&self) -> bool;
     fn transcribe(&self, samples: &[i16], sample_rate: u32) -> EllaResult<Transcription>;
     fn synthesize(&self, text: &str) -> EllaResult<SynthesizedAudio>;
+
+    /// Speak a line that is already written, sentence by sentence through
+    /// `speech`, so an authored opening reaches the learner the same way a
+    /// generated reply does: first sentence audible while the rest is still
+    /// being synthesized, and word timings for the highlight.
+    ///
+    /// The default synthesizes the whole line at once, which is what demo mode
+    /// and a Piper-less install do.
+    fn speak(
+        &self,
+        text: &str,
+        _speech: Option<Arc<dyn SpeechSink>>,
+    ) -> EllaResult<SynthesizedAudio> {
+        self.synthesize(text)
+    }
 }
 
 pub fn engine_from_environment(packaged_engine_root: Option<PathBuf>) -> Box<dyn TutorEngine> {
@@ -1302,6 +1328,7 @@ impl TutorEngine for DemoEngine {
             first_audio_ms: None,
             completion_ms: None,
             words: Vec::new(),
+            segments: 0,
         })
     }
 }
@@ -1645,6 +1672,14 @@ impl TutorEngine for LocalEngine {
         self.stt.transcribe(samples, sample_rate)
     }
 
+    fn speak(
+        &self,
+        text: &str,
+        speech: Option<Arc<dyn SpeechSink>>,
+    ) -> EllaResult<SynthesizedAudio> {
+        self.speak_in_sentences(text, speech)
+    }
+
     fn synthesize(&self, text: &str) -> EllaResult<SynthesizedAudio> {
         let voice_sidecar = PathBuf::from(format!("{}.json", self.piper_voice.display()));
         if !self.piper_binary.is_file() || !self.piper_voice.is_file() || !voice_sidecar.is_file() {
@@ -1653,6 +1688,7 @@ impl TutorEngine for LocalEngine {
                 first_audio_ms: None,
                 completion_ms: None,
                 words: Vec::new(),
+                segments: 0,
             });
         }
         if let Some(daemon) = &self.piper_daemon {
@@ -1678,6 +1714,7 @@ impl TutorEngine for LocalEngine {
                         first_audio_ms: Some(first_audio_ms),
                         completion_ms: Some(completion_ms),
                         words,
+                        segments: 0,
                     });
                 }
                 Err(error) => eprintln!(
@@ -1690,6 +1727,32 @@ impl TutorEngine for LocalEngine {
 }
 
 impl LocalEngine {
+    /// Sentence-stream an already-written line. Same pipeline as a reply; the
+    /// only difference is that the whole text arrives in one push instead of
+    /// token by token, so every sentence is queued immediately and Piper is the
+    /// only thing the learner waits on.
+    fn speak_in_sentences(
+        &self,
+        text: &str,
+        speech: Option<Arc<dyn SpeechSink>>,
+    ) -> EllaResult<SynthesizedAudio> {
+        let Some(daemon) = self.piper_daemon.as_ref() else {
+            return self.synthesize(text);
+        };
+        let mut pipeline = SpeechPipeline::start(Arc::clone(daemon), speech, Instant::now());
+        pipeline.push(text);
+        let streamed = pipeline.finish();
+        // An authored line is never regenerated, so what was spoken is what the
+        // screen shows; `resolve` still guards a pipeline that died partway.
+        let (audio, played) = streamed.resolve(text);
+        match audio {
+            Some(audio) => Ok(SynthesizedAudio {
+                segments: played,
+                ..audio
+            }),
+            None => self.synthesize(text),
+        }
+    }
 
     /// Fire-and-forget llama.cpp prompt-cache warmup with this session's stable
     /// prefix, so turn 1 does not pay full prompt evaluation. Both kinds of
@@ -1779,6 +1842,12 @@ impl LocalEngine {
                 "messages": messages,
                 "temperature": 0.65,
                 "max_tokens": 90,
+                // The deposit bench run said "<echo them>, then. I'll give you
+                // Rs N back." four turns running. "Do not reuse a sentence you
+                // have already said" is in the prompt and does nothing; the
+                // penalties reach the repetition the prompt cannot.
+                "presence_penalty": 0.4,
+                "frequency_penalty": 0.3,
                 "stream": true,
                 "cache_prompt": true,
                 "id_slot": self.llm_slot
@@ -1926,6 +1995,7 @@ impl LocalEngine {
             first_audio_ms,
             completion_ms: Some(completion_ms),
             words: word_spans(text, &pcm, 22_050),
+            segments: 0,
         })
     }
 }
@@ -2280,6 +2350,39 @@ mod ledger_tests {
     }
 
     #[test]
+    fn a_ledger_turn_message_never_ends_on_a_figure() {
+        // Measured against the live 3B: with the number last, 5/5 replies opened
+        // "Rs 550."; with this instruction last, 0/5 did.
+        for (current, agreed, turn) in
+            [(600, false, 1), (525, false, 4), (400, true, 6), (525, false, 12)]
+        {
+            let message =
+                chore_turn_message(&chore_context("market-cloth-price", current, agreed), turn)
+                    .unwrap();
+            assert!(
+                message.ends_with("inside a sentence."),
+                "turn {turn} ends on `{}`",
+                message.rsplit(' ').next().unwrap_or_default()
+            );
+            let tail = message.trim_end_matches('.').rsplit(' ').next().unwrap_or_default();
+            assert!(
+                !tail.chars().any(|c| c.is_ascii_digit()),
+                "turn {turn} still leaves a figure as the last thing the model reads"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rubric_chore_gets_no_reply_shape_because_it_has_no_figure() {
+        let context = chore_context("sell-me-a-pen", 0, false);
+        let last = chore_turn_message(&context, context.max_turns).unwrap();
+        assert!(
+            !last.contains("Any figure comes after"),
+            "there is no ledger here, so nothing to place a figure against"
+        );
+    }
+
+    #[test]
     fn an_agreed_chore_is_told_not_to_reopen_the_figure() {
         let note = chore_turn_message(&chore_context("market-cloth-price", 400, true), 6).unwrap();
         assert!(note.contains("already agreed"));
@@ -2493,6 +2596,12 @@ mod ledger_tests {
         let prompt = chore_system_prompt("Souvik", &context);
         assert!(!prompt.contains("525"), "the live figure leaked into the prefix");
         assert!(prompt.contains("350"), "the floor is stable and belongs in the prefix");
+        assert!(
+            !prompt.contains("75"),
+            "naming the step size teaches the model to concede exactly that much every \
+             turn: the deposit bench run laddered 500-1000-2000-3000-4000 regardless of \
+             what the learner said. Rust clamps the step, so the model never needs it"
+        );
         assert!(ledger_state_message(&spec, 525).contains("525"));
     }
 }
@@ -2649,6 +2758,7 @@ mod speech_stream_tests {
                 first_audio_ms: Some(1.0),
                 completion_ms: Some(2.0),
                 words: Vec::new(),
+                segments: 2,
             }),
             segments: 2,
             first_ready_ms: Some(1.0),

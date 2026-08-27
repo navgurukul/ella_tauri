@@ -4,7 +4,7 @@ use tauri::State;
 
 use crate::{
     application::AppService,
-    domain::{AppSnapshot, Learner, Session, SessionSummary, TurnResult},
+    domain::{AppSnapshot, Learner, Session, SessionSummary, SpokenLine, TurnResult},
     error::EllaResult,
 };
 
@@ -57,6 +57,15 @@ pub async fn start_chore(
 ) -> Result<Session, String> {
     let service = state.0.clone();
     off_main_thread(move || service.start_chore(&chore_id)).await
+}
+
+#[tauri::command]
+pub async fn speak_opening(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<SpokenLine, String> {
+    let service = state.0.clone();
+    off_main_thread(move || service.speak_opening(&session_id)).await
 }
 
 #[tauri::command]
