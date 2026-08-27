@@ -23,6 +23,12 @@ pub fn run() {
                 .ok()
                 .map(|directory| directory.join("engines"));
             std::fs::create_dir_all(&data_dir)?;
+            // Latency/error events and Canary failure audio outlive the
+            // session so improvements can be reviewed over time.
+            telemetry::persist_to(data_dir.join("telemetry"));
+            if std::env::var_os("ELLA_STT_DEBUG_DIR").is_none() {
+                std::env::set_var("ELLA_STT_DEBUG_DIR", data_dir.join("stt-failures"));
+            }
             let database = Database::open(&data_dir.join("ella.sqlite3"))?;
             app.manage(AppState(Arc::new(AppService::new(
                 database,

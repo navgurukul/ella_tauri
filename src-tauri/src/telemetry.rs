@@ -1,10 +1,45 @@
-use std::time::Instant;
+use std::{
+    fs::{self, OpenOptions},
+    io::Write as _,
+    path::PathBuf,
+    sync::OnceLock,
+    time::Instant,
+};
 
 use chrono::Utc;
 use serde::Serialize;
 use uuid::Uuid;
 
 use crate::domain::TurnTimings;
+
+static TELEMETRY_FILE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Persist every turn's latency event to `<dir>/latency.jsonl` so error and
+/// latency history survives app restarts and can be reviewed later with
+/// `npm run telemetry:report`. Called once at startup.
+pub fn persist_to(directory: PathBuf) {
+    if let Err(error) = fs::create_dir_all(&directory) {
+        eprintln!("[LATENCY] telemetry dir {} unavailable: {error}", directory.display());
+        return;
+    }
+    let path = directory.join("latency.jsonl");
+    eprintln!("[LATENCY] persisting turn telemetry to {}", path.display());
+    let _ = TELEMETRY_FILE.set(path);
+}
+
+fn append_event_line(line: &str) {
+    let Some(path) = TELEMETRY_FILE.get() else {
+        return;
+    };
+    let appended = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| writeln!(file, "{line}"));
+    if let Err(error) = appended {
+        eprintln!("[LATENCY] could not append telemetry to {}: {error}", path.display());
+    }
+}
 
 pub struct LatencyTrace {
     started: Instant,
@@ -145,7 +180,10 @@ impl LatencyTrace {
             timings: &self.timings,
         };
         match serde_json::to_string(&event) {
-            Ok(line) => eprintln!("{line}"),
+            Ok(line) => {
+                eprintln!("{line}");
+                append_event_line(&line);
+            }
             Err(serialization_error) => eprintln!(
                 "{{\"event\":\"ella_turn_latency_log_error\",\"error\":{}}}",
                 serde_json::to_string(&serialization_error.to_string())
