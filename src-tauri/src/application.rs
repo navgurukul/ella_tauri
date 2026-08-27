@@ -11,7 +11,7 @@ use crate::{
     domain::{
         find_character, find_chore, topics, topics_for_age, AppSnapshot, ChoreContext, LedgerTurn,
         AudioPayload, LedgerView, Learner, Message, Session, SessionSummary, SpeechStreamEvent,
-        TurnSignal, WinCondition, Speaker, Topic, TurnResult, TutorRequest,
+        TurnSignal, WinCondition, Speaker, Topic, TurnResult, TutorRequest, WordSpan,
     },
     error::{EllaError, EllaResult},
     infrastructure::{
@@ -46,6 +46,7 @@ impl SpeechSink for TurnSpeech {
             text: segment.text,
             audio: segment.audio,
             ready_ms: segment.ready_ms,
+            words: segment.words,
         });
     }
 }
@@ -734,7 +735,7 @@ impl AppService {
         // A reply whose sentences were synthesized during generation is already
         // recorded — and, when it streamed, already playing. Only turns that
         // produced no usable pipeline audio pay for Piper on the clock here.
-        let audio = match generated.speech.take() {
+        let (audio, speech_words) = match generated.speech.take() {
             Some(synthesized) => {
                 trace.record_tts(synthesized.first_audio_ms, synthesized.completion_ms);
                 trace.stage(
@@ -753,7 +754,7 @@ impl AppService {
                             .unwrap_or_else(|| "-".into()),
                     ),
                 );
-                synthesized.audio
+                (synthesized.audio, synthesized.words)
             }
             None => self.synthesize_on_clock(&reply, trace),
         };
@@ -806,6 +807,7 @@ impl AppService {
             ledger: ledger_view,
             signal: generated.signal,
             streamed_segments: generated.streamed_segments,
+            speech_words,
         })
     }
 
@@ -814,7 +816,11 @@ impl AppService {
     /// The path for turns that produced no usable pipeline audio: demo mode, a
     /// missing Piper, or a ledger reply that was regenerated after its
     /// sentences had already been read.
-    fn synthesize_on_clock(&self, reply: &str, trace: &mut LatencyTrace) -> Option<AudioPayload> {
+    fn synthesize_on_clock(
+        &self,
+        reply: &str,
+        trace: &mut LatencyTrace,
+    ) -> (Option<AudioPayload>, Vec<WordSpan>) {
         trace.stage("tts:start", "sending reply text to speech synthesis");
         match self.engine.synthesize(reply) {
             Ok(synthesized) => {
@@ -838,7 +844,7 @@ impl AppService {
                             .unwrap_or_else(|| "none".into())
                     ),
                 );
-                synthesized.audio
+                (synthesized.audio, synthesized.words)
             }
             Err(error) => {
                 trace.stage("tts:failed", &error.to_string());
@@ -850,7 +856,7 @@ impl AppService {
                     })
                 );
                 trace.record_tts(None, None);
-                None
+                (None, Vec::new())
             }
         }
     }

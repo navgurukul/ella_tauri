@@ -121,6 +121,15 @@ pub struct TurnTimings {
     pub total_ms: u64,
 }
 
+/// When one word of a reply is spoken, relative to the start of the clip it
+/// belongs to. Lets the screen highlight the word Ella is saying.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WordSpan {
+    pub text: String,
+    pub start_ms: f64,
+    pub end_ms: f64,
+}
+
 /// One sentence of a reply, synthesized and pushed to the window while the
 /// rest of the turn is still being written. Playback starts on the first of
 /// these instead of waiting for the whole reply, which is most of the turn.
@@ -134,6 +143,8 @@ pub struct SpeechStreamEvent {
     pub audio: AudioPayload,
     /// Milliseconds from the start of the generation to this segment.
     pub ready_ms: f64,
+    /// When each word of `text` is spoken, from the start of `audio`.
+    pub words: Vec<WordSpan>,
 }
 
 /// What the live progress bar draws, and what the app decided this turn. Sent
@@ -168,6 +179,9 @@ pub struct TurnResult {
     /// the same recording kept for the replay button — playing it again would
     /// repeat the turn.
     pub streamed_segments: u32,
+    /// When each word of the whole reply is spoken, from the start of `audio`.
+    /// Empty when there are no timings, which is also how "no audio" reads.
+    pub speech_words: Vec<WordSpan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

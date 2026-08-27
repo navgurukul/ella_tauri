@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, Fragment, useEffect, useRef, useState } from "react";
 import { LoaderCircle, Send } from "lucide-react";
 import {
   EllaMascot,
@@ -10,9 +10,15 @@ import {
 } from "./EllaMascot";
 import { MicGlyph } from "./HomeScreen";
 import { bridge } from "../lib/bridge";
-import { createSpeechQueue, createVoiceCapture, speakText, type SpeechQueue } from "../lib/speech";
+import {
+  createSpeechQueue,
+  createVoiceCapture,
+  speakText,
+  type SpeechQueue,
+  type SpeechQueueCallbacks,
+} from "../lib/speech";
 import { llog, logServerTimings, markTurnStart, turnElapsed } from "../lib/latency";
-import { levelInfo } from "../lib/presentation";
+import { levelName } from "../lib/presentation";
 import type { AppSnapshot, Session, SessionSummary, TurnResult } from "../types";
 
 const MIC_HINT: Record<EllaState, string> = {
@@ -43,6 +49,11 @@ export function TalkScreen({
   const [error, setError] = useState<string | null>(null);
   const [lastTurn, setLastTurn] = useState<TurnResult | null>(null);
   const [reaction, setReaction] = useState<EllaReaction>(null);
+  // Ella's words in speaking order, and which one she is on. Both arrive with
+  // the audio, sentence by sentence, so the reply appears as it is spoken
+  // instead of all at once when the turn returns.
+  const [spokenWords, setSpokenWords] = useState<string[]>([]);
+  const [spokenIndex, setSpokenIndex] = useState(-1);
 
   const voice = useRef(createVoiceCapture());
   const voiceStreamId = useRef<string | null>(null);
@@ -62,7 +73,7 @@ export function TalkScreen({
   const focusMicAfterModeSwitch = useRef(false);
   const mounted = useRef(true);
 
-  const level = levelInfo(snapshot.learner?.level_name);
+  const level = levelName(snapshot.learner);
   const latestElla = [...session.messages].reverse().find((message) => message.speaker === "ella");
 
   async function cancelVoiceStream() {
@@ -103,7 +114,7 @@ export function TalkScreen({
         // Segments arrive in order on one channel; an index already queued is a
         // repeat, and queueing it would say the sentence twice.
         if (segment.index < armed.queue.received) return;
-        armed.queue.push(segment.audio);
+        armed.queue.push(segment.audio, segment.words);
       })
       .then((stop) => {
         if (dropped) stop();
@@ -133,6 +144,34 @@ export function TalkScreen({
     playbackWatchdog.current = null;
   }
 
+  /** What every queue on this screen reports back, live turn or replay alike. */
+  function queueCallbacks(generation: number, label: string): SpeechQueueCallbacks {
+    const live = (): boolean => mounted.current && playbackGeneration.current === generation;
+    const rest = () => {
+      if (!live()) return;
+      if (playbackWatchdog.current !== null) window.clearTimeout(playbackWatchdog.current);
+      playbackWatchdog.current = null;
+      setState("resting");
+      setSpokenIndex(-1);
+    };
+    return {
+      onWords: (words) => live() && setSpokenWords(words),
+      onSpokenWord: (index) => live() && setSpokenIndex(index),
+      onStart: () => {
+        if (!live()) return;
+        setState("speaking");
+        llog(label, `END-TO-END -> Ella starts speaking: ${turnElapsed().toFixed(1)}ms`);
+      },
+      onEnd: rest,
+      onError: () => {
+        rest();
+        if (!live()) return;
+        flashReaction("error", 1800);
+        setError("Ella could not play this aloud. You can still read her message.");
+      },
+    };
+  }
+
   /**
    * Open the queue that plays this turn sentence by sentence.
    *
@@ -143,33 +182,14 @@ export function TalkScreen({
   function armSpeechQueue() {
     if (!bridge.onSpeechSegment) return;
     stopPlayback();
+    // Clear last turn's words now, not when the new ones arrive, so the screen
+    // never shows the previous reply with this reply's highlight on it.
+    setSpokenWords([]);
+    setSpokenIndex(-1);
     const generation = playbackGeneration.current;
-    const live = (): boolean => mounted.current && playbackGeneration.current === generation;
-    const rest = () => {
-      if (!live()) return;
-      if (playbackWatchdog.current !== null) window.clearTimeout(playbackWatchdog.current);
-      playbackWatchdog.current = null;
-      setState("resting");
-    };
     speechQueue.current = {
       generation,
-      queue: createSpeechQueue({
-        onStart: () => {
-          if (!live()) return;
-          setState("speaking");
-          llog(
-            "turn:first-sentence",
-            `END-TO-END -> Ella starts speaking: ${turnElapsed().toFixed(1)}ms`,
-          );
-        },
-        onEnd: rest,
-        onError: () => {
-          rest();
-          if (!live()) return;
-          flashReaction("error", 1800);
-          setError("Ella could not play this aloud. You can still read her message.");
-        },
-      }),
+      queue: createSpeechQueue(queueCallbacks(generation, "turn:first-sentence")),
     };
   }
 
@@ -188,6 +208,18 @@ export function TalkScreen({
     let playbackSettled = false;
     setError(null);
     setState("speaking");
+    // Recorded audio goes through the same queue as a live turn, so hearing a
+    // reply again highlights the words the same way saying it the first time
+    // did. Only the browser-speech fallback below has no timings to follow.
+    if (result?.audio) {
+      setSpokenWords(text.split(/\s+/).filter(Boolean));
+      setSpokenIndex(-1);
+      const queue = createSpeechQueue(queueCallbacks(generation, "playback:replay"));
+      speechQueue.current = { generation, queue };
+      queue.push(result.audio, result.speech_words);
+      queue.finish(1);
+      return;
+    }
     try {
       const cancel = speakText(text, result?.audio, {
         onStart: () => {
@@ -488,6 +520,11 @@ export function TalkScreen({
   }
 
   const prompt = latestElla?.content ?? "";
+  // While a reply is streaming, the words come from the audio, because the
+  // turn's text has not arrived yet. Afterwards the two are the same sentence,
+  // so which one renders is invisible.
+  const promptWords =
+    spokenWords.length > 0 ? spokenWords : prompt.split(/\s+/).filter(Boolean);
   const interactionLocked = sending || micStarting || state === "thinking";
   // Ella now starts talking while the turn is still committing, so for a moment
   // she is speaking and the microphone is not yet available. Promising an
@@ -518,7 +555,7 @@ export function TalkScreen({
         <span className="pill pill--white">
           {session.topic_label}
           <span className="pill__dot">·</span>
-          <b>{level.code}</b>
+          <b>{level}</b>
         </span>
         <button
           type="button"
@@ -553,7 +590,16 @@ export function TalkScreen({
             <span>{stateStatus}</span>
           </div>
 
-          <p className="talk-prompt">{prompt}</p>
+          <p className="talk-prompt">
+            {promptWords.map((word, index) => (
+              <Fragment key={`${index}-${word}`}>
+                <span className={index === spokenIndex ? "talk-word is-spoken" : "talk-word"}>
+                  {word}
+                </span>
+                {index < promptWords.length - 1 ? " " : ""}
+              </Fragment>
+            ))}
+          </p>
 
           {/* Only Ella's side of the talk is on screen: the learner's own words
               are never echoed back, so a misheard transcript cannot become the
@@ -595,6 +641,7 @@ export function TalkScreen({
         <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
           {announcedStatus}
         </p>
+
       </div>
 
       <div className="talk-dock">

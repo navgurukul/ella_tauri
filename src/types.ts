@@ -86,6 +86,13 @@ export interface LedgerView {
 /** How a chore character signed off. */
 export type TurnSignal = "deal" | "walk";
 
+/** When one word of a reply is spoken, relative to the start of its clip. */
+export interface WordSpan {
+  text: string;
+  start_ms: number;
+  end_ms: number;
+}
+
 /** One sentence of a reply, synthesized and pushed while the rest of the turn
  * is still being written. Playback starts on the first of these. */
 export interface SpeechSegment {
@@ -97,6 +104,8 @@ export interface SpeechSegment {
   audio: AudioPayload;
   /** Milliseconds from the start of the generation to this segment. */
   ready_ms: number;
+  /** When each word of `text` is spoken, from the start of `audio`. */
+  words: WordSpan[];
 }
 
 export interface TurnResult {
@@ -112,6 +121,8 @@ export interface TurnResult {
    * has been playing since before this result arrived, and `audio` is the same
    * recording kept for the replay button — playing it again repeats the turn. */
   streamed_segments: number;
+  /** When each word of the whole reply is spoken, from the start of `audio`. */
+  speech_words: WordSpan[];
 }
 
 export interface TurnTimings {
@@ -179,8 +190,8 @@ export interface EllaBridge {
  * Presentation layer
  *
  * The Ella v5 design shows curriculum framing the Rust backend does not
- * model yet: a CEFR level, a talking streak, named garden units on a path,
- * per-topic category + duration, and a weekly digest. Everything below is
+ * model yet: a talking streak, named garden units on a path, per-topic
+ * category + duration, and a weekly digest. Everything below is
  * derived from `AppSnapshot` where the data exists and filled from the
  * placeholders in `lib/presentation.ts` where it does not.
  * ------------------------------------------------------------------ */
@@ -222,10 +233,6 @@ export interface WeeklyDigest {
 
 /** What the onboarding placement talk hands back once it has really run. */
 export interface PlacementResult {
+  /** The friendly level name the talk lands the learner on. */
   level: string;
-}
-
-export interface LevelInfo {
-  /** CEFR band shown next to the learner's name. */
-  code: string;
 }

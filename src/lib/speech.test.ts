@@ -104,6 +104,9 @@ describe("streamed sentence playback", () => {
   };
   /** Let the queue's decode chain settle. */
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  /** Let the highlight's animation-frame loop run once. */
+  const frame = () =>
+    new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
 
   it("plays sentences back to back with no gap between them", async () => {
     install();
@@ -146,6 +149,87 @@ describe("streamed sentence playback", () => {
     context.drain();
     await settle();
     expect(onEnd).toHaveBeenCalledOnce();
+  });
+
+  /** The reply has to appear as it is spoken, not when the turn returns — the
+   * whole point of streaming is that the turn returns seconds later. */
+  it("reports each sentence's words as it is queued", async () => {
+    install();
+    const seen: string[][] = [];
+    const queue = createSpeechQueue({ onWords: (words) => seen.push(words) });
+    queue.push(audio(2), [
+      { text: "Oh,", start_ms: 0, end_ms: 300 },
+      { text: "yummy!", start_ms: 300, end_ms: 900 },
+    ]);
+    expect(seen.at(-1)).toEqual(["Oh,", "yummy!"]);
+    queue.push(audio(2), [{ text: "Really?", start_ms: 0, end_ms: 500 }]);
+    expect(seen.at(-1)).toEqual(["Oh,", "yummy!", "Really?"]);
+    expect(queue.words).toEqual(["Oh,", "yummy!", "Really?"]);
+    await settle();
+  });
+
+  it("highlights the word being spoken, and only that word", async () => {
+    install();
+    const spoken: number[] = [];
+    const queue = createSpeechQueue({ onSpokenWord: (index) => spoken.push(index) });
+    // 2s of audio: word 0 from 0.1-0.8s, word 1 from 0.8-1.9s.
+    queue.push(audio(2), [
+      { text: "Hello", start_ms: 100, end_ms: 800 },
+      { text: "there.", start_ms: 800, end_ms: 1900 },
+    ]);
+    await settle();
+    const base = FakeAudioContext.started[0].at;
+
+    // Inside the leading silence: nothing is being said yet.
+    context.currentTime = base + 0.05;
+    await frame();
+    expect(spoken.at(-1) ?? -1).toBe(-1);
+
+    context.currentTime = base + 0.4;
+    await frame();
+    expect(spoken.at(-1)).toBe(0);
+
+    context.currentTime = base + 1.2;
+    await frame();
+    expect(spoken.at(-1)).toBe(1);
+  });
+
+  /** Between the last word and the end of the clip there is trailing silence.
+   * Dropping the highlight there reads as a flicker, so it holds. */
+  it("holds the last word through the trailing silence", async () => {
+    install();
+    const spoken: number[] = [];
+    const queue = createSpeechQueue({ onSpokenWord: (index) => spoken.push(index) });
+    queue.push(audio(2), [{ text: "Hello", start_ms: 100, end_ms: 900 }]);
+    await settle();
+    context.currentTime = FakeAudioContext.started[0].at + 1.5;
+    await frame();
+    expect(spoken.at(-1)).toBe(0);
+  });
+
+  /** The highlight indexes the word list and the schedule by the same number,
+   * so a sentence that fails to decode must still take up its slots. */
+  it("keeps the highlight aligned when a sentence cannot be decoded", async () => {
+    install();
+    const spoken: number[] = [];
+    const queue = createSpeechQueue({ onSpokenWord: (index) => spoken.push(index) });
+    // First sentence is undecodable; its two words must still hold slots 0-1.
+    queue.push({ mime_type: "audio/wav", base64: "!!!!not base64!!!!" }, [
+      { text: "Broken", start_ms: 0, end_ms: 200 },
+      { text: "sentence.", start_ms: 200, end_ms: 500 },
+    ]);
+    queue.push(audio(2), [
+      { text: "Good", start_ms: 100, end_ms: 600 },
+      { text: "sentence.", start_ms: 600, end_ms: 1800 },
+    ]);
+    await settle();
+
+    expect(queue.words).toEqual(["Broken", "sentence.", "Good", "sentence."]);
+    const base = FakeAudioContext.started[0].at;
+    context.currentTime = base + 0.3;
+    await frame();
+    // Slot 2 is "Good" — the first word of the sentence that did play.
+    expect(spoken.at(-1)).toBe(2);
   });
 
   /** A learner who taps the mic mid-reply must not be spoken over. */

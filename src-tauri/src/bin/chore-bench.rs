@@ -40,6 +40,9 @@ use serde_json::json;
 #[derive(Default)]
 struct SegmentRecorder {
     ready_ms: Mutex<Vec<f64>>,
+    /// One line per sentence describing its word timings, so the highlight the
+    /// window will draw can be read off a bench run.
+    words: Mutex<Vec<String>>,
 }
 
 impl SegmentRecorder {
@@ -53,6 +56,14 @@ impl SegmentRecorder {
         let taken = std::mem::take(&mut *ready);
         (taken.first().copied(), taken.len())
     }
+
+    fn take_words(&self) -> Vec<String> {
+        let mut words = self
+            .words
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::mem::take(&mut *words)
+    }
 }
 
 impl SpeechBroadcast for SegmentRecorder {
@@ -61,6 +72,16 @@ impl SpeechBroadcast for SegmentRecorder {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(event.ready_ms);
+        let spans = event
+            .words
+            .iter()
+            .map(|word| format!("{}@{:.0}", word.text, word.start_ms))
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.words
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(spans);
     }
 }
 
@@ -277,6 +298,9 @@ fn run_topic(options: &Options, topic_id: &str) -> Result<(), String> {
                 _ => "nothing streamed".into(),
             }
         );
+        for line in recorder.take_words() {
+            println!("  words    {line}");
+        }
 
         turns.push(json!({
             "turn": index + 1,

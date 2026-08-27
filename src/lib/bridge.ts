@@ -210,8 +210,10 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
       ella_message: ellaMessage,
       correction: gentleCorrection(clean),
       suggested_complete: turn >= 3,
-      // The browser bridge has no Piper, so nothing streams ahead of the turn.
+      // The browser bridge has no Piper, so nothing streams ahead of the turn
+      // and there are no timings to highlight against.
       streamed_segments: 0,
+      speech_words: [],
     };
   };
 

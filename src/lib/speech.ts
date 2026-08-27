@@ -1,4 +1,4 @@
-import type { AudioPayload } from "../types";
+import type { AudioPayload, WordSpan } from "../types";
 import { llog, llogAbsolute } from "./latency";
 
 interface SpeechRecognitionAlternativeLike {
@@ -57,6 +57,15 @@ export interface SpeechPlaybackCallbacks {
   onStart?: () => void;
   onEnd?: () => void;
   onError?: (reason: unknown) => void;
+}
+
+export interface SpeechQueueCallbacks extends SpeechPlaybackCallbacks {
+  /** The words queued so far, in the order they will be spoken. Called as each
+   * sentence lands, so the screen can show the reply while it is still being
+   * written rather than waiting for the turn to return. */
+  onWords?: (words: string[]) => void;
+  /** Index into those words of the one being spoken now, or -1 for none. */
+  onSpokenWord?: (index: number) => void;
 }
 
 /** How often accumulated audio is downsampled and handed to onChunk. */
@@ -269,10 +278,13 @@ const SCHEDULE_LEAD_SECONDS = 0.03;
 const MISSING_SEGMENT_GRACE_MS = 1500;
 
 export interface SpeechQueue {
-  /** Queue one sentence. Segments play in push order regardless of decode order. */
-  push(audio: AudioPayload): void;
+  /** Queue one sentence, with the timings that say when each of its words is
+   * spoken. Segments play in push order regardless of decode order. */
+  push(audio: AudioPayload, words?: WordSpan[]): void;
   /** How many segments have been queued so far. */
   readonly received: number;
+  /** Every word queued so far, in speaking order. */
+  readonly words: string[];
   /** No more segments are coming beyond `expected` in total. */
   finish(expected: number): void;
   /** Stop immediately and drop anything still queued. */
@@ -286,7 +298,7 @@ export interface SpeechQueue {
  * played through an <audio> element each: swapping an element's `src` leaves an
  * audible gap between sentences, which reads as Ella hesitating mid-thought.
  */
-export function createSpeechQueue(callbacks: SpeechPlaybackCallbacks = {}): SpeechQueue {
+export function createSpeechQueue(callbacks: SpeechQueueCallbacks = {}): SpeechQueue {
   const openedAt = performance.now();
   let context: AudioContext | null = null;
   let cursor = 0;
@@ -300,12 +312,46 @@ export function createSpeechQueue(callbacks: SpeechPlaybackCallbacks = {}): Spee
   // scheduled ahead of the longer one before it.
   let chain: Promise<void> = Promise.resolve();
   const sources = new Set<AudioBufferSourceNode>();
+  // Absolute AudioContext times for every word queued so far, so the highlight
+  // reads one clock rather than tracking each sentence separately.
+  const schedule: { start: number; end: number }[] = [];
+  const words: string[] = [];
+  let spoken = -1;
+  let frame: number | null = null;
+
+  /** Follow the audio clock and report the word being spoken as it changes. */
+  const track = () => {
+    frame = null;
+    if (settled || !context) return;
+    const now = context.currentTime;
+    let index = -1;
+    for (let cursor = 0; cursor < schedule.length; cursor += 1) {
+      if (now >= schedule[cursor].start && now < schedule[cursor].end) {
+        index = cursor;
+        break;
+      }
+      // Past this word but before the next: hold the last one rather than
+      // flickering to nothing between spans.
+      if (now >= schedule[cursor].end) index = cursor;
+    }
+    if (index !== spoken) {
+      spoken = index;
+      callbacks.onSpokenWord?.(index);
+    }
+    if (started) frame = requestAnimationFrame(track);
+  };
 
   const settle = (fail?: unknown) => {
     if (settled) return;
     settled = true;
     if (graceTimer !== null) window.clearTimeout(graceTimer);
     graceTimer = null;
+    if (frame !== null) cancelAnimationFrame(frame);
+    frame = null;
+    if (spoken !== -1) {
+      spoken = -1;
+      callbacks.onSpokenWord?.(-1);
+    }
     if (fail !== undefined) {
       llog("stream-playback:error", fail instanceof Error ? fail.message : "playback failed");
       callbacks.onError?.(fail);
@@ -319,10 +365,14 @@ export function createSpeechQueue(callbacks: SpeechPlaybackCallbacks = {}): Spee
     if (expected !== null && played >= Math.min(expected, received)) settle();
   };
 
-  const push = (audio: AudioPayload) => {
+  const push = (audio: AudioPayload, wordSpans: WordSpan[] = []) => {
     if (settled) return;
     const index = received;
     received += 1;
+    if (wordSpans.length > 0) {
+      words.push(...wordSpans.map((span) => span.text));
+      callbacks.onWords?.([...words]);
+    }
     if (graceTimer !== null) {
       window.clearTimeout(graceTimer);
       graceTimer = null;
@@ -348,9 +398,15 @@ export function createSpeechQueue(callbacks: SpeechPlaybackCallbacks = {}): Spee
         };
         sources.add(source);
         source.start(at);
+        // Word times are relative to this sentence's own clip; the schedule is
+        // in AudioContext time, so each is offset by where the clip starts.
+        for (const span of wordSpans) {
+          schedule.push({ start: at + span.start_ms / 1000, end: at + span.end_ms / 1000 });
+        }
         cursor = at + buffer.duration;
         if (!started) {
           started = true;
+          if (frame === null) frame = requestAnimationFrame(track);
           llog(
             "stream-playback:first-sentence",
             `first sentence audible ${(performance.now() - openedAt).toFixed(1)}ms after the turn opened`,
@@ -361,6 +417,12 @@ export function createSpeechQueue(callbacks: SpeechPlaybackCallbacks = {}): Spee
       .catch((reason: unknown) => {
         // One unreadable sentence should not silence the rest of the reply.
         llog("stream-playback:segment-failed", `sentence ${index} could not be played`);
+        // The highlight reads `schedule` by the same index it reads the word
+        // list by, so a sentence that never scheduled still has to occupy its
+        // slots — otherwise every later word highlights the wrong one.
+        for (const _ of wordSpans) {
+          schedule.push({ start: cursor, end: cursor });
+        }
         played += 1;
         maybeSettle();
         if (!started && expected !== null) settle(reason);
@@ -371,6 +433,9 @@ export function createSpeechQueue(callbacks: SpeechPlaybackCallbacks = {}): Spee
     push,
     get received() {
       return received;
+    },
+    get words() {
+      return [...words];
     },
     finish(total: number) {
       expected = total;
@@ -392,6 +457,8 @@ export function createSpeechQueue(callbacks: SpeechPlaybackCallbacks = {}): Spee
       settled = true;
       if (graceTimer !== null) window.clearTimeout(graceTimer);
       graceTimer = null;
+      if (frame !== null) cancelAnimationFrame(frame);
+      frame = null;
       for (const source of sources) {
         try {
           source.stop();

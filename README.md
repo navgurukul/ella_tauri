@@ -141,6 +141,19 @@ regenerate its reply when the character breaks its own limit, so its sentences
 are synthesized ahead but held back, and the audio is only reused when it says
 exactly what the reply says. Nothing the learner hears is ever retracted.
 
+Each segment carries its own text and word timings, so the reply appears on
+screen as it is spoken rather than arriving whole when the turn returns, and the
+word being spoken is highlighted. Piper hands back audio without timings;
+`infrastructure/speech_timing.rs` estimates them from syllables, characters and
+punctuation, anchored to the sentence's exact duration and to the leading and
+trailing silence measured off the PCM. Fitted and measured against real Piper
+phoneme alignments: onset error mean ~70 ms, p90 ~160 ms, roughly three
+quarters of words inside 100 ms. Swapping in exact alignments is a change to
+that module alone — it costs a 68 MB `onnx` dependency, ~30 ms per sentence, and
+still needs this estimator as a fallback, because espeak merges words ("in the"
+becomes one phoneme group) in about 8% of sentences and leaves no safe
+positional mapping back to the text.
+
 Environment overrides:
 
 - `ELLA_ENGINE_ROOT`

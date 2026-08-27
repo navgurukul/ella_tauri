@@ -1346,6 +1346,30 @@ button { font-family: inherit; }
   text-wrap: balance;
 }
 
+/* Ella's reply is drawn a word at a time so the one being spoken can be
+   marked. The spaces between words are real text nodes, not generated content:
+   a CSS ::after space is invisible to textContent, which would leave the
+   sentence run together for anyone copying it or reading the DOM. */
+.talk-word {
+  transition: color 90ms linear;
+}
+/* The highlight has to be findable at a glance without turning the sentence
+   into stripes: the spoken word takes the accent and full weight, and a soft
+   wash behind it survives on a colour-blind or low-contrast screen where the
+   hue alone would not. */
+.talk-word.is-spoken {
+  color: var(--violet-deep);
+  font-weight: 600;
+  background: rgba(147, 71, 221, 0.13);
+  border-radius: 6px;
+  box-shadow: 0 0 0 3px rgba(147, 71, 221, 0.13);
+}
+@media (prefers-reduced-motion: reduce) {
+  .talk-word {
+    transition: none;
+  }
+}
+
 .talk-feedback {
   display: flex;
   width: min(620px, 100%);

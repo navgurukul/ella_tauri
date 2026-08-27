@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { bridge } from "./lib/bridge";
+import type { EllaBridge, SpeechSegment, TurnResult } from "./types";
 
 /** Read the current conversation prompt without coupling tests to its markup. */
 function promptText(): string {
@@ -97,6 +98,76 @@ describe("Ella onboarding", () => {
 
 describe("Ella learner flow", () => {
   beforeEach(() => window.localStorage.clear());
+
+  /**
+   * Piper now speaks a sentence before the turn returns, which means the reply
+   * would otherwise be heard several seconds before it appeared on screen. The
+   * segment events carry their own text so it lands with the voice.
+   */
+  it("shows each sentence on screen as it is spoken, before the turn returns", async () => {
+    // The Tauri bridge streams; the browser one does not, so stand one in. It
+    // has to exist before the talk screen mounts, which is when it subscribes.
+    let emit: ((segment: SpeechSegment) => void) | undefined;
+    (bridge as EllaBridge).onSpeechSegment = async (handler) => {
+      emit = handler;
+      return () => {
+        emit = undefined;
+      };
+    };
+    await onboard("Aarav");
+    fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
+    await screen.findByText("End talk");
+    // Hold the turn open so "before the turn returns" is a real claim.
+    let release: ((result: TurnResult) => void) | undefined;
+    let turnSession = "";
+    const real = bridge.sendTextTurn.bind(bridge);
+    const held = vi
+      .spyOn(bridge, "sendTextTurn")
+      .mockImplementation(async (sessionId: string, text: string) => {
+        turnSession = sessionId;
+        const result = await real(sessionId, text);
+        return new Promise<TurnResult>((resolve) => {
+          release = () => resolve({ ...result, streamed_segments: 2 });
+        });
+      });
+
+    try {
+      fireEvent.click(screen.getByRole("button", { name: /type instead/i }));
+      fireEvent.change(screen.getByLabelText("Your answer"), {
+        target: { value: "I ate vada pav near the station" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
+      await waitFor(() => expect(emit).toBeDefined());
+
+      const opening = promptText();
+      emit?.({
+        session_id: turnSession,
+        turn: 1,
+        index: 0,
+        text: "That sounds delicious!",
+        audio: { mime_type: "audio/wav", base64: "AAAA" },
+        ready_ms: 900,
+        words: [
+          { text: "That", start_ms: 0, end_ms: 300 },
+          { text: "sounds", start_ms: 300, end_ms: 700 },
+          { text: "delicious!", start_ms: 700, end_ms: 1300 },
+        ],
+      });
+
+      // The sentence is on screen while the turn is still in flight.
+      await waitFor(() => expect(promptText()).toMatch(/that sounds delicious/i));
+      expect(promptText()).not.toBe(opening);
+      // Real spaces, not CSS-generated ones: the sentence must be readable and
+      // copyable, not run together.
+      expect(promptText()).toContain("That sounds delicious!");
+
+      release?.({} as TurnResult);
+      await waitFor(() => expect(held).toHaveResolved());
+    } finally {
+      held.mockRestore();
+      delete (bridge as EllaBridge).onSpeechSegment;
+    }
+  });
 
   it("moves from home to a real conversation with typed fallback", async () => {
     await onboard("Aarav");

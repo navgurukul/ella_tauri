@@ -16,11 +16,12 @@ use serde_json::{json, Value};
 use crate::{
     domain::{
         AudioPayload, ChoreContext, Direction, EngineComponent, EngineStatus, LedgerSpec,
-        Speaker, Topic, TurnSignal, TutorRequest,
+        Speaker, Topic, TurnSignal, TutorRequest, WordSpan,
     },
     error::{EllaError, EllaResult},
     infrastructure::{
         audio::raw_pcm_to_wav,
+        speech_timing::{shifted, word_spans},
         stt::{
             CanaryStt, SpeechToTextEngine, SttRouter, Transcription, WhisperHttpStt,
             CANARY_FILE_NAME,
@@ -72,6 +73,8 @@ pub struct SynthesizedAudio {
     pub audio: Option<AudioPayload>,
     pub first_audio_ms: Option<f64>,
     pub completion_ms: Option<f64>,
+    /// When each word of the whole reply is spoken, from the start of `audio`.
+    pub words: Vec<WordSpan>,
 }
 
 const PIPER_DAEMON_SOURCE: &str = include_str!("piper_daemon.py");
@@ -252,6 +255,8 @@ pub struct SpeechSegment {
     /// ready. The first segment's value is the number that decides whether
     /// streaming was worth it.
     pub ready_ms: f64,
+    /// When each word of `text` is spoken, from the start of `audio`.
+    pub words: Vec<WordSpan>,
 }
 
 /// Where finished sentences go while the turn is still generating. The engine
@@ -475,6 +480,10 @@ impl SpeechPipeline {
             let mut sample_rate = None;
             let mut segments = 0_u32;
             let mut first_ready_ms = None;
+            // Sentence timings are relative to their own clip; the reply's are
+            // relative to the concatenation, so each is shifted by however much
+            // audio came before it.
+            let mut reply_words: Vec<WordSpan> = Vec::new();
             for sentence in rx {
                 let text = spoken_form(&sentence);
                 if !text.chars().any(char::is_alphanumeric) {
@@ -511,6 +520,9 @@ impl SpeechPipeline {
                 }
                 spoken.push_str(&text);
                 sample_rate = Some(rate);
+                let words = word_spans(&text, &chunk, rate);
+                let offset_ms = pcm.len() as f64 / 2.0 * 1_000.0 / rate as f64;
+                reply_words.extend(shifted(&words, offset_ms));
                 if let Some(sink) = sink.as_ref() {
                     sink.segment(SpeechSegment {
                         index: segments,
@@ -520,6 +532,7 @@ impl SpeechPipeline {
                             base64: STANDARD.encode(raw_pcm_to_wav(&chunk, rate, 1)),
                         },
                         ready_ms,
+                        words,
                     });
                 }
                 pcm.extend_from_slice(&chunk);
@@ -532,6 +545,7 @@ impl SpeechPipeline {
                 }),
                 first_audio_ms: first_ready_ms,
                 completion_ms: Some(started.elapsed().as_secs_f64() * 1_000.0),
+                words: reply_words,
             });
             StreamedSpeech {
                 spoken,
@@ -1287,6 +1301,7 @@ impl TutorEngine for DemoEngine {
             audio: None,
             first_audio_ms: None,
             completion_ms: None,
+            words: Vec::new(),
         })
     }
 }
@@ -1637,6 +1652,7 @@ impl TutorEngine for LocalEngine {
                 audio: None,
                 first_audio_ms: None,
                 completion_ms: None,
+                words: Vec::new(),
             });
         }
         if let Some(daemon) = &self.piper_daemon {
@@ -1646,6 +1662,7 @@ impl TutorEngine for LocalEngine {
             );
             match daemon.synthesize(text) {
                 Ok((pcm, sample_rate, first_audio_ms, completion_ms)) => {
+                    let words = word_spans(text, &pcm, sample_rate);
                     let encode_started = Instant::now();
                     let base64 = STANDARD.encode(raw_pcm_to_wav(&pcm, sample_rate, 1));
                     eprintln!(
@@ -1660,6 +1677,7 @@ impl TutorEngine for LocalEngine {
                         }),
                         first_audio_ms: Some(first_audio_ms),
                         completion_ms: Some(completion_ms),
+                        words,
                     });
                 }
                 Err(error) => eprintln!(
@@ -1907,6 +1925,7 @@ impl LocalEngine {
             }),
             first_audio_ms,
             completion_ms: Some(completion_ms),
+            words: word_spans(text, &pcm, 22_050),
         })
     }
 }
@@ -2629,6 +2648,7 @@ mod speech_stream_tests {
                 }),
                 first_audio_ms: Some(1.0),
                 completion_ms: Some(2.0),
+                words: Vec::new(),
             }),
             segments: 2,
             first_ready_ms: Some(1.0),
