@@ -50,12 +50,39 @@ function Get-ReleaseAsset {
     if ($asset) {
       Write-Host "$Repo $($release.tag_name): $($asset.name)"
       $out = Join-Path $env:TEMP $asset.name
-      Invoke-WebRequest -Headers $headers -Uri $asset.browser_download_url -OutFile $out
+      Get-File -Headers $headers -Uri $asset.browser_download_url -OutFile $out
       return $out
     }
   }
 
   throw "No release in the newest 30 of $Repo carries an asset matching /$Pattern/."
+}
+
+# Hugging Face and the GitHub CDN both rate-limit the shared pool of Actions
+# IP addresses, and a 429 halfway through staging fails a 20-minute build for
+# no good reason. Retry with a widening pause, honouring Retry-After when the
+# server sends one.
+function Get-File {
+  param([string]$Uri, [string]$OutFile, [hashtable]$Headers = @{}, [int]$Attempts = 5)
+
+  for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+    try {
+      Invoke-WebRequest -Headers $Headers -Uri $Uri -OutFile $OutFile
+      return
+    } catch {
+      $status = $_.Exception.Response.StatusCode.value__
+      $transient = $status -eq 429 -or $status -ge 500 -or $null -eq $status
+      if (-not $transient -or $attempt -eq $Attempts) { throw }
+
+      $wait = [Math]::Pow(2, $attempt) * 5
+      $retryAfter = $_.Exception.Response.Headers["Retry-After"]
+      if ($retryAfter -and [int]::TryParse($retryAfter, [ref]$null)) {
+        $wait = [Math]::Max($wait, [int]$retryAfter)
+      }
+      Write-Host "$Uri returned $status; retrying in $wait s (attempt $attempt of $Attempts)"
+      Start-Sleep -Seconds $wait
+    }
+  }
 }
 
 function Expand-Into {
@@ -91,8 +118,8 @@ New-Item -ItemType Directory -Force $tts | Out-Null
 
 if ($VoiceUrl) {
   Write-Host "Staging the NavGurukul voice from the configured URL"
-  Invoke-WebRequest -Uri $VoiceUrl -OutFile (Join-Path $tts "en_IN-navgurukul-medium.onnx")
-  Invoke-WebRequest -Uri "$VoiceUrl.json" -OutFile (Join-Path $tts "en_IN-navgurukul-medium.onnx.json")
+  Get-File -Uri $VoiceUrl -OutFile (Join-Path $tts "en_IN-navgurukul-medium.onnx")
+  Get-File -Uri "$VoiceUrl.json" -OutFile (Join-Path $tts "en_IN-navgurukul-medium.onnx.json")
 } else {
   Write-Warning "ELLA_PIPER_VOICE_URL is not set - staging the public en_US voice instead. Ella will not sound Indian in this build."
 }
@@ -100,8 +127,8 @@ if ($VoiceUrl) {
 # The stock voice is staged either way, so a bad or half-written custom voice
 # still leaves the app able to speak.
 $base = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx"
-Invoke-WebRequest -Uri $base -OutFile (Join-Path $tts "en_US-lessac-medium.onnx")
-Invoke-WebRequest -Uri "$base.json" -OutFile (Join-Path $tts "en_US-lessac-medium.onnx.json")
+Get-File -Uri $base -OutFile (Join-Path $tts "en_US-lessac-medium.onnx")
+Get-File -Uri "$base.json" -OutFile (Join-Path $tts "en_US-lessac-medium.onnx.json")
 
 # --- What the app will look for at runtime ---------------------------------
 $required = @("bin\llama\llama-server.exe", "bin\piper\piper.exe", "models\tts\en_US-lessac-medium.onnx")

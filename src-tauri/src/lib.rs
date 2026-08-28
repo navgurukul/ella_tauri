@@ -36,6 +36,8 @@ struct SetupProgress {
     /// Which file of how many, for a first run that fetches more than one.
     index: usize,
     of: usize,
+    /// 1 on the first try; above that the transfer is being retried.
+    attempt: u32,
 }
 
 /// Fetch whatever weights this build needs, then bring the local engine up and
@@ -69,6 +71,7 @@ fn prepare_engine(
                     total_bytes: progress.total_bytes,
                     index: progress.index,
                     of: progress.of,
+                    attempt: progress.attempt,
                 });
             };
             if let Err(reason) = models::ensure(&models_root, &mut report) {
@@ -82,6 +85,7 @@ fn prepare_engine(
                     total_bytes: 0,
                     index: 0,
                     of: 0,
+                    attempt: 1,
                 });
                 return;
             }
@@ -98,6 +102,7 @@ fn prepare_engine(
         total_bytes: 0,
         index: 0,
         of: 0,
+        attempt: 1,
     });
 
     let engine = engine_from_environment(paths);
@@ -110,6 +115,7 @@ fn prepare_engine(
         total_bytes: 0,
         index: 0,
         of: 0,
+        attempt: 1,
     });
 }
 

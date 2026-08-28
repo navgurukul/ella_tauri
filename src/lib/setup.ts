@@ -17,6 +17,8 @@ export interface SetupState {
   total_bytes: number;
   index: number;
   of: number;
+  /** Above 1, the transfer dropped and is being retried. */
+  attempt?: number;
 }
 
 /** Null until the backend says something, which on a warm start it never does. */

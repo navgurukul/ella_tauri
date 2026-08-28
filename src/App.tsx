@@ -305,7 +305,9 @@ function SetupBanner({ setup }: { setup: SetupState | null }) {
           {setup.stage === "failed"
             ? setup.message
             : downloading
-              ? `${setup.message} — ${formatBytes(setup.downloaded_bytes)} of ${formatBytes(setup.total_bytes)}`
+              ? `${setup.message} — ${formatBytes(setup.downloaded_bytes)} of ${formatBytes(setup.total_bytes)}${
+                  (setup.attempt ?? 1) > 1 ? " — connection dropped, retrying" : ""
+                }`
               : setup.message}
         </span>
       </div>

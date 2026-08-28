@@ -37,6 +37,12 @@ const REQUIRED: [&str; 2] = ["llm", "stt"];
 /// Records what actually landed on disk, so a manifest change is detectable.
 const STATE_FILE: &str = ".ella-models.json";
 
+/// Hugging Face rate-limits by address, and a school or office puts every
+/// machine behind one. A first run that gives up on the first 429 would leave
+/// a classroom of installs stuck at the same moment, so a transfer is retried
+/// with a widening pause before it is called a failure.
+const DOWNLOAD_ATTEMPTS: u32 = 5;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelSpec {
     /// Manifest group: `llm`, `stt`, and so on.
@@ -76,6 +82,9 @@ pub struct ModelProgress {
     /// Position in this launch's work list, 1-based, and how long it is.
     pub index: usize,
     pub of: usize,
+    /// 1 on the first try. Above that the connection dropped or the host
+    /// pushed back, and the screen should say so rather than look frozen.
+    pub attempt: u32,
 }
 
 /// The models this build wants, in download order.
@@ -178,7 +187,28 @@ pub fn ensure(
     let work = outstanding(models_root)?;
     let total_steps = work.len();
     for (index, spec) in work.iter().enumerate() {
-        download(models_root, spec, index + 1, total_steps, progress)?;
+        for attempt in 1..=DOWNLOAD_ATTEMPTS {
+            match download(models_root, spec, index + 1, total_steps, attempt, progress) {
+                Ok(()) => break,
+                // A file that does not match its checksum will not match it on
+                // a second try; retrying would burn gigabytes to fail again.
+                Err(EllaError::Validation(reason)) => {
+                    return Err(EllaError::Validation(reason))
+                }
+                Err(reason) if attempt < DOWNLOAD_ATTEMPTS => {
+                    // The partial file survives, so a retry resumes from where
+                    // the connection dropped rather than starting over.
+                    let pause = Duration::from_secs(5 * 2_u64.pow(attempt - 1));
+                    eprintln!(
+                        "[setup] {} download attempt {attempt} failed ({reason}); retrying in {}s",
+                        spec.key,
+                        pause.as_secs()
+                    );
+                    std::thread::sleep(pause);
+                }
+                Err(reason) => return Err(reason),
+            }
+        }
         record(models_root, spec)?;
     }
     Ok(work)
@@ -189,6 +219,7 @@ fn download(
     spec: &ModelSpec,
     index: usize,
     of: usize,
+    attempt: u32,
     progress: &mut dyn FnMut(ModelProgress),
 ) -> EllaResult<()> {
     let destination = models_root.join(&spec.target);
@@ -243,6 +274,7 @@ fn download(
         total_bytes: total,
         index,
         of,
+        attempt,
     });
     loop {
         let read = response.read(&mut buffer)?;
@@ -263,6 +295,7 @@ fn download(
                 total_bytes: total,
                 index,
                 of,
+                attempt,
             });
         }
     }
@@ -275,7 +308,7 @@ fn download(
             // Keeping a corrupt file would make the next launch resume from
             // the end of it and fail identically, forever.
             let _ = fs::remove_file(&partial);
-            return Err(EllaError::Engine(format!(
+            return Err(EllaError::Validation(format!(
                 "{} failed its checksum. Expected {expected}, got {actual}.",
                 spec.key
             )));
@@ -290,6 +323,7 @@ fn download(
         total_bytes: total,
         index,
         of,
+        attempt,
     });
     Ok(())
 }
