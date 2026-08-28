@@ -9,9 +9,14 @@
 #   # and src-tauri/tauri.conf.json on the same version
 #   git tag v0.1.1 && git push origin main --tags
 #
-# The tag triggers the build. The release is created as a draft so a human
-# decides when installed copies start seeing it — publishing the release is
-# what makes `latest.json` reachable and therefore what ships the update.
+# The tag triggers the build and publishes the release immediately, so every
+# installed copy picks it up on its next launch. That is right while the
+# testers are the team and a fast loop matters more than a gate.
+#
+# Before Ella goes to people who are not us, put the gate back: set
+# `releaseDraft: true` below. A draft is not "latest", so `latest.json` keeps
+# pointing at the previous version until a human publishes — which is the only
+# thing standing between a bad build and every installed copy.
 name: Release
 
 on:
@@ -85,7 +90,9 @@ jobs:
 
             This build is not code-signed, so Windows SmartScreen will warn on
             first run: choose **More info** then **Run anyway**.
-          releaseDraft: true
+          # Publishing on tag: see the note at the top before widening the
+          # audience beyond the team.
+          releaseDraft: false
           prerelease: false
           uploadUpdaterJson: true
           # latest.json must point at the NSIS installer: the MSI cannot
