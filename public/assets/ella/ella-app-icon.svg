@@ -1,22 +1,5 @@
 <svg width="612" height="612" viewBox="0 -9 612 612" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <clipPath id="ella-icon-corners">
-      <rect x="0" y="-9" width="612" height="612" rx="96" />
-    </clipPath>
-    <pattern id="ella-grid" x="36" y="11" width="88" height="88" patternUnits="userSpaceOnUse">
-      <path
-        d="M12 0H76C82.63 0 88 5.37 88 12V76C88 82.63 82.63 88 76 88H12C5.37 88 0 82.63 0 76V12C0 5.37 5.37 0 12 0Z"
-        stroke="#9AB62B"
-        stroke-width="1.6"
-      />
-    </pattern>
-  </defs>
-
-  <g clip-path="url(#ella-icon-corners)">
-    <rect x="0" y="-9" width="612" height="612" fill="#F8FAF0" />
-    <rect x="0" y="-9" width="612" height="612" fill="url(#ella-grid)" />
-  </g>
-
+  <g transform="translate(-18 -17.82) scale(1.06)">
   <path
     d="M400 86C366 73 334 63 299 63C153 63 35 175 35 316C35 453 151 563 297 563C443 563 559 453 559 317C559 261 541 211 505 168C522 155 538 137 545 121C555 98 541 77 518 76C499 75 483 87 466 110C471 90 474 70 468 57C461 39 441 34 423 41C405 49 398 67 400 86Z"
     fill="#9347DD"
@@ -37,4 +20,5 @@
     d="M329 240C332 253 336 257 345 260C336 263 332 269 329 282C326 269 322 263 313 260C322 257 326 253 329 240Z"
     fill="#FFFFFF"
   />
+  </g>
 </svg>
