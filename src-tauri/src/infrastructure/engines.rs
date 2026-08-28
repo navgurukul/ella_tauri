@@ -1510,10 +1510,19 @@ impl LocalEngine {
         {
             SttRouter::new(whisper(), None)
         } else {
-            let fallback = env::var("ELLA_STT_FALLBACK")
-                .unwrap_or_else(|_| "whisper".into())
-                .eq_ignore_ascii_case("whisper")
-                .then(whisper);
+            // Only fall back to Whisper when a Whisper server can actually
+            // exist. An installed build ships no whisper-server and no Whisper
+            // weights, so an unconditional fallback spends a network timeout
+            // on every Canary miss and then reports a connection failure to a
+            // port nothing has ever listened on — two errors where the learner
+            // needed one, and the useful one buried behind the noise.
+            let whisper_available = env::var("ELLA_STT_BASE_URL").is_ok()
+                || whisper_binary(&engine_root).is_file();
+            let fallback = (whisper_available
+                && env::var("ELLA_STT_FALLBACK")
+                    .unwrap_or_else(|_| "whisper".into())
+                    .eq_ignore_ascii_case("whisper"))
+            .then(whisper);
             SttRouter::new(canary, fallback)
         };
 
@@ -2195,14 +2204,38 @@ impl LocalEngine {
 /// is looked for in both roots because it is the one model that ships inside
 /// the installer rather than being downloaded — small enough to bundle, and
 /// not public enough to fetch.
+/// Where a bundled whisper-server would be, if this build shipped one.
+fn whisper_binary(engine_root: &Path) -> PathBuf {
+    let directory = engine_root.join("bin").join("whisper");
+    if cfg!(windows) {
+        directory.join("whisper-server.exe")
+    } else {
+        directory.join("whisper-server")
+    }
+}
+
 fn default_piper_voice(engine_root: &Path, models_root: &Path) -> PathBuf {
-    for root in [models_root.to_path_buf(), engine_root.join("models")] {
-        let indian = root.join("tts/en_IN-navgurukul-medium.onnx");
-        let sidecar = PathBuf::from(format!("{}.json", indian.display()));
-        if indian.is_file() && sidecar.is_file() {
-            return indian;
+    // Voice first, root second: the Indian voice wins wherever it is, and only
+    // then does the stock voice get looked for. Both roots are searched for
+    // both voices, because a voice ships inside the installer while the
+    // downloaded weights live in app data, and either one can hold either
+    // file. Getting this wrong is silent — `synthesize` returns no audio
+    // rather than an error when the voice is missing, so Ella simply stops
+    // speaking and nothing says why.
+    for voice in ["en_IN-navgurukul-medium.onnx", "en_US-lessac-medium.onnx"] {
+        for root in [models_root.to_path_buf(), engine_root.join("models")] {
+            let candidate = root.join("tts").join(voice);
+            // Piper reads the sample rate and phoneme map from the sidecar and
+            // will not synthesize without it, so a voice missing its .json is
+            // not a voice.
+            let sidecar = PathBuf::from(format!("{}.json", candidate.display()));
+            if candidate.is_file() && sidecar.is_file() {
+                return candidate;
+            }
         }
     }
+    // Nothing installed. Name the stock voice in app data so the error a
+    // caller sees points at a path a repair could plausibly fill.
     models_root.join("tts/en_US-lessac-medium.onnx")
 }
 
@@ -2594,6 +2627,36 @@ mod ledger_tests {
 
         fs::write(tts.join("en_IN-navgurukul-medium.onnx.json"), b"{}").unwrap();
         assert!(default_piper_voice(&root, &root.join("models")).ends_with("en_IN-navgurukul-medium.onnx"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_stock_voice_is_found_in_the_bundle_when_app_data_holds_only_weights() {
+        // The packaged layout, which is what shipped broken: the voice is
+        // staged inside the installer, while the models root is app data and
+        // holds only what was downloaded. Resolving the stock voice against
+        // app data alone named a file that is never written there, and a
+        // missing voice makes `synthesize` return no audio without an error —
+        // so v0.1.0 ran mute and no telemetry said why.
+        let root = std::env::temp_dir().join("ella-voice-bundle-test");
+        let _ = fs::remove_dir_all(&root);
+        let engine_root = root.join("resources/engines");
+        let models_root = root.join("appdata/models");
+        fs::create_dir_all(engine_root.join("models/tts")).unwrap();
+        fs::create_dir_all(models_root.join("llm")).unwrap();
+
+        fs::write(engine_root.join("models/tts/en_US-lessac-medium.onnx"), b"x").unwrap();
+        fs::write(engine_root.join("models/tts/en_US-lessac-medium.onnx.json"), b"{}").unwrap();
+
+        let picked = default_piper_voice(&engine_root, &models_root);
+        assert!(picked.is_file(), "picked a voice that does not exist: {}", picked.display());
+        assert!(picked.ends_with("en_US-lessac-medium.onnx"));
+
+        // The Indian voice still wins from the bundle when it is installed.
+        fs::write(engine_root.join("models/tts/en_IN-navgurukul-medium.onnx"), b"x").unwrap();
+        fs::write(engine_root.join("models/tts/en_IN-navgurukul-medium.onnx.json"), b"{}").unwrap();
+        assert!(default_piper_voice(&engine_root, &models_root)
+            .ends_with("en_IN-navgurukul-medium.onnx"));
         let _ = fs::remove_dir_all(&root);
     }
 

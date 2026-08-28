@@ -1,6 +1,6 @@
 [package]
 name = "ella-tauri"
-version = "0.1.0"
+version = "0.1.1"
 description = "ZoSpeak desktop proof of concept"
 authors = ["NavGurukul"]
 edition = "2021"
