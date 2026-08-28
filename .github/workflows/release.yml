@@ -78,9 +78,10 @@ jobs:
           releaseBody: |
             Windows installer for Ella.
 
-            The installer is about 200 MB. On first launch Ella downloads
-            roughly 2.3 GB of speech and language models, which happens once
-            and resumes if the connection drops.
+            The installer is about 95 MB and carries the engines. On first
+            launch Ella downloads roughly 2.3 GB of speech and language
+            models, which happens once, resumes if the connection drops, and
+            needs about 3 GB free on the system drive.
 
             This build is not code-signed, so Windows SmartScreen will warn on
             first run: choose **More info** then **Run anyway**.
