@@ -25,19 +25,37 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest's bar is very slow in CI
 
 function Get-ReleaseAsset {
-  param([string]$Repo, [string]$Pattern)
+  param(
+    [string]$Repo,
+    [string]$Pattern,
+    # Pin a specific release tag for a reproducible build. Without one the
+    # newest release that actually carries a matching asset wins.
+    [string]$Tag
+  )
 
   $headers = @{ "User-Agent" = "ella-build" }
   if ($env:GITHUB_TOKEN) { $headers["Authorization"] = "Bearer $env:GITHUB_TOKEN" }
-  $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$Repo/releases/latest"
-  $asset = $release.assets | Where-Object { $_.name -match $Pattern } | Select-Object -First 1
-  if (-not $asset) {
-    throw "No asset matching /$Pattern/ in the latest $Repo release. Assets: $($release.assets.name -join ', ')"
+
+  if ($Tag) {
+    $releases = @(Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$Repo/releases/tags/$Tag")
+  } else {
+    # Not /releases/latest: llama.cpp marks every binary build a prerelease,
+    # so "latest" is a source-only tag carrying no Windows assets at all.
+    # Walk the list newest-first and take the first release that has one.
+    $releases = @(Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$Repo/releases?per_page=30")
   }
-  Write-Host "$Repo $($release.tag_name): $($asset.name)"
-  $out = Join-Path $env:TEMP $asset.name
-  Invoke-WebRequest -Headers $headers -Uri $asset.browser_download_url -OutFile $out
-  return $out
+
+  foreach ($release in $releases) {
+    $asset = $release.assets | Where-Object { $_.name -match $Pattern } | Select-Object -First 1
+    if ($asset) {
+      Write-Host "$Repo $($release.tag_name): $($asset.name)"
+      $out = Join-Path $env:TEMP $asset.name
+      Invoke-WebRequest -Headers $headers -Uri $asset.browser_download_url -OutFile $out
+      return $out
+    }
+  }
+
+  throw "No release in the newest 30 of $Repo carries an asset matching /$Pattern/."
 }
 
 function Expand-Into {
@@ -58,13 +76,13 @@ New-Item -ItemType Directory -Force $Destination | Out-Null
 # --- llama.cpp -------------------------------------------------------------
 # The CPU build is the one that runs everywhere. Ella asks llama-server for one
 # reply at a time, and a classroom machine has no usable GPU to lose.
-$llama = Get-ReleaseAsset -Repo "ggml-org/llama.cpp" -Pattern "bin-win-(cpu|avx2)-x64\.zip$"
+$llama = Get-ReleaseAsset -Repo "ggml-org/llama.cpp" -Pattern "^llama-.*-bin-win-cpu-x64\.zip$" -Tag $env:ELLA_LLAMA_TAG
 Expand-Into -Zip $llama -Target (Join-Path $Destination "bin\llama")
 
 # --- Piper -----------------------------------------------------------------
 # The whole archive is extracted on purpose: piper.exe needs its espeak-ng-data
 # directory beside it or phonemization fails at synthesis time.
-$piper = Get-ReleaseAsset -Repo "rhasspy/piper" -Pattern "piper_windows_amd64\.zip$"
+$piper = Get-ReleaseAsset -Repo "rhasspy/piper" -Pattern "^piper_windows_amd64\.zip$" -Tag $env:ELLA_PIPER_TAG
 Expand-Into -Zip $piper -Target (Join-Path $Destination "bin\piper")
 
 # --- The voice that ships with the app -------------------------------------
