@@ -1018,7 +1018,7 @@ mod tests {
     use super::*;
     use crate::infrastructure::{
         database::Database,
-        engines::{DemoEngine, LocalEngine},
+        engines::{DemoEngine, EnginePaths, LocalEngine},
     };
     use base64::{engine::general_purpose::STANDARD, Engine as _};
 
@@ -1171,7 +1171,7 @@ mod tests {
     #[test]
     #[ignore = "requires Canary, llama.cpp, Whisper fallback, and Piper development engines"]
     fn streamed_voice_turn_transcribes_chunks_in_the_background() {
-        let engine = LocalEngine::from_environment(None);
+        let engine = LocalEngine::from_environment(EnginePaths::default());
         let fixture = engine
             .synthesize("I played football with my best friend after school today.")
             .unwrap()
@@ -1221,7 +1221,7 @@ mod tests {
     #[test]
     #[ignore = "requires Canary, llama.cpp, Whisper fallback, and Piper development engines"]
     fn complete_local_voice_turn_uses_canary_and_returns_playable_audio() {
-        let engine = LocalEngine::from_environment(None);
+        let engine = LocalEngine::from_environment(EnginePaths::default());
         let fixture = engine
             .synthesize("I played football with my best friend after school.")
             .unwrap()

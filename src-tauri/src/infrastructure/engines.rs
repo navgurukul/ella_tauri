@@ -22,6 +22,7 @@ use crate::{
     error::{EllaError, EllaResult},
     infrastructure::{
         audio::raw_pcm_to_wav,
+        engine_manager::LlamaServer,
         speech_timing::{shifted, word_spans},
         stt::{
             CanaryStt, SpeechToTextEngine, SttRouter, Transcription, WhisperHttpStt,
@@ -1346,13 +1347,41 @@ pub trait TutorEngine: Send + Sync {
     }
 }
 
-pub fn engine_from_environment(packaged_engine_root: Option<PathBuf>) -> Box<dyn TutorEngine> {
-    match env::var("ELLA_ENGINE_MODE")
-        .unwrap_or_else(|_| "demo".into())
-        .to_lowercase()
-        .as_str()
+/// Where an installed build keeps the two halves of an engine tree. They are
+/// separate because only one of them is writable: binaries are bundled beside
+/// the executable, while weights are downloaded into app data after install.
+/// A development checkout leaves both `None` and gets the old single tree.
+#[derive(Debug, Clone, Default)]
+pub struct EnginePaths {
+    pub engine_root: Option<PathBuf>,
+    pub models_root: Option<PathBuf>,
+}
+
+/// Which engine this launch will use, decided before one is built so the
+/// caller can put a placeholder in front of a slow local start.
+///
+/// An installed build ships its engines beside the executable, and the learner
+/// who double-clicked it has no way to set an environment variable — so a
+/// bundled `bin/` means local. Demo remains the default everywhere else, which
+/// keeps `npm run desktop:dev` exactly as it was.
+pub fn resolved_mode(paths: &EnginePaths) -> String {
+    let default_mode = if paths
+        .engine_root
+        .as_ref()
+        .is_some_and(|root| root.join("bin").is_dir())
     {
-        "local" => Box::new(LocalEngine::from_environment(packaged_engine_root)),
+        "local"
+    } else {
+        "demo"
+    };
+    env::var("ELLA_ENGINE_MODE")
+        .unwrap_or_else(|_| default_mode.into())
+        .to_lowercase()
+}
+
+pub fn engine_from_environment(paths: EnginePaths) -> Box<dyn TutorEngine> {
+    match resolved_mode(&paths).as_str() {
+        "local" => Box::new(LocalEngine::from_environment(paths)),
         _ => Box::new(DemoEngine),
     }
 }
@@ -1445,11 +1474,16 @@ pub struct LocalEngine {
     piper_binary: PathBuf,
     piper_voice: PathBuf,
     piper_daemon: Option<Arc<PiperDaemon>>,
+    /// Held for its lifetime, not read: dropping this kills the server. An
+    /// installed build owns it; a development run leaves it `None` because a
+    /// terminal already has one running.
+    _llama: Option<LlamaServer>,
 }
 
 impl LocalEngine {
-    pub fn from_environment(packaged_engine_root: Option<PathBuf>) -> Self {
-        let engine_root = resolve_engine_root(packaged_engine_root);
+    pub fn from_environment(paths: EnginePaths) -> Self {
+        let engine_root = resolve_engine_root(paths.engine_root);
+        let models_root = resolve_models_root(&engine_root, paths.models_root);
         let stt_base_url =
             env::var("ELLA_STT_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:39092".into());
         let stt_root = stt_base_url.trim_end_matches('/').trim_end_matches("/v1");
@@ -1457,7 +1491,7 @@ impl LocalEngine {
             env::var("ELLA_STT_TRANSCRIBE_URL").unwrap_or_else(|_| format!("{stt_root}/inference"));
         let canary_path = env::var("ELLA_CANARY_MODEL")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| engine_root.join("models/stt").join(CANARY_FILE_NAME));
+            .unwrap_or_else(|_| models_root.join("stt").join(CANARY_FILE_NAME));
         let canary_threads = env_i32("ELLA_STT_THREADS", 0);
         let verify_checksum = env::var("ELLA_CANARY_VERIFY_SHA256")
             .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
@@ -1488,7 +1522,7 @@ impl LocalEngine {
             .unwrap_or_else(|_| default_piper_binary(&engine_root));
         let piper_voice = env::var("ELLA_PIPER_VOICE")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| default_piper_voice(&engine_root));
+            .unwrap_or_else(|_| default_piper_voice(&engine_root, &models_root));
         let daemon_enabled = env::var("ELLA_PIPER_DAEMON")
             .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
             .unwrap_or(true);
@@ -1500,18 +1534,42 @@ impl LocalEngine {
             daemon.warm();
         }
 
+        // An explicit URL means someone is running their own server — the
+        // development scripts, the benchmarks — and Ella must not start a
+        // second one against the same model.
+        let (llama, llm_base_url) = match env::var("ELLA_LLM_BASE_URL") {
+            Ok(configured) => (None, configured),
+            Err(_) => match LlamaServer::start(
+                &engine_root,
+                &models_root,
+                env_i32("ELLA_LLAMA_THREADS", default_llama_threads()),
+            ) {
+                Ok(server) => {
+                    let url = server.base_url().to_string();
+                    (Some(server), url)
+                }
+                Err(reason) => {
+                    // Not fatal: the window still opens and `status()` reports
+                    // the language model as unavailable, which is far more use
+                    // to a remote tester than a process that refuses to start.
+                    eprintln!("[engines] llama-server did not start: {reason}");
+                    (None, "http://127.0.0.1:39091/v1".to_string())
+                }
+            },
+        };
+
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(120))
                 .build()
                 .expect("reqwest client configuration is valid"),
-            llm_base_url: env::var("ELLA_LLM_BASE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:39091/v1".into()),
+            llm_base_url,
             llm_slot: env_i32("ELLA_LLM_SLOT", 0),
             stt,
             piper_binary,
             piper_voice,
             piper_daemon,
+            _llama: llama,
         }
     }
 
@@ -2133,13 +2191,41 @@ impl LocalEngine {
 ///
 /// The fallback matters because a missing voice is silent rather than loud:
 /// `synthesize` returns no audio and the shell drops to browser speech.
-fn default_piper_voice(engine_root: &Path) -> PathBuf {
-    let indian = engine_root.join("models/tts/en_IN-navgurukul-medium.onnx");
-    let sidecar = PathBuf::from(format!("{}.json", indian.display()));
-    if indian.is_file() && sidecar.is_file() {
-        return indian;
+/// The Indian voice if it is installed, and Ella's fallback if it is not. It
+/// is looked for in both roots because it is the one model that ships inside
+/// the installer rather than being downloaded — small enough to bundle, and
+/// not public enough to fetch.
+fn default_piper_voice(engine_root: &Path, models_root: &Path) -> PathBuf {
+    for root in [models_root.to_path_buf(), engine_root.join("models")] {
+        let indian = root.join("tts/en_IN-navgurukul-medium.onnx");
+        let sidecar = PathBuf::from(format!("{}.json", indian.display()));
+        if indian.is_file() && sidecar.is_file() {
+            return indian;
+        }
     }
-    engine_root.join("models/tts/en_US-lessac-medium.onnx")
+    models_root.join("tts/en_US-lessac-medium.onnx")
+}
+
+/// Weights live apart from binaries once installed, because app data is
+/// writable and the resource directory is not. The decision is explicit rather
+/// than inferred from what happens to exist: the Piper voice ships inside the
+/// bundle, so `engine_root/models` can be present on an installed machine
+/// while the downloaded weights are somewhere else entirely.
+fn resolve_models_root(engine_root: &Path, packaged_models_root: Option<PathBuf>) -> PathBuf {
+    if let Ok(configured) = env::var("ELLA_MODELS_ROOT") {
+        return PathBuf::from(configured);
+    }
+    packaged_models_root.unwrap_or_else(|| engine_root.join("models"))
+}
+
+/// How many threads llama.cpp gets when nothing says otherwise: everything but
+/// two cores, which leaves room for Piper and Canary to run alongside it
+/// mid-turn. The tooling notes settle on the same rule.
+fn default_llama_threads() -> i32 {
+    let cores = thread::available_parallelism()
+        .map(|count| count.get() as i32)
+        .unwrap_or(4);
+    (cores - 2).max(2)
 }
 
 fn resolve_engine_root(packaged_engine_root: Option<PathBuf>) -> PathBuf {
@@ -2277,7 +2363,7 @@ mod tests {
     #[test]
     #[ignore = "requires Canary, llama.cpp, Whisper fallback, and Piper development engines"]
     fn local_engine_runs_speech_to_speech_vertical_slice() {
-        let engine = LocalEngine::from_environment(None);
+        let engine = LocalEngine::from_environment(EnginePaths::default());
         assert!(engine.status().ready, "local engines are not ready");
 
         let audio = engine
@@ -2499,15 +2585,15 @@ mod ledger_tests {
         fs::create_dir_all(&tts).unwrap();
 
         // Nothing installed: the stock voice, so a fresh tree still speaks.
-        assert!(default_piper_voice(&root).ends_with("en_US-lessac-medium.onnx"));
+        assert!(default_piper_voice(&root, &root.join("models")).ends_with("en_US-lessac-medium.onnx"));
 
         // The model alone is not enough — Piper needs the sidecar beside it,
         // and picking a voice whose sidecar is missing would go silent.
         fs::write(tts.join("en_IN-navgurukul-medium.onnx"), b"x").unwrap();
-        assert!(default_piper_voice(&root).ends_with("en_US-lessac-medium.onnx"));
+        assert!(default_piper_voice(&root, &root.join("models")).ends_with("en_US-lessac-medium.onnx"));
 
         fs::write(tts.join("en_IN-navgurukul-medium.onnx.json"), b"{}").unwrap();
-        assert!(default_piper_voice(&root).ends_with("en_IN-navgurukul-medium.onnx"));
+        assert!(default_piper_voice(&root, &root.join("models")).ends_with("en_IN-navgurukul-medium.onnx"));
         let _ = fs::remove_dir_all(&root);
     }
 

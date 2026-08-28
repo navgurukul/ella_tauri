@@ -31,7 +31,7 @@ use std::{
 use ella_tauri_lib::{
     application::{AppService, SpeechBroadcast},
     domain::{find_chore, SpeechStreamEvent, TurnSignal, WinCondition},
-    infrastructure::{database::Database, engines::engine_from_environment},
+    infrastructure::{database::Database, engines::{engine_from_environment, EnginePaths}},
 };
 use serde_json::json;
 
@@ -225,7 +225,7 @@ fn open_service(learner_name: &str) -> Result<AppService, String> {
     let _ = fs::remove_file(scratch.with_extension("sqlite3-wal"));
     let _ = fs::remove_file(scratch.with_extension("sqlite3-shm"));
     let database = Database::open(&scratch).map_err(|error| error.to_string())?;
-    let engine = engine_from_environment(None);
+    let engine = engine_from_environment(EnginePaths::default());
     let status = engine.status();
     println!("engine: {} ({})", status.label, status.mode);
     for component in &status.components {
@@ -406,7 +406,7 @@ fn run(options: &Options) -> Result<(), String> {
     let _ = fs::remove_file(scratch.with_extension("sqlite3-wal"));
     let _ = fs::remove_file(scratch.with_extension("sqlite3-shm"));
     let database = Database::open(&scratch).map_err(|error| error.to_string())?;
-    let engine = engine_from_environment(None);
+    let engine = engine_from_environment(EnginePaths::default());
     let status = engine.status();
     println!("engine: {} ({})", status.label, status.mode);
     for component in &status.components {
