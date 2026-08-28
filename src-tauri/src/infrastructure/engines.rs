@@ -1488,7 +1488,7 @@ impl LocalEngine {
             .unwrap_or_else(|_| default_piper_binary(&engine_root));
         let piper_voice = env::var("ELLA_PIPER_VOICE")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| engine_root.join("models/tts/en_US-lessac-medium.onnx"));
+            .unwrap_or_else(|_| default_piper_voice(&engine_root));
         let daemon_enabled = env::var("ELLA_PIPER_DAEMON")
             .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
             .unwrap_or(true);
@@ -2119,6 +2119,29 @@ impl LocalEngine {
     }
 }
 
+/// The Indian-English voice every character in `domain::characters` already
+/// names, falling back to the stock American one when it is not installed.
+///
+/// Ella is spoken to Indian learners at about A1, and until now she answered in
+/// `en_US-lessac-medium` — the accent mismatch is friction the learner pays for
+/// on every turn. The `en_IN` voice is a fine-tune (its config still declares
+/// `espeak.voice: en-US`, and `quality: "training_dir"` rather than a published
+/// release), 22.05 kHz like the voice it replaces, and measured on this Mac it
+/// costs nothing: 1389 ms to load against 1149, 212 ms to synthesize against
+/// 198. Its `length_scale` of 1.15 makes it speak about a tenth slower, which
+/// for an A1 learner is the point rather than a cost.
+///
+/// The fallback matters because a missing voice is silent rather than loud:
+/// `synthesize` returns no audio and the shell drops to browser speech.
+fn default_piper_voice(engine_root: &Path) -> PathBuf {
+    let indian = engine_root.join("models/tts/en_IN-navgurukul-medium.onnx");
+    let sidecar = PathBuf::from(format!("{}.json", indian.display()));
+    if indian.is_file() && sidecar.is_file() {
+        return indian;
+    }
+    engine_root.join("models/tts/en_US-lessac-medium.onnx")
+}
+
 fn resolve_engine_root(packaged_engine_root: Option<PathBuf>) -> PathBuf {
     if let Ok(configured) = env::var("ELLA_ENGINE_ROOT") {
         return PathBuf::from(configured);
@@ -2466,6 +2489,26 @@ mod ledger_tests {
         let mid = chore_turn_message(&chore_context("deposit-refund", 1500, false), 4).unwrap();
         assert!(mid.contains("1500"));
         assert!(!mid.contains("[DEAL]"), "there is still ground to give at Rs 1500");
+    }
+
+    #[test]
+    fn the_indian_voice_is_preferred_and_the_stock_one_is_the_fallback() {
+        let root = std::env::temp_dir().join("ella-voice-pick-test");
+        let tts = root.join("models/tts");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&tts).unwrap();
+
+        // Nothing installed: the stock voice, so a fresh tree still speaks.
+        assert!(default_piper_voice(&root).ends_with("en_US-lessac-medium.onnx"));
+
+        // The model alone is not enough — Piper needs the sidecar beside it,
+        // and picking a voice whose sidecar is missing would go silent.
+        fs::write(tts.join("en_IN-navgurukul-medium.onnx"), b"x").unwrap();
+        assert!(default_piper_voice(&root).ends_with("en_US-lessac-medium.onnx"));
+
+        fs::write(tts.join("en_IN-navgurukul-medium.onnx.json"), b"{}").unwrap();
+        assert!(default_piper_voice(&root).ends_with("en_IN-navgurukul-medium.onnx"));
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
