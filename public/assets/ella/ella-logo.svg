@@ -1,17 +1,4 @@
 <svg width="612" height="594" viewBox="0 0 612 594" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <pattern id="ella-grid" x="36" y="11" width="88" height="88" patternUnits="userSpaceOnUse">
-      <path
-        d="M12 0H76C82.63 0 88 5.37 88 12V76C88 82.63 82.63 88 76 88H12C5.37 88 0 82.63 0 76V12C0 5.37 5.37 0 12 0Z"
-        stroke="#9AB62B"
-        stroke-width="1.6"
-      />
-    </pattern>
-  </defs>
-
-  <rect width="612" height="594" fill="#F8FAF0" />
-  <rect width="612" height="594" fill="url(#ella-grid)" />
-
   <path
     d="M400 86C366 73 334 63 299 63C153 63 35 175 35 316C35 453 151 563 297 563C443 563 559 453 559 317C559 261 541 211 505 168C522 155 538 137 545 121C555 98 541 77 518 76C499 75 483 87 466 110C471 90 474 70 468 57C461 39 441 34 423 41C405 49 398 67 400 86Z"
     fill="#9347DD"

@@ -25,9 +25,15 @@ fn main() {
                 .and_then(|name| name.to_str())
                 .unwrap_or("");
             if name.to_ascii_lowercase().ends_with(".dll") {
-                fs::copy(&path, destination.join(name)).unwrap_or_else(|error| {
-                    panic!("copy {} into bundle staging: {error}", path.display())
+                let target = destination.join(name);
+                let should_copy = fs::read(&target).map_or(true, |existing| {
+                    fs::read(&path).map_or(true, |source| source != existing)
                 });
+                if should_copy {
+                    fs::copy(&path, target).unwrap_or_else(|error| {
+                        panic!("copy {} into bundle staging: {error}", path.display())
+                    });
+                }
                 copied += 1;
             }
         }
