@@ -17,6 +17,7 @@
 //! ```bash
 //! npm run engines:local                     # llama-server + whisper sidecars
 //! ELLA_ENGINE_MODE=local ELLA_ENGINE_ROOT="$PWD/engines" \
+//!   ELLA_LLM_BASE_URL=http://127.0.0.1:39091/v1 \
 //!   npm run bench:chore -- --chore market-cloth-price
 //! ```
 
@@ -239,7 +240,8 @@ fn open_service(learner_name: &str) -> Result<AppService, String> {
     if !status.ready {
         return Err(
             "engines are not ready. Start them with `npm run engines:local` and set \
-             ELLA_ENGINE_MODE=local ELLA_ENGINE_ROOT=$PWD/engines"
+             ELLA_ENGINE_MODE=local ELLA_ENGINE_ROOT=$PWD/engines \
+             ELLA_LLM_BASE_URL=http://127.0.0.1:39091/v1"
                 .into(),
         );
     }
@@ -420,7 +422,8 @@ fn run(options: &Options) -> Result<(), String> {
     if !status.ready {
         return Err(
             "engines are not ready. Start them with `npm run engines:local` and set \
-             ELLA_ENGINE_MODE=local ELLA_ENGINE_ROOT=$PWD/engines"
+             ELLA_ENGINE_MODE=local ELLA_ENGINE_ROOT=$PWD/engines \
+             ELLA_LLM_BASE_URL=http://127.0.0.1:39091/v1"
                 .into(),
         );
     }

@@ -30,4 +30,6 @@ for attempt in {1..90}; do
 done
 
 cd "$PROJECT_DIR"
-ELLA_ENGINE_MODE=local npm run desktop:dev
+# The launcher above owns llama-server. Naming it here stops the app starting
+# a second one against the same model, which it otherwise does when installed.
+ELLA_ENGINE_MODE=local ELLA_LLM_BASE_URL=http://127.0.0.1:39091/v1 npm run desktop:dev
