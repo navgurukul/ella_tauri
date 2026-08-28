@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Ella — Speak English, grow your garden",
+        "title": "Ella \u2014 Speak English every day",
         "width": 1440,
         "height": 900,
         "minWidth": 1240,
@@ -38,6 +38,26 @@
     "longDescription": "A local-first desktop app for Ella, NavGurukul's voice-first English learning companion.",
     "macOS": {
       "minimumSystemVersion": "12.0"
+    },
+    "createUpdaterArtifacts": true,
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "English"
+        ]
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENFRUY5QjNEOUVFODMzQjcKUldTM00raWVQWnZ2emxHZFdIaTRpUis5VTJKdU83aFpqck9sRzVCdzB0QTA1QWo2ckt4RUFjajAK",
+      "endpoints": [
+        "https://github.com/navgurukul/ella_tauri/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

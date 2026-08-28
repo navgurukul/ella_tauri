@@ -1,0 +1,93 @@
+# Builds the Windows installer on a Windows runner and publishes it, together
+# with the signed `latest.json` that installed copies poll for updates.
+#
+# The Intel Mac this project is developed on cannot cross-compile the MSVC
+# target, so this workflow is the only way a Windows build gets made.
+#
+# Cutting a release:
+#   npm version patch --no-git-tag-version   # keep package.json, Cargo.toml
+#   # and src-tauri/tauri.conf.json on the same version
+#   git tag v0.1.1 && git push origin main --tags
+#
+# The tag triggers the build. The release is created as a draft so a human
+# decides when installed copies start seeing it — publishing the release is
+# what makes `latest.json` reachable and therefore what ships the update.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and attach the release to (e.g. v0.1.1)"
+        required: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # transcribe.cpp compiles its Vulkan backend from GLSL, so the build host
+      # needs glslc. The runtime does not: the packaged app keeps the CPU
+      # module and only uses Vulkan where a driver provides it.
+      - name: Install the Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1.6.0
+        with:
+          install_runtime: false
+          cache: true
+
+      - run: npm ci
+
+      # Binaries only. Weights are downloaded by the app on first launch,
+      # because a release asset cannot exceed 2 GB.
+      - name: Stage the Windows engines
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ELLA_PIPER_VOICE_URL: ${{ secrets.ELLA_PIPER_VOICE_URL }}
+        run: ./scripts/fetch-windows-engines.ps1
+
+      - name: Build and publish
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Without this the bundle carries no signature and every installed
+          # copy rejects the update as untrusted.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: "Ella __VERSION__"
+          releaseBody: |
+            Windows installer for Ella.
+
+            The installer is about 200 MB. On first launch Ella downloads
+            roughly 2.3 GB of speech and language models, which happens once
+            and resumes if the connection drops.
+
+            This build is not code-signed, so Windows SmartScreen will warn on
+            first run: choose **More info** then **Run anyway**.
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: true
+          # latest.json must point at the NSIS installer: the MSI cannot
+          # update a per-user install without elevation.
+          updaterJsonPreferNsis: true
+          args: --target x86_64-pc-windows-msvc

@@ -8,6 +8,8 @@ import { SummaryScreen } from "./components/SummaryScreen";
 import { TalkScreen } from "./components/TalkScreen";
 import { bridge } from "./lib/bridge";
 import { recommendedTopicId, unfinishedSession } from "./lib/presentation";
+import { formatBytes, useSetupState, type SetupState } from "./lib/setup";
+import { applyUpdateIfAny, type UpdateProgress } from "./lib/updates";
 import type { VoiceCaptureResult } from "./lib/speech";
 import type { AppSnapshot, Session, SessionSummary, Topic } from "./types";
 
@@ -26,6 +28,13 @@ export default function App() {
   const [summary, setSummary] = useState<SessionSummary | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [update, setUpdate] = useState<UpdateProgress | null>(null);
+  const setup = useSetupState();
+
+  // Once, at launch: the only point where closing the app costs nothing.
+  useEffect(() => {
+    void applyUpdateIfAny(setUpdate);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -182,6 +191,11 @@ export default function App() {
     setScreen(key);
   }
 
+  // An update replaces the running app, so it owns the screen while it works.
+  // "checking" is deliberately not shown: it is over in a moment, and a flash
+  // of update UI on every launch reads as instability.
+  if (update && update.stage !== "checking") return <UpdateScreen progress={update} />;
+
   if (!snapshot) return <BootScreen error={error} />;
 
   if (screen === "onboarding") {
@@ -194,6 +208,7 @@ export default function App() {
           onPlacement={handlePlacement}
           onDone={() => setScreen("home")}
         />
+        <SetupBanner setup={setup} />
         {busy && <BusyVeil />}
       </>
     );
@@ -230,6 +245,7 @@ export default function App() {
           <SummaryScreen summary={summary} onHome={() => setScreen("home")} />
         )}
       </main>
+      <SetupBanner setup={setup} />
       {busy && <BusyVeil />}
       {error && <Toast message={error} onClose={() => setError(null)} />}
     </div>
@@ -259,6 +275,75 @@ function BootScreen({ error }: { error: string | null }) {
       <p>{error ?? "Getting your local learning space ready."}</p>
       {!error && <LoaderCircle className="spin" aria-label="Loading" />}
       {!error && <EllaMascot className="ella--corner-boot" scale={0.55} rotate={-4} />}
+    </div>
+  );
+}
+
+/**
+ * The first launch after an install has gigabytes to fetch before Ella can
+ * speak. It runs behind the app rather than in front of it: a learner can put
+ * in their name and check their microphone while it downloads, and only the
+ * talking itself has to wait. Anything that needs the engine early says so in
+ * its own words, because the backend returns that sentence with the failure.
+ */
+function SetupBanner({ setup }: { setup: SetupState | null }) {
+  if (!setup || setup.stage === "ready") return null;
+
+  const downloading = setup.stage === "downloading" && setup.total_bytes > 0;
+  const percent = downloading
+    ? Math.min(100, Math.round((setup.downloaded_bytes / setup.total_bytes) * 100))
+    : null;
+
+  return (
+    <div className={`setup-strip ${setup.stage === "failed" ? "setup-strip--failed" : ""}`.trim()} aria-live="polite">
+      {setup.stage !== "failed" && <LoaderCircle className="spin" aria-hidden="true" />}
+      <div className="setup-strip__text">
+        <strong>
+          {setup.stage === "failed" ? "Ella could not finish setting up" : "Getting Ella ready"}
+        </strong>
+        <span>
+          {setup.stage === "failed"
+            ? setup.message
+            : downloading
+              ? `${setup.message} — ${formatBytes(setup.downloaded_bytes)} of ${formatBytes(setup.total_bytes)}`
+              : setup.message}
+        </span>
+      </div>
+      {percent !== null && (
+        <div className="setup-strip__bar" role="progressbar" aria-valuenow={percent}>
+          <span style={{ width: `${percent}%` }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** An update rewrites the app underneath itself, so nothing else is on screen. */
+function UpdateScreen({ progress }: { progress: UpdateProgress }) {
+  const percent =
+    progress.totalBytes > 0
+      ? Math.min(100, Math.round((progress.downloadedBytes / progress.totalBytes) * 100))
+      : null;
+  const heading =
+    progress.stage === "restarting" ? "Starting the new Ella…" : "Updating Ella…";
+
+  return (
+    <div className="boot">
+      <div className="wordmark wordmark--lg">
+        <EllaGlyph size={48} />
+        <span>Ella</span>
+      </div>
+      <h1 className="display display--md">{heading}</h1>
+      <p>
+        {progress.version ? `Version ${progress.version}. ` : ""}
+        This only takes a moment, and your talks are kept.
+      </p>
+      {percent !== null && (
+        <div className="setup-strip__bar setup-strip__bar--wide" role="progressbar" aria-valuenow={percent}>
+          <span style={{ width: `${percent}%` }} />
+        </div>
+      )}
+      <LoaderCircle className="spin" aria-label="Updating" />
     </div>
   );
 }

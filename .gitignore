@@ -12,3 +12,7 @@ src-tauri/transcribe-libs/*
 # local engine tree (symlink or staged binaries + models)
 engines
 .vite/
+
+# updater signing keys must never enter the repo
+*.key
+*.key.pub

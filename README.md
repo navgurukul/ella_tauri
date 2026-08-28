@@ -234,6 +234,79 @@ Vulkan DLLs next to the packaged executable; Tauri also bundles the staged
 engine tree. Run the resulting build on both a Vulkan-capable and CPU-only
 Windows 11 x86-64 machine before distribution.
 
+## Releases and automatic updates
+
+Windows installers are built by [`.github/workflows/release.yml`](.github/workflows/release.yml)
+on a `windows-latest` runner, because the MSVC target cannot be
+cross-compiled from the development Mac. Pushing a `v*` tag builds the
+installer, signs the update bundle, and attaches both — plus `latest.json` —
+to a **draft** GitHub release.
+
+```bash
+# keep the three version numbers in step: package.json, src-tauri/Cargo.toml,
+# src-tauri/tauri.conf.json
+git tag v0.1.1 && git push origin main --tags
+```
+
+Publishing that draft is what ships the update: installed copies poll
+`releases/latest/download/latest.json`, and a draft release is not "latest".
+That is the release switch — build first, decide later.
+
+Every installed copy checks once at launch, before there is a conversation to
+interrupt, and applies what it finds
+([`src/lib/updates.ts`](src/lib/updates.ts)). An update that fails to verify
+against the public key in `tauri.conf.json` is discarded and the installed
+version keeps running.
+
+The private half of that key is **not** in the repository. It lives in the
+`TAURI_SIGNING_PRIVATE_KEY` repository secret and in `~/.ella-updater/` on the
+machine that generated it. Losing it means no existing install can ever be
+updated again — they would each have to be reinstalled by hand — so it belongs
+in a password manager, not only on one laptop.
+
+Two things the pipeline deliberately does not solve:
+
+- **Code signing.** Builds are unsigned, so SmartScreen warns on first run
+  ("More info" then "Run anyway"). An Authenticode certificate is weeks of
+  lead time and is the thing to start early; it is unrelated to the update
+  signing key above.
+- **The Indian voice.** `en_IN-navgurukul-medium` is not publicly
+  downloadable, so CI stages it from the `ELLA_PIPER_VOICE_URL` secret. Without
+  that secret the build still succeeds and ships the public `en_US` voice,
+  which is the fallback Ella already has.
+
+## What the installer carries, and what it fetches
+
+The installer is ~200 MB: llama-server, Piper and the Piper voice, plus Ella
+herself. The weights are not in it — ~2.3 GB against a 2 GB cap on a release
+asset, and bundling them would make every one-line fix a multi-gigabyte
+download.
+
+Instead [`infrastructure/models.rs`](src-tauri/src/infrastructure/models.rs)
+fetches them into app data on first launch, from the same
+[`tooling/models.json`](tooling/models.json) the development tooling reads,
+compiled into the binary. Downloads resume after an interruption, Canary is
+checked against the SHA-256 the manifest pins, and a file is only given its
+real name once it is complete — a half-downloaded model can never be mistaken
+for a usable one.
+
+This is also how a **model change ships**. Every downloaded file is recorded
+beside the weights with the variant and URL it came from. Point the manifest at
+a different GGUF, cut a release, and the next launch notices that what is on
+disk is no longer what the manifest asks for and fetches the new one. No
+separate mechanism, and no version number to bump by hand.
+
+The window opens immediately while all of this happens behind it: the engine
+arrives underneath a placeholder
+([`infrastructure/engine_manager.rs`](src-tauri/src/infrastructure/engine_manager.rs)),
+so a learner can enter their name and check their microphone during the
+download, and only the talking itself waits.
+
+`llama-server` is started and supervised by the app in an installed build —
+free port, readiness poll, killed on exit. The development scripts are
+unchanged: setting `ELLA_LLM_BASE_URL` means someone else owns the server, and
+Ella will not start a second one.
+
 ## POC boundaries
 
 The automated full-turn test feeds a real WAV fixture into the application
