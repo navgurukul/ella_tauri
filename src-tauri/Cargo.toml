@@ -32,7 +32,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 transcribe-cpp = { version = "=0.2.2", default-features = false, features = ["metal"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-transcribe-cpp = { version = "=0.2.2", default-features = false, features = ["vulkan", "dynamic-backends"] }
+transcribe-cpp = { version = "=0.2.2", default-features = false, features = ["dynamic-backends"] }
 
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
 transcribe-cpp = { version = "=0.2.2", default-features = false }

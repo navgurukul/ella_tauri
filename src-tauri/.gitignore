@@ -1,0 +1,4 @@
+# Ignore compiled transcription DLLs - these trigger Tauri's file watcher causing infinite rebuild loops
+transcribe-libs/*.dll
+transcribe-libs/*.so
+transcribe-libs/*.dylib

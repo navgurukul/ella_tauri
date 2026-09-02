@@ -1,7 +1,7 @@
 {
   "name": "ella-tauri-poc",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,8 +10,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "tauri": "tauri",
-    "desktop:dev": "tauri dev",
-    "desktop:dev:local": "ELLA_ENGINE_MODE=local ELLA_LLM_BASE_URL=http://127.0.0.1:39091/v1 tauri dev",
+    "desktop:dev": "tauri dev --no-watch",
     "desktop:build": "tauri build --no-bundle",
     "desktop:bundle": "tauri build --bundles app --no-sign",
     "engines:local": "./scripts/start-local-engines.sh",
