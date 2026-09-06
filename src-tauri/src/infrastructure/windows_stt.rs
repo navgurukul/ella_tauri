@@ -3,6 +3,7 @@
 //! Utilizes Windows native Speech Recognition capabilities (System.Speech / SAPI)
 //! to transcribe captured speech audio without external cloud API dependencies.
 
+#[cfg(target_os = "windows")]
 use std::time::Instant;
 
 use crate::{
@@ -92,12 +93,15 @@ impl SpeechToTextEngine for WindowsStt {
 }
 
 #[cfg(target_os = "windows")]
-fn transcribe_windows_audio(wav_data: &[u8], _language: &str) -> EllaResult<String> {
+fn transcribe_windows_audio(wav_data: &[u8], language: &str) -> EllaResult<String> {
     use std::env;
     use std::fs;
     use std::io::Write;
+    use std::os::windows::process::CommandExt;
     use std::process::Command;
     use uuid::Uuid;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     // Use a temporary WAV file in system temp dir
     let temp_file_name = format!("ella_stt_{}.wav", Uuid::new_v4());
@@ -111,27 +115,43 @@ fn transcribe_windows_audio(wav_data: &[u8], _language: &str) -> EllaResult<Stri
         .map_err(|e| EllaError::Engine(format!("Failed to write WAV data: {e}")))?;
     drop(file);
 
-    // PowerShell System.Speech SAPI recognition for in-process audio file transcription
+    // PowerShell System.Speech SAPI recognition: loop through sentences until audio ends
     let ps_script = format!(
         r#"
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Speech
-$recognizer = New-Object System.Speech.Recognition.SpeechRecognitionEngine
+try {{
+    $culture = New-Object System.Globalization.CultureInfo('{lang}')
+    $recognizer = New-Object System.Speech.Recognition.SpeechRecognitionEngine($culture)
+}} catch {{
+    $recognizer = New-Object System.Speech.Recognition.SpeechRecognitionEngine
+}}
 $grammar = New-Object System.Speech.Recognition.DictationGrammar
 $recognizer.LoadGrammar($grammar)
 $recognizer.SetInputToWaveFile('{path}')
-$result = $recognizer.Recognize()
-if ($result) {{
+
+$sentences = [System.Collections.Generic.List[string]]::new()
+while ($true) {{
+    $result = $recognizer.Recognize()
+    if ($null -eq $result) {{ break }}
+    if (![string]::IsNullOrWhiteSpace($result.Text)) {{
+        $sentences.Add($result.Text.Trim())
+    }}
+}}
+
+if ($sentences.Count -gt 0) {{
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-    Write-Output $result.Text
+    Write-Output ($sentences -join ' ')
 }}
 "#,
+        lang = language.replace('\'', "''"),
         path = temp_path.replace('\'', "''")
     );
 
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
-        .output();
+    let mut cmd = Command::new("powershell");
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &ps_script]);
+    let output = cmd.output();
 
     // Clean up temporary file
     let _ = fs::remove_file(&temp_path_buf);
@@ -149,3 +169,4 @@ if ($result) {{
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok(text)
 }
+

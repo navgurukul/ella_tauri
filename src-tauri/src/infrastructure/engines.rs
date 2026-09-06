@@ -1500,12 +1500,17 @@ impl LocalEngine {
         };
         let windows_stt = || Box::new(WindowsStt::default()) as Box<dyn SpeechToTextEngine>;
 
-        // Primary STT: Windows Built-in STT | Fallback / Backup STT: Canary STT
-        let stt = if cfg!(target_os = "windows")
-            || env::var("ELLA_STT_ENGINE")
-                .unwrap_or_else(|_| "windows".into())
-                .eq_ignore_ascii_case("windows")
-        {
+        // Primary STT is platform-dependent:
+        // - Windows: Windows Built-in STT (primary) with Canary STT (fallback)
+        // - Mac / Linux / others: Canary STT
+        let default_stt = if cfg!(target_os = "windows") {
+            "windows"
+        } else {
+            "canary"
+        };
+        let stt_engine = env::var("ELLA_STT_ENGINE").unwrap_or_else(|_| default_stt.into());
+
+        let stt = if stt_engine.eq_ignore_ascii_case("windows") {
             SttRouter::new(windows_stt(), Some(canary()))
         } else {
             SttRouter::new(canary(), None)
@@ -2189,15 +2194,6 @@ impl LocalEngine {
 /// is looked for in both roots because it is the one model that ships inside
 /// the installer rather than being downloaded — small enough to bundle, and
 /// not public enough to fetch.
-/// Where a bundled whisper-server would be, if this build shipped one.
-fn whisper_binary(engine_root: &Path) -> PathBuf {
-    let directory = engine_root.join("bin").join("whisper");
-    if cfg!(windows) {
-        directory.join("whisper-server.exe")
-    } else {
-        directory.join("whisper-server")
-    }
-}
 
 fn default_piper_voice(engine_root: &Path, models_root: &Path) -> PathBuf {
     // Voice first, root second: the Indian voice wins wherever it is, and only
