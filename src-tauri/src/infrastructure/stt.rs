@@ -17,6 +17,8 @@ use crate::{
     infrastructure::audio::pcm16_wav,
 };
 
+pub use super::windows_stt::WindowsStt;
+
 pub const CANARY_FILE_NAME: &str = "canary-180m-flash-Q8_0.gguf";
 pub const CANARY_SHA256: &str = "e13c7f5d0952b056a027cfffec13e3a3a134d1608babed24f983568f141e297c";
 const CANARY_MIN_BYTES: u64 = 200 * 1024 * 1024;

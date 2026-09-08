@@ -25,7 +25,7 @@ use crate::{
         engine_manager::LlamaServer,
         speech_timing::{shifted, word_spans},
         stt::{
-            CanaryStt, SpeechToTextEngine, SttRouter, Transcription, WhisperHttpStt,
+            CanaryStt, SpeechToTextEngine, SttRouter, Transcription, WindowsStt,
             CANARY_FILE_NAME,
         },
     },
@@ -1484,11 +1484,6 @@ impl LocalEngine {
     pub fn from_environment(paths: EnginePaths) -> Self {
         let engine_root = resolve_engine_root(paths.engine_root);
         let models_root = resolve_models_root(&engine_root, paths.models_root);
-        let stt_base_url =
-            env::var("ELLA_STT_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:39092".into());
-        let stt_root = stt_base_url.trim_end_matches('/').trim_end_matches("/v1");
-        let stt_transcribe_url =
-            env::var("ELLA_STT_TRANSCRIBE_URL").unwrap_or_else(|_| format!("{stt_root}/inference"));
         let canary_path = env::var("ELLA_CANARY_MODEL")
             .map(PathBuf::from)
             .unwrap_or_else(|_| models_root.join("stt").join(CANARY_FILE_NAME));
@@ -1496,34 +1491,29 @@ impl LocalEngine {
         let verify_checksum = env::var("ELLA_CANARY_VERIFY_SHA256")
             .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
             .unwrap_or(true);
-        let canary: Box<dyn SpeechToTextEngine> =
-            Box::new(CanaryStt::new(canary_path, canary_threads, verify_checksum));
-        let whisper = || {
-            Box::new(WhisperHttpStt::new(
-                stt_base_url.clone(),
-                stt_transcribe_url.clone(),
+        let canary = || {
+            Box::new(CanaryStt::new(
+                canary_path.clone(),
+                canary_threads,
+                verify_checksum,
             )) as Box<dyn SpeechToTextEngine>
         };
-        let stt = if env::var("ELLA_STT_ENGINE")
-            .unwrap_or_else(|_| "canary".into())
-            .eq_ignore_ascii_case("whisper")
-        {
-            SttRouter::new(whisper(), None)
+        let windows_stt = || Box::new(WindowsStt::default()) as Box<dyn SpeechToTextEngine>;
+
+        // Primary STT is platform-dependent:
+        // - Windows: Windows Built-in STT (primary) with Canary STT (fallback)
+        // - Mac / Linux / others: Canary STT
+        let default_stt = if cfg!(target_os = "windows") {
+            "windows"
         } else {
-            // Only fall back to Whisper when a Whisper server can actually
-            // exist. An installed build ships no whisper-server and no Whisper
-            // weights, so an unconditional fallback spends a network timeout
-            // on every Canary miss and then reports a connection failure to a
-            // port nothing has ever listened on — two errors where the learner
-            // needed one, and the useful one buried behind the noise.
-            let whisper_available = env::var("ELLA_STT_BASE_URL").is_ok()
-                || whisper_binary(&engine_root).is_file();
-            let fallback = (whisper_available
-                && env::var("ELLA_STT_FALLBACK")
-                    .unwrap_or_else(|_| "whisper".into())
-                    .eq_ignore_ascii_case("whisper"))
-            .then(whisper);
-            SttRouter::new(canary, fallback)
+            "canary"
+        };
+        let stt_engine = env::var("ELLA_STT_ENGINE").unwrap_or_else(|_| default_stt.into());
+
+        let stt = if stt_engine.eq_ignore_ascii_case("windows") {
+            SttRouter::new(windows_stt(), Some(canary()))
+        } else {
+            SttRouter::new(canary(), None)
         };
 
         let piper_binary = env::var("ELLA_PIPER_BINARY")
@@ -2204,15 +2194,6 @@ impl LocalEngine {
 /// is looked for in both roots because it is the one model that ships inside
 /// the installer rather than being downloaded — small enough to bundle, and
 /// not public enough to fetch.
-/// Where a bundled whisper-server would be, if this build shipped one.
-fn whisper_binary(engine_root: &Path) -> PathBuf {
-    let directory = engine_root.join("bin").join("whisper");
-    if cfg!(windows) {
-        directory.join("whisper-server.exe")
-    } else {
-        directory.join("whisper-server")
-    }
-}
 
 fn default_piper_voice(engine_root: &Path, models_root: &Path) -> PathBuf {
     // Voice first, root second: the Indian voice wins wherever it is, and only
