@@ -139,7 +139,11 @@ $recognizer.SetInputToWaveFile('{path}')
 
 $sentences = [System.Collections.Generic.List[string]]::new()
 while ($true) {{
-    $result = $recognizer.Recognize()
+    try {{
+        $result = $recognizer.Recognize()
+    }} catch [System.InvalidOperationException] {{
+        break
+    }}
     if ($null -eq $result) {{ break }}
     if (![string]::IsNullOrWhiteSpace($result.Text)) {{
         $sentences.Add($result.Text.Trim())
