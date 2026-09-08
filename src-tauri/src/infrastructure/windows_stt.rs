@@ -21,7 +21,7 @@ pub struct WindowsStt {
 impl WindowsStt {
     pub fn new(language: Option<String>) -> Self {
         Self {
-            language: language.unwrap_or_else(|| "en-US".into()),
+            language: language.unwrap_or_else(|| "en-IN".into()),
         }
     }
 }
@@ -46,16 +46,9 @@ impl SpeechToTextEngine for WindowsStt {
         let started = Instant::now();
 
         if samples.is_empty() {
-            return Ok(Transcription {
-                text: String::new(),
-                engine: "windows-speech".into(),
-                backend: "windows-native".into(),
-                elapsed_ms: started.elapsed().as_secs_f64() * 1_000.0,
-                fallback_from: None,
-                mel_ms: None,
-                encode_ms: None,
-                decode_ms: None,
-            });
+            return Err(EllaError::Validation(
+                "I did not hear enough speech. Please speak for at least a quarter second.".into(),
+            ));
         }
 
         // Generate standard WAV buffer from PCM samples
@@ -63,17 +56,31 @@ impl SpeechToTextEngine for WindowsStt {
 
         // Perform Windows Speech Recognition
         let recognized_text = transcribe_windows_audio(&wav_bytes, &self.language)?;
+        let text = recognized_text.trim().to_owned();
+
+        // SAPI exits 0 and prints nothing when it heard the audio and made no
+        // sense of it, which for an accented or code-switching learner is the
+        // likely outcome rather than the rare one. Canary and Whisper both
+        // report that as an error so `SttRouter` reaches for the fallback;
+        // returning Ok("") here would hand the learner silence and leave the
+        // better engine unused.
+        if text.is_empty() {
+            return Err(EllaError::Validation(
+                "Windows Speech Recognition received audio but found no words. Move closer to the microphone and try again."
+                    .into(),
+            ));
+        }
 
         let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
         eprintln!(
             "[LATENCY]     stt> windows-speech transcribed {} samples in {:.1}ms: \"{}\"",
             samples.len(),
             elapsed_ms,
-            recognized_text.trim()
+            text
         );
 
         Ok(Transcription {
-            text: recognized_text.trim().to_string(),
+            text,
             engine: "windows-speech".into(),
             backend: "windows-native".into(),
             elapsed_ms,
