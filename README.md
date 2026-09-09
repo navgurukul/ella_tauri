@@ -162,7 +162,7 @@ Environment overrides:
 
 - `ELLA_ENGINE_ROOT`
 - `ELLA_LLM_BASE_URL`
-- `ELLA_STT_BASE_URL` and `ELLA_STT_TRANSCRIBE_URL` (Whisper fallback)
+- `ELLA_STT_ENGINE` (`windows` or `canary`; defaults to `windows` on Windows, `canary` elsewhere)
 - `ELLA_PIPER_BINARY` and `ELLA_PIPER_VOICE`
 - `ELLA_CANARY_MODEL`, `ELLA_STT_THREADS`, `ELLA_CANARY_VERIFY_SHA256`
 

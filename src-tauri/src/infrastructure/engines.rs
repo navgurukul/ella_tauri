@@ -2190,11 +2190,6 @@ impl LocalEngine {
 ///
 /// The fallback matters because a missing voice is silent rather than loud:
 /// `synthesize` returns no audio and the shell drops to browser speech.
-/// The Indian voice if it is installed, and Ella's fallback if it is not. It
-/// is looked for in both roots because it is the one model that ships inside
-/// the installer rather than being downloaded — small enough to bundle, and
-/// not public enough to fetch.
-
 fn default_piper_voice(engine_root: &Path, models_root: &Path) -> PathBuf {
     // Voice first, root second: the Indian voice wins wherever it is, and only
     // then does the stock voice get looked for. Both roots are searched for

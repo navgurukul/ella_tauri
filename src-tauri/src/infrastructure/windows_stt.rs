@@ -34,10 +34,19 @@ impl Default for WindowsStt {
 
 impl SpeechToTextEngine for WindowsStt {
     fn status(&self) -> SttStatus {
+        // Off Windows there is no SAPI to drive and `transcribe` says so on
+        // every call, so a green light here would be a lie. Only reachable
+        // that way through `ELLA_STT_ENGINE=windows`, since the router picks
+        // Canary everywhere else.
+        let ready = cfg!(target_os = "windows");
         SttStatus {
             name: "windows-speech".into(),
-            ready: true,
-            detail: format!("Windows Built-in Speech Recognition ({})", self.language),
+            ready,
+            detail: if ready {
+                format!("Windows Built-in Speech Recognition ({})", self.language)
+            } else {
+                "Windows Built-in Speech Recognition is only available on Windows.".into()
+            },
         }
     }
 
