@@ -36,6 +36,17 @@ const MIC_HINT: Record<EllaState, string> = {
   speaking: "Tap to interrupt and speak",
 };
 
+// Below this, `voiceLevel` (0-1, from the same RMS meter that drives the mic's
+// pulse animation) reads as room noise rather than someone talking. A starting
+// point, not a measured threshold - worth tuning against real recordings if
+// the badge fires during normal speech or never fires during real silence.
+const SPEAK_UP_LEVEL_THRESHOLD = 0.05;
+// How long the level can stay under that before the nudge appears. Long
+// enough that an ordinary pause-before-speaking never triggers it; short
+// enough that a learner who has gone quiet does not sit there wondering if
+// anything is happening.
+const SPEAK_UP_DELAY_MS = 4000;
+
 export function TalkScreen({
   session,
   onSessionChange,
@@ -50,6 +61,10 @@ export function TalkScreen({
   const [typing, setTyping] = useState(false);
   const [liveTranscript, setLiveTranscript] = useState("");
   const [voiceLevel, setVoiceLevel] = useState(0);
+  // Shown while listening if the mic has picked up nothing but quiet for a
+  // while - a nudge before the recording ever reaches the "no words" path.
+  const [showSpeakUpHint, setShowSpeakUpHint] = useState(false);
+  const lastSoundAt = useRef(0);
   const [sending, setSending] = useState(false);
   const [micStarting, setMicStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -153,6 +168,26 @@ export function TalkScreen({
       micButton.current?.focus();
     }
   }, [typing]);
+
+  // Arms a "speak up" nudge for the whole time the mic is open, and disarms it
+  // the moment listening ends - by finishing, cancelling, or unmounting.
+  // `lastSoundAt` is updated from `handleLevel` on every frame that clears the
+  // threshold, so this timer only has to check whether it has gone stale.
+  useEffect(() => {
+    if (state !== "listening") {
+      setShowSpeakUpHint(false);
+      return;
+    }
+    const id = window.setInterval(() => {
+      setShowSpeakUpHint(performance.now() - lastSoundAt.current >= SPEAK_UP_DELAY_MS);
+    }, 500);
+    return () => window.clearInterval(id);
+  }, [state]);
+
+  function handleLevel(level: number) {
+    setVoiceLevel(level);
+    if (level >= SPEAK_UP_LEVEL_THRESHOLD) lastSoundAt.current = performance.now();
+  }
 
   function stopPlayback() {
     playbackGeneration.current += 1;
@@ -357,6 +392,7 @@ export function TalkScreen({
     try {
       setLiveTranscript("");
       setVoiceLevel(0);
+      lastSoundAt.current = performance.now();
       voicePushQueue.current = Promise.resolve();
       voicePushFailed.current = false;
       // Live chunked STT: open a Rust-side stream so audio is transcribed while
@@ -388,7 +424,7 @@ export function TalkScreen({
           llog("stream:begin-failed", `${errorMessage(reason)}; using buffered voice turn`);
         }
       }
-      await voice.current.start(setLiveTranscript, setVoiceLevel, onChunk);
+      await voice.current.start(setLiveTranscript, handleLevel, onChunk);
       if (!mounted.current || operation !== micOperation.current) {
         await cancelVoiceStream();
         await voice.current.cancel();
@@ -762,6 +798,11 @@ export function TalkScreen({
             </form>
           ) : (
             <div className="mic-stack">
+              {showSpeakUpHint && (
+                <span className="pill pill--nudge" role="status" aria-live="polite">
+                  Speak up to continue the conversation
+                </span>
+              )}
               <div className="mic-wrap">
                 {state === "listening" && (
                   <>

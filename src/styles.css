@@ -266,6 +266,13 @@ button { font-family: inherit; }
 }
 .pill--white b { color: var(--orange); font-weight: 700; }
 .pill__dot { color: rgba(38, 38, 38, 0.35); }
+.pill--nudge {
+  background: var(--orange);
+  color: var(--white);
+  font-size: 13px;
+  animation: nudgeIn 0.2s ease-out;
+}
+@keyframes nudgeIn { 0% { opacity: 0; transform: translateY(4px); } 100% { opacity: 1; transform: translateY(0); } }
 
 .meter {
   height: 9px;
