@@ -213,7 +213,7 @@ export function TalkScreen({
    * bookkeeping that only makes sense for a real turn's opening line.
    */
   function speakRetryPrompt() {
-    const fallbackText = "I couldn't quite hear that — could you try again?";
+    const fallbackText = "I couldn't quite hear that, could you try again?";
     setRetryPrompt(fallbackText);
     if (!bridge.speakRetryPrompt || !bridge.onSpeechSegment) {
       playElla(fallbackText);

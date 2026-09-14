@@ -15,7 +15,7 @@ use crate::{
     },
     error::{EllaError, EllaResult},
     infrastructure::{
-        audio::{quietest_cut_index, trim_to_speech},
+        audio::{quietest_cut_index, trim_to_speech, VadOutput},
         database::Database,
         engines::{SpeechSegment, SpeechSink, TutorEngine, FREE_TOPIC_TURNS},
     },
@@ -196,7 +196,7 @@ impl AppService {
     /// need a real turn number.
     pub fn speak_retry_prompt(&self, session_id: &str) -> EllaResult<SpokenLine> {
         let session = self.database.session(session_id)?;
-        let text = "I couldn't quite hear that — could you try again?";
+        let text = "I couldn't quite hear that, could you try again?";
         let speech: Option<Arc<dyn SpeechSink>> = self.speech_broadcast().map(|broadcast| {
             Arc::new(TurnSpeech {
                 broadcast,
@@ -982,8 +982,32 @@ fn transcribe_stream_chunk(
     sample_rate: u32,
 ) -> StreamChunkOutcome {
     let audio_ms = samples.len() as f64 * 1_000.0 / sample_rate as f64;
+    // The streaming path otherwise never gets the batch turn's silence trim: a
+    // learner who waits before speaking has that whole wait sent to STT in the
+    // same untrimmed buffer as the words that came after it, which is exactly
+    // the shape of input CanaryStt::transcribe's own doc comment already
+    // warns is unreliable. Trimming here gives every chunk - background or
+    // tail - what the batch path already gave a whole recording, and a chunk
+    // the VAD finds nothing in never has to wait on an engine to say so.
+    let vad = trim_to_speech(&samples, sample_rate).unwrap_or(VadOutput {
+        samples,
+        input_ms: audio_ms,
+        speech_ms: audio_ms,
+        speech_detected: true,
+    });
+    if !vad.speech_detected {
+        eprintln!(
+            "[LATENCY]     stt-stream> chunk {index} is silence (~{audio_ms:.0} ms) - skipping STT"
+        );
+        return StreamChunkOutcome {
+            text: String::new(),
+            engine: "silence".into(),
+            fell_back: false,
+            error: Some("no speech detected by the energy VAD".into()),
+        };
+    }
     let started = Instant::now();
-    let (text, engine_name, fell_back, error) = match engine.transcribe(&samples, sample_rate) {
+    let (text, engine_name, fell_back, error) = match engine.transcribe(&vad.samples, sample_rate) {
         Ok(transcription) => {
             let fell_back = transcription.fallback_from.is_some();
             (transcription.text, transcription.engine, fell_back, None)
@@ -995,7 +1019,8 @@ fn transcribe_stream_chunk(
     };
     let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
     eprintln!(
-        "[LATENCY]     stt-stream> chunk {index} done in {elapsed_ms:.1}ms (~{audio_ms:.0} ms audio, engine={engine_name}): \"{text}\""
+        "[LATENCY]     stt-stream> chunk {index} done in {elapsed_ms:.1}ms (~{audio_ms:.0} ms audio, {:.0} ms after trim, engine={engine_name}): \"{text}\"",
+        vad.speech_ms
     );
     StreamChunkOutcome {
         text,
