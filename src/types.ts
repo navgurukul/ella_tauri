@@ -186,6 +186,10 @@ export interface EllaBridge {
   /** Say Ella's opening aloud, streaming it like a reply. Tauri bridge only;
    * in the browser the opening falls back to system speech. */
   speakOpening?(sessionId: string): Promise<SpokenLine>;
+  /** Said aloud when a voice turn came back with no words at all, so the
+   * learner hears that Ella missed them instead of only reading it. Tauri
+   * bridge only; in the browser this falls back to system speech. */
+  speakRetryPrompt?(sessionId: string): Promise<SpokenLine>;
   getSession(sessionId: string): Promise<Session>;
   sendTextTurn(sessionId: string, text: string): Promise<TurnResult>;
   sendVoiceTurn(input: VoiceTurnInput): Promise<TurnResult>;

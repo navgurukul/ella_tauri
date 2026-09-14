@@ -199,6 +199,40 @@ export function TalkScreen({
       });
   }
 
+  /**
+   * Said aloud when a voice turn came back with no words at all: Ella should
+   * miss the learner out loud, not just leave a toast on screen. Mirrors
+   * `speakOpening`, minus the replay bookkeeping that only makes sense for a
+   * real turn's opening line.
+   */
+  function speakRetryPrompt() {
+    const fallbackText = "I couldn't quite hear that — could you try again?";
+    if (!bridge.speakRetryPrompt || !bridge.onSpeechSegment) {
+      playElla(fallbackText);
+      return;
+    }
+    stopPlayback();
+    setError(null);
+    setState("speaking");
+    const generation = playbackGeneration.current;
+    const queue = createSpeechQueue(queueCallbacks(generation, "retry-prompt:first-sentence"));
+    speechQueue.current = { generation, queue };
+    void bridge
+      .speakRetryPrompt(session.id)
+      .then((line) => {
+        if (!mounted.current || playbackGeneration.current !== generation) return;
+        if (line.streamed_segments > 0 && queue.received > 0) {
+          queue.finish(line.streamed_segments);
+          return;
+        }
+        playElla(fallbackText, line.audio ? line : undefined);
+      })
+      .catch(() => {
+        if (!mounted.current || playbackGeneration.current !== generation) return;
+        playElla(fallbackText);
+      });
+  }
+
   /** What every queue on this screen reports back, live turn or replay alike. */
   // A conversation that has reached its last turn ends itself. The session is
   // already closed in the database by the time the turn arrives, so all that is
@@ -437,10 +471,17 @@ export function TalkScreen({
       captureActive.current = false;
       await voice.current.cancel().catch(() => undefined);
       setState("resting");
-      flashReaction("error", 1800);
-      setError(errorMessage(reason));
-      if (liveTranscript) setInput(liveTranscript);
-      setTyping(true);
+      // A recording with no words at all is not a failure worth a text toast
+      // or falling back to typing — Ella just says she missed it, and the
+      // mic is ready to try again exactly as it was before this turn.
+      if (errorMessage(reason).includes("NO_SPEECH_DETECTED")) {
+        speakRetryPrompt();
+      } else {
+        flashReaction("error", 1800);
+        setError(errorMessage(reason));
+        if (liveTranscript) setInput(liveTranscript);
+        setTyping(true);
+      }
     } finally {
       setVoiceLevel(0);
       setSending(false);

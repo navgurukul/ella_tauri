@@ -188,6 +188,30 @@ impl AppService {
         })
     }
 
+    /// Said aloud when a voice turn comes back with no words at all — the
+    /// learner should hear that Ella missed them, not just read it. Mirrors
+    /// `speak_opening`: nothing here is persisted, because there is no
+    /// learner content to pair it with. `turn: 0` is a lie in the same
+    /// harmless way it is there — this line answers nothing, so it does not
+    /// need a real turn number.
+    pub fn speak_retry_prompt(&self, session_id: &str) -> EllaResult<SpokenLine> {
+        let session = self.database.session(session_id)?;
+        let text = "I couldn't quite hear that — could you try again?";
+        let speech: Option<Arc<dyn SpeechSink>> = self.speech_broadcast().map(|broadcast| {
+            Arc::new(TurnSpeech {
+                broadcast,
+                session_id: session.id.clone(),
+                turn: 0,
+            }) as Arc<dyn SpeechSink>
+        });
+        let synthesized = self.engine.speak(text, speech)?;
+        Ok(SpokenLine {
+            streamed_segments: synthesized.segments,
+            audio: synthesized.audio,
+            speech_words: synthesized.words,
+        })
+    }
+
     pub fn start_session(&self, topic_id: &str) -> EllaResult<Session> {
         let topic = find_topic(topic_id)?;
         let learner = self.database.learner()?.ok_or_else(|| {
@@ -621,25 +645,29 @@ impl AppService {
                     None,
                 );
                 if joined.is_empty() {
-                    // Every chunk came back empty. That is usually an engine
-                    // failure, not a quiet learner, so say which - blaming the
-                    // microphone sent us hunting the wrong problem for hours.
+                    // Every chunk came back empty. The real cause (an engine
+                    // failure vs. a quiet learner) is worth knowing when we're
+                    // chasing a bug, but it is not worth reading out loud to a
+                    // learner — so it goes to the log and the trace, not the
+                    // message a caller sees. `NO_SPEECH_DETECTED:` is a stable
+                    // marker the frontend matches on to decide whether to have
+                    // Ella speak a retry prompt; the sentence after it is what
+                    // shows up if that fails and the generic error path is
+                    // used instead.
                     let reasons = outcomes
                         .iter()
                         .filter_map(|outcome| outcome.error.as_deref())
                         .collect::<Vec<_>>();
-                    if reasons.is_empty() {
-                        return Err(EllaError::Validation(
-                            "I could not hear any words in that recording. Move closer to the microphone and try again."
-                                .into(),
-                        ));
-                    }
-                    let detail = reasons.first().copied().unwrap_or("unknown");
-                    return Err(EllaError::Engine(format!(
-                        "Speech recognition returned nothing for all {} parts of that recording. \
-                         First cause: {detail}",
-                        outcomes.len()
-                    )));
+                    eprintln!(
+                        "[LATENCY]     stt-stream> all {} parts came back empty; first cause: {}",
+                        outcomes.len(),
+                        reasons.first().copied().unwrap_or("no chunk reported an error")
+                    );
+                    return Err(EllaError::Validation(
+                        "NO_SPEECH_DETECTED: I couldn't hear any words in that recording. \
+                         Move closer to the microphone and try again."
+                            .into(),
+                    ));
                 }
                 joined
             } else {

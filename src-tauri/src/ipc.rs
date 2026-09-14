@@ -69,6 +69,15 @@ pub async fn speak_opening(
 }
 
 #[tauri::command]
+pub async fn speak_retry_prompt(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<SpokenLine, String> {
+    let service = state.0.clone();
+    off_main_thread(move || service.speak_retry_prompt(&session_id)).await
+}
+
+#[tauri::command]
 pub async fn get_session(
     state: State<'_, AppState>,
     session_id: String,
