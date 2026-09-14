@@ -69,6 +69,12 @@ export function TalkScreen({
   // Ella's opening, kept so "Hear it again" can replay it with its timings
   // instead of dropping to the system voice.
   const [openingLine, setOpeningLine] = useState<SpokenLine | null>(null);
+  // What Ella says when a recording had no words in it. Shown in place of the
+  // last real reply while it is on screen, but never written into
+  // `session.messages` - there is nothing to persist or replay, and the
+  // "Hear it again" button should keep meaning the last thing Ella actually
+  // said. Cleared the moment the learner tries again.
+  const [retryPrompt, setRetryPrompt] = useState<string | null>(null);
 
   const voice = useRef(createVoiceCapture());
   const voiceStreamId = useRef<string | null>(null);
@@ -201,12 +207,14 @@ export function TalkScreen({
 
   /**
    * Said aloud when a voice turn came back with no words at all: Ella should
-   * miss the learner out loud, not just leave a toast on screen. Mirrors
-   * `speakOpening`, minus the replay bookkeeping that only makes sense for a
-   * real turn's opening line.
+   * miss the learner out loud, and the same words should be readable on
+   * screen while she says them - not just a toast, and not silently stuck on
+   * whatever she said last. Mirrors `speakOpening`, minus the replay
+   * bookkeeping that only makes sense for a real turn's opening line.
    */
   function speakRetryPrompt() {
     const fallbackText = "I couldn't quite hear that — could you try again?";
+    setRetryPrompt(fallbackText);
     if (!bridge.speakRetryPrompt || !bridge.onSpeechSegment) {
       playElla(fallbackText);
       return;
@@ -343,6 +351,7 @@ export function TalkScreen({
     setMicStarting(true);
     setError(null);
     setReaction(null);
+    setRetryPrompt(null);
     stopPlayback();
     setState("resting");
     try {
@@ -528,6 +537,7 @@ export function TalkScreen({
       ...session,
       messages: [...session.messages, result.learner_message, result.ella_message],
     });
+    setRetryPrompt(null);
     setLastTurn(result);
     flashReaction("success");
     // The backend has already closed the session, but Ella's last line has not
@@ -579,7 +589,10 @@ export function TalkScreen({
     }
   }
 
-  const prompt = latestElla?.content ?? "";
+  // A showing retry prompt takes over the screen the same way it took over
+  // the speaker: `latestElla` (and the replay button below, which reads it
+  // directly) stays pointed at the last real reply throughout.
+  const prompt = retryPrompt ?? latestElla?.content ?? "";
   // While a reply is streaming, the words come from the audio, because the
   // turn's text has not arrived yet. Afterwards the two are the same sentence,
   // so which one renders is invisible.
