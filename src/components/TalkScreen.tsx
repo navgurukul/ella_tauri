@@ -691,6 +691,10 @@ export function TalkScreen({
               disabled={interactionLocked || state === "listening"}
               onClick={() => {
                 setReaction(null);
+                // The audio here has always been the real last question - only
+                // the screen could still be showing a retry prompt on top of
+                // it, from before this button was pressed.
+                setRetryPrompt(null);
                 playElla(latestElla.content, lastTurn ?? openingLine ?? undefined);
               }}
             >
