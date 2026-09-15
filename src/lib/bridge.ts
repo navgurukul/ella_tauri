@@ -108,6 +108,8 @@ class TauriBridge implements EllaBridge {
   startSession = (topicId: string) => invoke<Session>("start_session", { topicId });
   getSession = (sessionId: string) => invoke<Session>("get_session", { sessionId });
   speakOpening = (sessionId: string) => invoke<SpokenLine>("speak_opening", { sessionId });
+  speakRetryPrompt = (sessionId: string) =>
+    invoke<SpokenLine>("speak_retry_prompt", { sessionId });
   sendTextTurn = (sessionId: string, text: string) =>
     invoke<TurnResult>("send_text_turn", { sessionId, text });
   sendVoiceTurn = ({ sessionId, samples, sampleRate, browserTranscript }: VoiceTurnInput) =>

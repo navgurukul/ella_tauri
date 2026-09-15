@@ -15,7 +15,7 @@ use crate::{
     },
     error::{EllaError, EllaResult},
     infrastructure::{
-        audio::{quietest_cut_index, trim_to_speech},
+        audio::{quietest_cut_index, trim_to_speech, VadOutput},
         database::Database,
         engines::{SpeechSegment, SpeechSink, TutorEngine, FREE_TOPIC_TURNS},
     },
@@ -182,6 +182,30 @@ impl AppService {
         Ok(SpokenLine {
             // Zero means the window heard nothing yet and has to play the
             // recording — which is what demo mode and a Piper-less install do.
+            streamed_segments: synthesized.segments,
+            audio: synthesized.audio,
+            speech_words: synthesized.words,
+        })
+    }
+
+    /// Said aloud when a voice turn comes back with no words at all — the
+    /// learner should hear that Ella missed them, not just read it. Mirrors
+    /// `speak_opening`: nothing here is persisted, because there is no
+    /// learner content to pair it with. `turn: 0` is a lie in the same
+    /// harmless way it is there — this line answers nothing, so it does not
+    /// need a real turn number.
+    pub fn speak_retry_prompt(&self, session_id: &str) -> EllaResult<SpokenLine> {
+        let session = self.database.session(session_id)?;
+        let text = "I couldn't quite hear that, could you try again?";
+        let speech: Option<Arc<dyn SpeechSink>> = self.speech_broadcast().map(|broadcast| {
+            Arc::new(TurnSpeech {
+                broadcast,
+                session_id: session.id.clone(),
+                turn: 0,
+            }) as Arc<dyn SpeechSink>
+        });
+        let synthesized = self.engine.speak(text, speech)?;
+        Ok(SpokenLine {
             streamed_segments: synthesized.segments,
             audio: synthesized.audio,
             speech_words: synthesized.words,
@@ -621,25 +645,29 @@ impl AppService {
                     None,
                 );
                 if joined.is_empty() {
-                    // Every chunk came back empty. That is usually an engine
-                    // failure, not a quiet learner, so say which - blaming the
-                    // microphone sent us hunting the wrong problem for hours.
+                    // Every chunk came back empty. The real cause (an engine
+                    // failure vs. a quiet learner) is worth knowing when we're
+                    // chasing a bug, but it is not worth reading out loud to a
+                    // learner — so it goes to the log and the trace, not the
+                    // message a caller sees. `NO_SPEECH_DETECTED:` is a stable
+                    // marker the frontend matches on to decide whether to have
+                    // Ella speak a retry prompt; the sentence after it is what
+                    // shows up if that fails and the generic error path is
+                    // used instead.
                     let reasons = outcomes
                         .iter()
                         .filter_map(|outcome| outcome.error.as_deref())
                         .collect::<Vec<_>>();
-                    if reasons.is_empty() {
-                        return Err(EllaError::Validation(
-                            "I could not hear any words in that recording. Move closer to the microphone and try again."
-                                .into(),
-                        ));
-                    }
-                    let detail = reasons.first().copied().unwrap_or("unknown");
-                    return Err(EllaError::Engine(format!(
-                        "Speech recognition returned nothing for all {} parts of that recording. \
-                         First cause: {detail}",
-                        outcomes.len()
-                    )));
+                    eprintln!(
+                        "[LATENCY]     stt-stream> all {} parts came back empty; first cause: {}",
+                        outcomes.len(),
+                        reasons.first().copied().unwrap_or("no chunk reported an error")
+                    );
+                    return Err(EllaError::Validation(
+                        "NO_SPEECH_DETECTED: I couldn't hear any words in that recording. \
+                         Move closer to the microphone and try again."
+                            .into(),
+                    ));
                 }
                 joined
             } else {
@@ -954,8 +982,32 @@ fn transcribe_stream_chunk(
     sample_rate: u32,
 ) -> StreamChunkOutcome {
     let audio_ms = samples.len() as f64 * 1_000.0 / sample_rate as f64;
+    // The streaming path otherwise never gets the batch turn's silence trim: a
+    // learner who waits before speaking has that whole wait sent to STT in the
+    // same untrimmed buffer as the words that came after it, which is exactly
+    // the shape of input CanaryStt::transcribe's own doc comment already
+    // warns is unreliable. Trimming here gives every chunk - background or
+    // tail - what the batch path already gave a whole recording, and a chunk
+    // the VAD finds nothing in never has to wait on an engine to say so.
+    let vad = trim_to_speech(&samples, sample_rate).unwrap_or(VadOutput {
+        samples,
+        input_ms: audio_ms,
+        speech_ms: audio_ms,
+        speech_detected: true,
+    });
+    if !vad.speech_detected {
+        eprintln!(
+            "[LATENCY]     stt-stream> chunk {index} is silence (~{audio_ms:.0} ms) - skipping STT"
+        );
+        return StreamChunkOutcome {
+            text: String::new(),
+            engine: "silence".into(),
+            fell_back: false,
+            error: Some("no speech detected by the energy VAD".into()),
+        };
+    }
     let started = Instant::now();
-    let (text, engine_name, fell_back, error) = match engine.transcribe(&samples, sample_rate) {
+    let (text, engine_name, fell_back, error) = match engine.transcribe(&vad.samples, sample_rate) {
         Ok(transcription) => {
             let fell_back = transcription.fallback_from.is_some();
             (transcription.text, transcription.engine, fell_back, None)
@@ -967,7 +1019,8 @@ fn transcribe_stream_chunk(
     };
     let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
     eprintln!(
-        "[LATENCY]     stt-stream> chunk {index} done in {elapsed_ms:.1}ms (~{audio_ms:.0} ms audio, engine={engine_name}): \"{text}\""
+        "[LATENCY]     stt-stream> chunk {index} done in {elapsed_ms:.1}ms (~{audio_ms:.0} ms audio, {:.0} ms after trim, engine={engine_name}): \"{text}\"",
+        vad.speech_ms
     );
     StreamChunkOutcome {
         text,

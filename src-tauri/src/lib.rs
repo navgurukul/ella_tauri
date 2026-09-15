@@ -186,6 +186,7 @@ pub fn run() {
             ipc::start_session,
             ipc::start_chore,
             ipc::speak_opening,
+            ipc::speak_retry_prompt,
             ipc::get_session,
             ipc::send_text_turn,
             ipc::send_voice_turn,

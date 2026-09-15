@@ -36,6 +36,17 @@ const MIC_HINT: Record<EllaState, string> = {
   speaking: "Tap to interrupt and speak",
 };
 
+// Below this, `voiceLevel` (0-1, from the same RMS meter that drives the mic's
+// pulse animation) reads as room noise rather than someone talking. A starting
+// point, not a measured threshold - worth tuning against real recordings if
+// the badge fires during normal speech or never fires during real silence.
+const SPEAK_UP_LEVEL_THRESHOLD = 0.05;
+// How long the level can stay under that before the nudge appears. Long
+// enough that an ordinary pause-before-speaking never triggers it; short
+// enough that a learner who has gone quiet does not sit there wondering if
+// anything is happening.
+const SPEAK_UP_DELAY_MS = 4000;
+
 export function TalkScreen({
   session,
   onSessionChange,
@@ -50,6 +61,10 @@ export function TalkScreen({
   const [typing, setTyping] = useState(false);
   const [liveTranscript, setLiveTranscript] = useState("");
   const [voiceLevel, setVoiceLevel] = useState(0);
+  // Shown while listening if the mic has picked up nothing but quiet for a
+  // while - a nudge before the recording ever reaches the "no words" path.
+  const [showSpeakUpHint, setShowSpeakUpHint] = useState(false);
+  const lastSoundAt = useRef(0);
   const [sending, setSending] = useState(false);
   const [micStarting, setMicStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -69,6 +84,12 @@ export function TalkScreen({
   // Ella's opening, kept so "Hear it again" can replay it with its timings
   // instead of dropping to the system voice.
   const [openingLine, setOpeningLine] = useState<SpokenLine | null>(null);
+  // What Ella says when a recording had no words in it. Shown in place of the
+  // last real reply while it is on screen, but never written into
+  // `session.messages` - there is nothing to persist or replay, and the
+  // "Hear it again" button should keep meaning the last thing Ella actually
+  // said. Cleared the moment the learner tries again.
+  const [retryPrompt, setRetryPrompt] = useState<string | null>(null);
 
   const voice = useRef(createVoiceCapture());
   const voiceStreamId = useRef<string | null>(null);
@@ -148,6 +169,26 @@ export function TalkScreen({
     }
   }, [typing]);
 
+  // Arms a "speak up" nudge for the whole time the mic is open, and disarms it
+  // the moment listening ends - by finishing, cancelling, or unmounting.
+  // `lastSoundAt` is updated from `handleLevel` on every frame that clears the
+  // threshold, so this timer only has to check whether it has gone stale.
+  useEffect(() => {
+    if (state !== "listening") {
+      setShowSpeakUpHint(false);
+      return;
+    }
+    const id = window.setInterval(() => {
+      setShowSpeakUpHint(performance.now() - lastSoundAt.current >= SPEAK_UP_DELAY_MS);
+    }, 500);
+    return () => window.clearInterval(id);
+  }, [state]);
+
+  function handleLevel(level: number) {
+    setVoiceLevel(level);
+    if (level >= SPEAK_UP_LEVEL_THRESHOLD) lastSoundAt.current = performance.now();
+  }
+
   function stopPlayback() {
     playbackGeneration.current += 1;
     stopSpeech.current();
@@ -196,6 +237,42 @@ export function TalkScreen({
       .catch(() => {
         if (!mounted.current || playbackGeneration.current !== generation) return;
         playElla(text);
+      });
+  }
+
+  /**
+   * Said aloud when a voice turn came back with no words at all: Ella should
+   * miss the learner out loud, and the same words should be readable on
+   * screen while she says them - not just a toast, and not silently stuck on
+   * whatever she said last. Mirrors `speakOpening`, minus the replay
+   * bookkeeping that only makes sense for a real turn's opening line.
+   */
+  function speakRetryPrompt() {
+    const fallbackText = "I couldn't quite hear that, could you try again?";
+    setRetryPrompt(fallbackText);
+    if (!bridge.speakRetryPrompt || !bridge.onSpeechSegment) {
+      playElla(fallbackText);
+      return;
+    }
+    stopPlayback();
+    setError(null);
+    setState("speaking");
+    const generation = playbackGeneration.current;
+    const queue = createSpeechQueue(queueCallbacks(generation, "retry-prompt:first-sentence"));
+    speechQueue.current = { generation, queue };
+    void bridge
+      .speakRetryPrompt(session.id)
+      .then((line) => {
+        if (!mounted.current || playbackGeneration.current !== generation) return;
+        if (line.streamed_segments > 0 && queue.received > 0) {
+          queue.finish(line.streamed_segments);
+          return;
+        }
+        playElla(fallbackText, line.audio ? line : undefined);
+      })
+      .catch(() => {
+        if (!mounted.current || playbackGeneration.current !== generation) return;
+        playElla(fallbackText);
       });
   }
 
@@ -309,11 +386,13 @@ export function TalkScreen({
     setMicStarting(true);
     setError(null);
     setReaction(null);
+    setRetryPrompt(null);
     stopPlayback();
     setState("resting");
     try {
       setLiveTranscript("");
       setVoiceLevel(0);
+      lastSoundAt.current = performance.now();
       voicePushQueue.current = Promise.resolve();
       voicePushFailed.current = false;
       // Live chunked STT: open a Rust-side stream so audio is transcribed while
@@ -345,7 +424,7 @@ export function TalkScreen({
           llog("stream:begin-failed", `${errorMessage(reason)}; using buffered voice turn`);
         }
       }
-      await voice.current.start(setLiveTranscript, setVoiceLevel, onChunk);
+      await voice.current.start(setLiveTranscript, handleLevel, onChunk);
       if (!mounted.current || operation !== micOperation.current) {
         await cancelVoiceStream();
         await voice.current.cancel();
@@ -437,10 +516,17 @@ export function TalkScreen({
       captureActive.current = false;
       await voice.current.cancel().catch(() => undefined);
       setState("resting");
-      flashReaction("error", 1800);
-      setError(errorMessage(reason));
-      if (liveTranscript) setInput(liveTranscript);
-      setTyping(true);
+      // A recording with no words at all is not a failure worth a text toast
+      // or falling back to typing — Ella just says she missed it, and the
+      // mic is ready to try again exactly as it was before this turn.
+      if (errorMessage(reason).includes("NO_SPEECH_DETECTED")) {
+        speakRetryPrompt();
+      } else {
+        flashReaction("error", 1800);
+        setError(errorMessage(reason));
+        if (liveTranscript) setInput(liveTranscript);
+        setTyping(true);
+      }
     } finally {
       setVoiceLevel(0);
       setSending(false);
@@ -487,6 +573,7 @@ export function TalkScreen({
       ...session,
       messages: [...session.messages, result.learner_message, result.ella_message],
     });
+    setRetryPrompt(null);
     setLastTurn(result);
     flashReaction("success");
     // The backend has already closed the session, but Ella's last line has not
@@ -538,7 +625,10 @@ export function TalkScreen({
     }
   }
 
-  const prompt = latestElla?.content ?? "";
+  // A showing retry prompt takes over the screen the same way it took over
+  // the speaker: `latestElla` (and the replay button below, which reads it
+  // directly) stays pointed at the last real reply throughout.
+  const prompt = retryPrompt ?? latestElla?.content ?? "";
   // While a reply is streaming, the words come from the audio, because the
   // turn's text has not arrived yet. Afterwards the two are the same sentence,
   // so which one renders is invisible.
@@ -637,6 +727,10 @@ export function TalkScreen({
               disabled={interactionLocked || state === "listening"}
               onClick={() => {
                 setReaction(null);
+                // The audio here has always been the real last question - only
+                // the screen could still be showing a retry prompt on top of
+                // it, from before this button was pressed.
+                setRetryPrompt(null);
                 playElla(latestElla.content, lastTurn ?? openingLine ?? undefined);
               }}
             >
@@ -704,6 +798,11 @@ export function TalkScreen({
             </form>
           ) : (
             <div className="mic-stack">
+              {showSpeakUpHint && (
+                <span className="pill pill--nudge" role="status" aria-live="polite">
+                  Speak up to continue the conversation
+                </span>
+              )}
               <div className="mic-wrap">
                 {state === "listening" && (
                   <>
