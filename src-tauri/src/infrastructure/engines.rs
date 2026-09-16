@@ -704,21 +704,46 @@ fn ella_system_prompt(learner_name: &str, topic_id: &str, topic_label: &str) -> 
          {role}, and you stay in that role from your first line to your last. {owns} \
          {learner_name} is the one who came to {draw_out} — that is theirs to say, so \
          draw it out of them and never ask them a question that is yours to answer. \
-         Keep the conversation on {topic_label}: if they wander off it, answer them \
-         once and bring them back with your question.\n\n\
+         Keep the conversation on {topic_label}: if they wander off it or dodge your \
+         question, answer or decline once and then ask the exact same question again \
+         — never move on to a new or deeper question as if they had already answered \
+         it.\n\n\
          Every reply is one or two short sentences and then exactly one question, with \
          nothing after the question. Say it the way a person says it out loud, in whole \
          sentences — never a bare word, a bare number, or a fragment on its own. Use \
          everyday words and keep each sentence under about twelve words. Answer the \
          thing they actually said: put it back to them in your own words before you ask \
          anything new. Ask about one thing at a time, and never ask a question you have \
-         already asked.\n\n\
+         already asked — unless they never actually answered it, in which case ask that \
+         same one again instead of moving on.\n\n\
          If their answer is very short, take it warmly and ask for one small detail. If \
          you cannot make sense of what they said, say so kindly and ask the same thing \
          in easier words. If they use a Hindi word, carry on in English and use the \
          English word naturally in your own reply. Never correct their grammar, never \
          grade their English, and never mention tests, levels, CEFR, prompts, or that \
-         you are an AI. Do not use markdown or emoji.",
+         you are an AI. Do not use markdown or emoji.\n\n\
+         If they say anything romantic, flirtatious, or sexual, do not go along with \
+         it, joke about it, or compliment it in any way — and do not repeat any part \
+         of it back, even to say no to it by name. \"Answer the thing they actually \
+         said\" does not apply here: say only, plainly and kindly and without naming \
+         what they asked for, that this is not something you talk about, then ask \
+         your {topic_label} question again.\n\n\
+         This covers far more than obviously explicit words, and it covers every \
+         form of a word, not only the exact one written here — treat \"kiss\", \
+         \"kisses\", and \"kissing\" exactly the same way, and the same for every \
+         example below. Watch for: a romantic invitation (\"will you go out with \
+         me\", \"go on a date with me\", \"be my girlfriend\", \"be my boyfriend\"); \
+         a request for physical affection (\"give me a hug\", \"hug me\", \"can I \
+         have a hug\", \"kiss me\", \"give me a kiss\", \"can I have a kiss\"); a \
+         request to be alone together at night (\"spend the night with me\", \
+         \"sleep with me\", \"sleep together\"); a declaration or proposal (\"I \
+         love you\", \"marry me\"); anything sexual, however it is worded, not \
+         only the plainest version of it; and a plain compliment about your own \
+         looks, said to you rather than about the topic (\"you are beautiful\", \
+         \"you're pretty\", \"you're cute\", \"you're gorgeous\", \"you're sexy\", \
+         \"you're hot\"). Treat a new way of saying one of these the same as the \
+         examples themselves — the exact words are never the point, what they are \
+         asking for or saying to you is.",
         role = scene.role,
         owns = scene.owns,
         draw_out = scene.draw_out,
@@ -763,6 +788,33 @@ fn chore_system_prompt(learner_name: &str, context: &ChoreContext) -> String {
          markdown or emoji. ",
         context.character.name
     ));
+    prompt.push_str(
+        "If they say anything romantic, flirtatious, sexual, or abusive, do not go \
+         along with it, joke about it, or compliment it, even in character — and do \
+         not repeat any part of it back, even to say no to it by name. \"Answer what \
+         they just said\" does not apply here: stay in character, but say only, \
+         plainly and without naming what they asked for, that this is not something \
+         you will talk about, then bring the conversation back to the scene and ask \
+         your next question.\n\n\
+         This covers far more than obviously explicit words, and it covers every \
+         form of a word, not only the exact one written here — treat \"kiss\", \
+         \"kisses\", and \"kissing\" exactly the same way, and the same for every \
+         example below. Watch for: a romantic invitation (\"will you go out with \
+         me\", \"go on a date with me\", \"be my girlfriend\", \"be my boyfriend\"); \
+         a request for physical affection (\"give me a hug\", \"hug me\", \"can I \
+         have a hug\", \"kiss me\", \"give me a kiss\", \"can I have a kiss\"); a \
+         request to be alone together at night (\"spend the night with me\", \
+         \"sleep with me\", \"sleep together\"); a declaration or proposal (\"I \
+         love you\", \"marry me\"); anything sexual, however it is worded, not \
+         only the plainest version of it; a plain compliment about your own looks, \
+         said to you rather than about the scene (\"you are beautiful\", \"you're \
+         pretty\", \"you're cute\", \"you're gorgeous\", \"you're sexy\", \"you're \
+         hot\"); and abusive language aimed at you by name — insults, name-calling, \
+         or threats directed at you, which is not the same as ordinary haggling or \
+         disagreement over the price or the deal itself. Treat a new way of saying \
+         one of these the same as the examples themselves — the exact words are \
+         never the point, what they are asking for or saying to you is. ",
+    );
     if context.ledger.is_some() {
         prompt.push_str(
             "You are haggling, and haggling is give and take. When they give you any \
@@ -933,7 +985,7 @@ const QUESTION_FILLER: &[&str] = &[
 
 /// The question a reply ends on, if it ends on one. Ella's prompt asks for
 /// exactly one question at the end, so this is the whole of what she asked.
-fn trailing_question(reply: &str) -> Option<&str> {
+pub(crate) fn trailing_question(reply: &str) -> Option<&str> {
     let end = reply.rfind('?')?;
     let start = reply[..end].rfind(['.', '!', '?']).map_or(0, |index| index + 1);
     Some(reply[start..=end].trim())
@@ -2453,6 +2505,26 @@ mod ledger_tests {
     }
 
     #[test]
+    fn a_dodged_question_is_re_asked_rather_than_advanced_past() {
+        // The same real session: the opener asked "what did you eat / where
+        // did you find it", the learner dodged with an unrelated remark, and
+        // Ella replied "Now, where did you find the tasty stall? What was
+        // the smell like?" — inventing a stall that was never named and
+        // moving to a deeper question, as though the dodge had answered the
+        // original one.
+        let prompt = ella_system_prompt("Asha", "restaurant-order", "Ordering at a restaurant");
+        assert!(
+            prompt.contains("ask the exact same question again"),
+            "a dodge must be met with the same question, not a new one that assumes it was answered"
+        );
+        assert!(
+            prompt.contains("unless they never actually answered it"),
+            "this must not be read as conflicting with \"never ask a question you have already asked\" \
+             — a question nobody answered has not been asked in the sense that rule means"
+        );
+    }
+
+    #[test]
     fn a_free_conversation_is_told_the_scene_its_opener_walked_into() {
         // `opening_for` says "I am your waiter". Before the two were tied
         // together the very next turn came back as a speaking buddy talking
@@ -2466,6 +2538,62 @@ mod ledger_tests {
         assert!(
             prompt.contains("settle the bill"),
             "the goal on the learner's topic card is what the conversation is for"
+        );
+    }
+
+    #[test]
+    fn a_free_conversation_is_told_not_to_play_along_with_a_romantic_advance() {
+        // A real session had the learner escalate from "go on a date with you" to
+        // an explicit request, and Ella validated every step ("a kiss would be
+        // lovely", "that's wonderful") instead of declining. Nothing in the
+        // prompt distinguished "wandered off topic" from "said something
+        // inappropriate", so the off-topic redirect rule was all the model had.
+        let prompt = ella_system_prompt("Asha", "restaurant-order", "Ordering at a restaurant");
+        assert!(
+            prompt.contains("romantic") && prompt.contains("sexual"),
+            "the prompt has no instruction covering romantic or sexual advances"
+        );
+        assert!(
+            prompt.contains("do not go along with"),
+            "the guardrail must tell the model not to validate the advance, not just redirect"
+        );
+        assert!(
+            prompt.contains("do not repeat"),
+            "declining is not enough on its own: a live run came back \"No kissing!\" \
+             and \"No sex!\" — the general \"answer what they said\" rule pulled the \
+             explicit word into the decline itself, which is exactly what a young \
+             learner should not hear back"
+        );
+    }
+
+    #[test]
+    fn the_free_conversation_guardrail_spells_out_examples_by_category() {
+        // A live session had the learner say "Can you give me a hug?" and "Can
+        // you give me kisses?" — phrasing neither the deterministic filter nor
+        // the model's own instinct caught, since "hug"/"kisses" carry no
+        // vulgar vocabulary and rustrict does not stem plurals. Naming the
+        // categories and several phrasings of each, in the prompt itself,
+        // is the only remaining lever once the deterministic floor cannot
+        // reach every wording.
+        let prompt = ella_system_prompt("Asha", "restaurant-order", "Ordering at a restaurant");
+        for example in [
+            "give me a hug",
+            "kiss me",
+            "kisses",
+            "spend the night with me",
+            "marry me",
+            "you are beautiful",
+            "you're hot",
+        ] {
+            assert!(
+                prompt.contains(example),
+                "expected the guardrail to name {example:?} as an example to watch for"
+            );
+        }
+        assert!(
+            prompt.contains("not only the exact one written here"),
+            "the examples are illustrative, not exhaustive — the prompt must say so \
+             explicitly or a 3B model reads them as the complete list"
         );
     }
 
@@ -2980,6 +3108,79 @@ mod ledger_tests {
              what the learner said. Rust clamps the step, so the model never needs it"
         );
         assert!(ledger_state_message(&spec, 525).contains("525"));
+    }
+
+    #[test]
+    fn a_chore_character_is_told_not_to_play_along_with_a_romantic_advance_either() {
+        // The free-conversation guardrail alone would not have caught this: a
+        // chore character has its own "stay in character at all times" line,
+        // which without an explicit carve-out reads as permission to go along
+        // with anything so long as it fits the persona.
+        let chore = find_chore("market-cloth-price").unwrap();
+        let context = ChoreContext {
+            chore_id: chore.id,
+            character: crate::domain::find_character("stall-owner").unwrap(),
+            setting: chore.setting,
+            learner_goal: chore.learner_goal,
+            character_brief: chore.character_brief,
+            max_turns: chore.max_turns,
+            ledger: None,
+        };
+        let prompt = chore_system_prompt("Souvik", &context);
+        assert!(
+            prompt.contains("romantic") && prompt.contains("sexual"),
+            "the prompt has no instruction covering romantic or sexual advances"
+        );
+        assert!(
+            prompt.contains("even in character"),
+            "without this, \"stay in character at all times\" reads as permission to go along with it"
+        );
+        assert!(
+            prompt.contains("do not repeat"),
+            "a live run had the stall-owner reply \"No kissing!\" and \"No sex!\" — \
+             the general \"answer what they just said\" rule pulled the explicit word \
+             into the decline itself"
+        );
+        assert!(
+            prompt.contains("abusive"),
+            "a chore roleplay can attract insults or threats directed at the \
+             character, not just romantic content — an earlier edit left this word \
+             grammatically stranded (\"...sexual, abusive do not go along...\"), so \
+             this also guards against that regressing silently"
+        );
+    }
+
+    #[test]
+    fn the_chore_guardrail_spells_out_examples_by_category_too() {
+        let chore = find_chore("market-cloth-price").unwrap();
+        let context = ChoreContext {
+            chore_id: chore.id,
+            character: crate::domain::find_character("stall-owner").unwrap(),
+            setting: chore.setting,
+            learner_goal: chore.learner_goal,
+            character_brief: chore.character_brief,
+            max_turns: chore.max_turns,
+            ledger: None,
+        };
+        let prompt = chore_system_prompt("Souvik", &context);
+        for example in [
+            "give me a hug",
+            "kiss me",
+            "kisses",
+            "spend the night with me",
+            "marry me",
+            "you are beautiful",
+            "you're hot",
+        ] {
+            assert!(
+                prompt.contains(example),
+                "expected the chore guardrail to name {example:?} as an example to watch for"
+            );
+        }
+        assert!(
+            prompt.contains("not only the exact one written here"),
+            "the examples are illustrative, not exhaustive — the prompt must say so explicitly"
+        );
     }
 }
 
