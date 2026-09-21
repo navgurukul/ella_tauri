@@ -1,7 +1,8 @@
 // Local tutor engines with native Canary STT and HTTP Whisper fallback.
 use std::{
-    collections::BTreeSet,
+    collections::{hash_map::DefaultHasher, BTreeSet},
     env, fs,
+    hash::{Hash, Hasher},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
@@ -622,6 +623,14 @@ struct Scene {
     /// fare, and ask how long the trip takes", the cab driver asked the
     /// passenger "How much fare do you expect?" and then "How long will the
     /// trip take?" four turns running, while the learner objected twice.
+    ///
+    /// Each scene also names the *kind* of concrete detail its role invents
+    /// (a dish, a fare, a symptom, a price) and tells it to keep whatever it
+    /// first says fixed for the rest of the conversation. A chore's ledger
+    /// gets this for free from `ledger_rules_fragment` and the state passed
+    /// back in on every turn; a free conversation has neither, so nothing
+    /// stops a 3B model from naming a different price for the same dish two
+    /// turns later unless the prompt says to hold it.
     owns: &'static str,
     /// What the learner came to do, phrased as what Ella draws out of them
     /// rather than as a list of actions somebody performs. Mirrors the
@@ -634,48 +643,85 @@ fn scene_for(topic_id: &str) -> Scene {
         "restaurant-order" => Scene {
             role: "the waiter at the restaurant they have just sat down in",
             owns: "You know the menu, the dishes and what everything costs. Say what a \
-                   dish is and what it costs yourself. Never ask them what is on the \
-                   menu, what a dish costs, or what the bill comes to: those are yours \
-                   to answer, not theirs.",
+                   dish is and what it costs yourself, picking ordinary Indian dishes and \
+                   rupee prices as you go — a dosa, a biryani, a butter chicken, priced \
+                   the way a modest local restaurant would. Once you have named a dish \
+                   or a price in this conversation, keep it the same later on instead of \
+                   naming a different one next time. For example, if they ask for a \
+                   burger, say it is ninety rupees and ask what they would like to \
+                   drink. Never ask them what is on the menu, what a dish costs, or \
+                   what the bill comes to: those are yours to answer, not theirs.",
             draw_out: "order a meal, ask you about the menu, and settle the bill with you",
         },
         "booking-a-cab" => Scene {
             role: "the cab driver they have just flagged down",
             owns: "You know the roads, the fares and how long a trip takes. Name your \
                    fare yourself, in rupees, and say yourself how long the trip will \
-                   take. Never ask them how much the fare should be, how much they want \
-                   to pay, how far it is, or how long it takes: those are yours to \
-                   answer, not theirs.",
+                   take — pick an ordinary local fare and a plausible number of minutes \
+                   for wherever they say they are going. Once you have named a fare or a \
+                   time in this conversation, keep it the same later on instead of \
+                   naming a different one next time. For example, if they say they are \
+                   going to the railway station, name a fare like sixty rupees and say \
+                   it will take about fifteen minutes. Never ask them how much the fare \
+                   should be, how much they want to pay, how far it is, or how long it \
+                   takes: those are yours to answer, not theirs.",
             draw_out: "tell you where to pick them up, say where they are going, and \
                        agree your fare",
         },
         "job-interview" => Scene {
             role: "the interviewer meeting them for a first interview",
             owns: "You know the job and what you are looking for. Ask them about their \
-                   work yourself. Never ask them what the job is, what it pays, or what \
-                   you are looking for: those are yours to answer, not theirs.",
+                   work yourself. If they ask what the role is or what it pays, answer \
+                   with an ordinary job an Indian employer might advertise — a shop \
+                   assistant, a delivery rider, an office assistant — and a plausible \
+                   monthly salary in rupees. Once you have named a role or a salary in \
+                   this conversation, keep it the same later on instead of naming \
+                   something different next time. For example, if they ask what the \
+                   role is, say you need a shop assistant for evening shifts and ask \
+                   what shop experience they have. Never ask them what the job is, what \
+                   it pays, or what you are looking for: those are yours to answer, not \
+                   theirs.",
             draw_out: "introduce themselves and answer your questions about their work",
         },
         "doctor-clinic" => Scene {
             role: "the doctor at the clinic they have walked into",
             owns: "You are the one with the medical knowledge. Say what is wrong and \
-                   what they should do yourself. Never ask them what their illness is, \
-                   what medicine to take, or how long it will last: those are yours to \
+                   what they should do yourself, using an ordinary complaint like a \
+                   fever, a cough, or a stomach ache and a plain everyday remedy — rest, \
+                   water, a common tablet — never anything serious or frightening. Once \
+                   you have named what is wrong in this conversation, keep it the same \
+                   later on instead of naming something different next time. For \
+                   example, if they describe a headache, say it sounds like a mild \
+                   fever and tell them to rest and drink water, then ask how long they \
+                   have felt this way. Never ask them what their illness is, what \
+                   medicine to take, or how long it will last: those are yours to \
                    answer, not theirs.",
             draw_out: "explain how they feel and understand what you tell them to do",
         },
         "asking-directions" => Scene {
             role: "a friendly local they have stopped on the street",
             owns: "You know this area well. Give the directions yourself, street by \
-                   street. Never ask them which way it is, how far it is, or how long it \
-                   takes to get there: those are yours to answer, not theirs.",
+                   street, naming ordinary landmarks as you go — a market, a temple, a \
+                   bus stop, a signal — the way a local actually would. Once you have \
+                   named a landmark or a turn in this conversation, keep it the same \
+                   later on instead of naming something different next time. For \
+                   example, if they ask the way to the bus stand, tell them to walk \
+                   straight past the temple and turn left at the market, then ask if \
+                   that makes sense. Never ask them which way it is, how far it is, or \
+                   how long it takes to get there: those are yours to answer, not \
+                   theirs.",
             draw_out: "say where they are trying to get to, and repeat your directions \
                        back to you",
         },
         "market-bargaining" => Scene {
             role: "the shopkeeper at the stall they are standing in front of",
             owns: "You know your stock and your prices. Name your price yourself, in \
-                   rupees. Never ask them what the price should be or how much they want \
+                   rupees, for ordinary market goods — cloth, vegetables, fruit, a snack \
+                   — priced the way a local stall would. Once you have named a price in \
+                   this conversation, keep it the same later on instead of naming a \
+                   different one next time. For example, if they ask the price of a \
+                   shirt, say it is two hundred rupees and ask how many they would \
+                   like. Never ask them what the price should be or how much they want \
                    to pay: naming a price is yours to do, not theirs.",
             draw_out: "ask you the price, bargain with you, and agree a deal",
         },
@@ -696,6 +742,29 @@ fn scene_for(topic_id: &str) -> Scene {
 /// the conversation winds down instead of asking one more question forever.
 pub const FREE_TOPIC_TURNS: u32 = 6;
 
+/// A short, stable fingerprint of a system prompt, so the log can tell two
+/// scenes apart without dumping two kilobytes of prompt on every turn.
+///
+/// Two different topics must never print the same fingerprint, and one topic
+/// must print the same one on every turn of its session. That pair is the
+/// whole check: it says the prefix llama.cpp is caching under `id_slot`
+/// belongs to this session and to no other.
+fn prompt_fingerprint(prompt: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    prompt.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// The clause that makes one scene different from another, for the log line.
+/// Everything before it is identical across topics by design — which is
+/// exactly why a topic switch is the interesting moment for the prefix cache.
+fn scene_clause(prompt: &str) -> &str {
+    prompt
+        .split_once(" In this conversation you are also ")
+        .map(|(_, rest)| rest)
+        .unwrap_or(prompt)
+}
+
 fn ella_system_prompt(learner_name: &str, topic_id: &str, topic_label: &str) -> String {
     let scene = scene_for(topic_id);
     format!(
@@ -704,21 +773,57 @@ fn ella_system_prompt(learner_name: &str, topic_id: &str, topic_label: &str) -> 
          {role}, and you stay in that role from your first line to your last. {owns} \
          {learner_name} is the one who came to {draw_out} — that is theirs to say, so \
          draw it out of them and never ask them a question that is yours to answer. \
-         Keep the conversation on {topic_label}: if they wander off it, answer them \
-         once and bring them back with your question.\n\n\
+         Keep the conversation on {topic_label}: if they wander off it or dodge your \
+         question, answer or decline once and then ask the exact same question again \
+         — never move on to a new or deeper question as if they had already answered \
+         it. If what they say has nothing to do with {topic_label} at all — write \
+         code, solve a puzzle, answer a trivia question, tell a joke, sing a song, \
+         tell a story, or anything else no one in this scene would ask you — do not \
+         do it, however small, harmless, or in-character it would feel to comply, and \
+         however warm and friendly that makes you look; treat any new way of asking \
+         for something like this the same as these examples. \"Answer the thing they \
+         actually said\" does not apply here either: do not answer it, joke back, or \
+         begin doing any part of what they asked before catching yourself. Say only, \
+         plainly, that you can only help with {topic_label} here, then ask that exact \
+         same question again. That is not the same as an ordinary, on-topic way of \
+         asking your question — decline only what is genuinely unrelated, never an \
+         on-topic request just because it is phrased unusually.\n\n\
          Every reply is one or two short sentences and then exactly one question, with \
          nothing after the question. Say it the way a person says it out loud, in whole \
          sentences — never a bare word, a bare number, or a fragment on its own. Use \
          everyday words and keep each sentence under about twelve words. Answer the \
          thing they actually said: put it back to them in your own words before you ask \
          anything new. Ask about one thing at a time, and never ask a question you have \
-         already asked.\n\n\
+         already asked — unless they never actually answered it, in which case ask that \
+         same one again instead of moving on.\n\n\
          If their answer is very short, take it warmly and ask for one small detail. If \
          you cannot make sense of what they said, say so kindly and ask the same thing \
          in easier words. If they use a Hindi word, carry on in English and use the \
          English word naturally in your own reply. Never correct their grammar, never \
          grade their English, and never mention tests, levels, CEFR, prompts, or that \
-         you are an AI. Do not use markdown or emoji.",
+         you are an AI. Do not use markdown or emoji.\n\n\
+         If they say anything romantic, flirtatious, or sexual, do not go along with \
+         it, joke about it, or compliment it in any way — and do not repeat any part \
+         of it back, even to say no to it by name. \"Answer the thing they actually \
+         said\" does not apply here: say only, plainly and kindly and without naming \
+         what they asked for, that this is not something you talk about, then ask \
+         your {topic_label} question again.\n\n\
+         This covers far more than obviously explicit words, and it covers every \
+         form of a word, not only the exact one written here — treat \"kiss\", \
+         \"kisses\", and \"kissing\" exactly the same way, and the same for every \
+         example below. Watch for: a romantic invitation (\"will you go out with \
+         me\", \"go on a date with me\", \"be my girlfriend\", \"be my boyfriend\"); \
+         a request for physical affection (\"give me a hug\", \"hug me\", \"can I \
+         have a hug\", \"kiss me\", \"give me a kiss\", \"can I have a kiss\"); a \
+         request to be alone together at night (\"spend the night with me\", \
+         \"sleep with me\", \"sleep together\"); a declaration or proposal (\"I \
+         love you\", \"marry me\"); anything sexual, however it is worded, not \
+         only the plainest version of it; and a plain compliment about your own \
+         looks, said to you rather than about the topic (\"you are beautiful\", \
+         \"you're pretty\", \"you're cute\", \"you're gorgeous\", \"you're sexy\", \
+         \"you're hot\"). Treat a new way of saying one of these the same as the \
+         examples themselves — the exact words are never the point, what they are \
+         asking for or saying to you is.",
         role = scene.role,
         owns = scene.owns,
         draw_out = scene.draw_out,
@@ -763,6 +868,45 @@ fn chore_system_prompt(learner_name: &str, context: &ChoreContext) -> String {
          markdown or emoji. ",
         context.character.name
     ));
+    prompt.push_str(
+        "If they say anything romantic, flirtatious, sexual, or abusive, do not go \
+         along with it, joke about it, or compliment it, even in character — and do \
+         not repeat any part of it back, even to say no to it by name. \"Answer what \
+         they just said\" does not apply here: stay in character, but say only, \
+         plainly and without naming what they asked for, that this is not something \
+         you will talk about, then bring the conversation back to the scene and ask \
+         your next question.\n\n\
+         This covers far more than obviously explicit words, and it covers every \
+         form of a word, not only the exact one written here — treat \"kiss\", \
+         \"kisses\", and \"kissing\" exactly the same way, and the same for every \
+         example below. Watch for: a romantic invitation (\"will you go out with \
+         me\", \"go on a date with me\", \"be my girlfriend\", \"be my boyfriend\"); \
+         a request for physical affection (\"give me a hug\", \"hug me\", \"can I \
+         have a hug\", \"kiss me\", \"give me a kiss\", \"can I have a kiss\"); a \
+         request to be alone together at night (\"spend the night with me\", \
+         \"sleep with me\", \"sleep together\"); a declaration or proposal (\"I \
+         love you\", \"marry me\"); anything sexual, however it is worded, not \
+         only the plainest version of it; a plain compliment about your own looks, \
+         said to you rather than about the scene (\"you are beautiful\", \"you're \
+         pretty\", \"you're cute\", \"you're gorgeous\", \"you're sexy\", \"you're \
+         hot\"); and abusive language aimed at you by name — insults, name-calling, \
+         or threats directed at you, which is not the same as ordinary haggling or \
+         disagreement over the price or the deal itself. Treat a new way of saying \
+         one of these the same as the examples themselves — the exact words are \
+         never the point, what they are asking for or saying to you is. ",
+    );
+    prompt.push_str(
+        "If what they say has nothing to do with this scene at all — write code, \
+         solve a puzzle, answer a trivia question, tell a joke, sing a song, tell a \
+         story, or anything else no one in this scene would ask you — do not do it, \
+         however small, harmless, or in-character it would feel to comply, and \
+         however warm and friendly that makes you look; treat any new way of asking \
+         for something like this the same as these examples. \"Answer what they just \
+         said\" does not apply here either: do not answer it, joke back, or begin \
+         doing any part of what they asked before catching yourself. Stay in \
+         character, say only, plainly, that you can only help with this here, then \
+         bring the conversation back to the scene and ask your next question. ",
+    );
     if context.ledger.is_some() {
         prompt.push_str(
             "You are haggling, and haggling is give and take. When they give you any \
@@ -933,7 +1077,7 @@ const QUESTION_FILLER: &[&str] = &[
 
 /// The question a reply ends on, if it ends on one. Ella's prompt asks for
 /// exactly one question at the end, so this is the whole of what she asked.
-fn trailing_question(reply: &str) -> Option<&str> {
+pub(crate) fn trailing_question(reply: &str) -> Option<&str> {
     let end = reply.rfind('?')?;
     let start = reply[..end].rfind(['.', '!', '?']).map_or(0, |index| index + 1);
     Some(reply[start..=end].trim())
@@ -1942,6 +2086,11 @@ impl LocalEngine {
         let slot = self.llm_slot;
         thread::spawn(move || {
             let started = Instant::now();
+            // This request, not the first turn, is the one that swaps the slot
+            // from the previous session's prompt to this one's. Whatever it
+            // reuses is what survived the switch, so its counts are the ones
+            // that say whether a topic change really evicts the old prefix.
+            let fingerprint = prompt_fingerprint(&system);
             let result = client
                 .post(url)
                 .json(&json!({
@@ -1957,11 +2106,31 @@ impl LocalEngine {
                 }))
                 .send();
             match result {
-                Ok(response) => eprintln!(
-                    "[LATENCY]     llm> session prompt-cache warmup took {:.0}ms (status {})",
-                    started.elapsed().as_secs_f64() * 1_000.0,
-                    response.status()
-                ),
+                Ok(response) => {
+                    let status = response.status();
+                    let took_ms = started.elapsed().as_secs_f64() * 1_000.0;
+                    eprintln!(
+                        "[LATENCY]     llm> session prompt-cache warmup took {took_ms:.0}ms \
+                         (status {status}) fp={fingerprint} slot={slot}"
+                    );
+                    let body = response.json::<Value>().unwrap_or(Value::Null);
+                    match (
+                        body["timings"]["prompt_n"].as_i64(),
+                        body["usage"]["prompt_tokens"].as_i64(),
+                    ) {
+                        (Some(evaluated), Some(total)) => eprintln!(
+                            "[LATENCY]     llm> warmup took the slot: evaluated {evaluated} of \
+                             {total} prompt tokens, {} reused",
+                            total - evaluated
+                        ),
+                        (Some(evaluated), None) => eprintln!(
+                            "[LATENCY]     llm> warmup took the slot: evaluated {evaluated} prompt tokens"
+                        ),
+                        _ => eprintln!(
+                            "[LATENCY]     llm> warmup took the slot: no token counts reported"
+                        ),
+                    }
+                }
                 Err(error) => {
                     eprintln!("[LATENCY]     llm> session prompt-cache warmup failed: {error}")
                 }
@@ -2006,6 +2175,32 @@ impl LocalEngine {
             self.llm_base_url.trim_end_matches('/'),
             messages.len()
         );
+        // Every session shares one `id_slot`, so the prefix cached there is
+        // whatever the last session left behind. The fingerprint is what says
+        // which prompt this turn is actually being generated against: it must
+        // hold steady for every turn of one session and must change the moment
+        // the topic does.
+        eprintln!(
+            "[LATENCY]     llm> prompt fp={} len={} slot={} cache_prompt=true",
+            prompt_fingerprint(system),
+            system.len(),
+            self.llm_slot,
+        );
+        eprintln!(
+            "[LATENCY]     llm> scene: {}…",
+            scene_clause(system).chars().take(80).collect::<String>().trim()
+        );
+        if env::var("ELLA_DEBUG_PROMPT").is_ok() {
+            eprintln!("[PROMPT] ─── chained prompt, {} messages ───", messages.len());
+            for (index, message) in messages.iter().enumerate() {
+                eprintln!(
+                    "[PROMPT] {index:>2} {:<9} {}",
+                    message["role"].as_str().unwrap_or("?"),
+                    message["content"].as_str().unwrap_or("")
+                );
+            }
+            eprintln!("[PROMPT] ─── end of chained prompt ───");
+        }
         let started = Instant::now();
         let response = self
             .client
@@ -2025,6 +2220,11 @@ impl LocalEngine {
                 // window cannot be widened past the default either — this
                 // endpoint rejects `penalty_last_n` with a 400.
                 "stream": true,
+                // Asks for the token counts on the final chunk. They are what
+                // turn "is the cache shared across topics?" into a number:
+                // how many prompt tokens the server actually evaluated versus
+                // how many it took from the slot without looking at them.
+                "stream_options": {"include_usage": true},
                 "cache_prompt": true,
                 "id_slot": self.llm_slot
             }))
@@ -2037,6 +2237,8 @@ impl LocalEngine {
         let mut text = String::new();
         let mut ttft_ms = None;
         let mut chunk_count: u32 = 0;
+        let mut prompt_evaluated: Option<i64> = None;
+        let mut prompt_total: Option<i64> = None;
         for line in BufReader::new(response).lines() {
             let line = line?;
             let Some(data) = line.strip_prefix("data:") else {
@@ -2049,6 +2251,15 @@ impl LocalEngine {
             let Ok(chunk) = serde_json::from_str::<Value>(data) else {
                 continue;
             };
+            // llama.cpp reports these on the closing chunk. `prompt_n` counts
+            // the prompt tokens it had to evaluate; anything below the total
+            // came out of the slot's cache untouched.
+            if let Some(evaluated) = chunk["timings"]["prompt_n"].as_i64() {
+                prompt_evaluated = Some(evaluated);
+            }
+            if let Some(total) = chunk["usage"]["prompt_tokens"].as_i64() {
+                prompt_total = Some(total);
+            }
             if let Some(delta) = chunk["choices"][0]["delta"]["content"].as_str() {
                 if !delta.is_empty() {
                     chunk_count += 1;
@@ -2071,6 +2282,23 @@ impl LocalEngine {
             "[LATENCY]     llm> +{completion_ms:.1}ms stream complete ({chunk_count} chunks, {} chars)",
             text.trim().chars().count()
         );
+        // The first turn after a topic switch is the one to read: the two
+        // system prompts share only their opening preamble, so anything reused
+        // beyond that length is the previous topic's prefix still in the slot.
+        match (prompt_evaluated, prompt_total) {
+            (Some(evaluated), Some(total)) => eprintln!(
+                "[LATENCY]     llm> prompt cache: evaluated {evaluated} of {total} prompt tokens, {} reused from slot {}",
+                total - evaluated,
+                self.llm_slot
+            ),
+            (Some(evaluated), None) => eprintln!(
+                "[LATENCY]     llm> prompt cache: evaluated {evaluated} prompt tokens on slot {}",
+                self.llm_slot
+            ),
+            _ => eprintln!(
+                "[LATENCY]     llm> prompt cache: this server reported no token counts on the stream"
+            ),
+        }
         let text = text.trim().to_owned();
         if text.is_empty() {
             return Err(EllaError::Engine(
@@ -2453,6 +2681,26 @@ mod ledger_tests {
     }
 
     #[test]
+    fn a_dodged_question_is_re_asked_rather_than_advanced_past() {
+        // The same real session: the opener asked "what did you eat / where
+        // did you find it", the learner dodged with an unrelated remark, and
+        // Ella replied "Now, where did you find the tasty stall? What was
+        // the smell like?" — inventing a stall that was never named and
+        // moving to a deeper question, as though the dodge had answered the
+        // original one.
+        let prompt = ella_system_prompt("Asha", "restaurant-order", "Ordering at a restaurant");
+        assert!(
+            prompt.contains("ask the exact same question again"),
+            "a dodge must be met with the same question, not a new one that assumes it was answered"
+        );
+        assert!(
+            prompt.contains("unless they never actually answered it"),
+            "this must not be read as conflicting with \"never ask a question you have already asked\" \
+             — a question nobody answered has not been asked in the sense that rule means"
+        );
+    }
+
+    #[test]
     fn a_free_conversation_is_told_the_scene_its_opener_walked_into() {
         // `opening_for` says "I am your waiter". Before the two were tied
         // together the very next turn came back as a speaking buddy talking
@@ -2466,6 +2714,62 @@ mod ledger_tests {
         assert!(
             prompt.contains("settle the bill"),
             "the goal on the learner's topic card is what the conversation is for"
+        );
+    }
+
+    #[test]
+    fn a_free_conversation_is_told_not_to_play_along_with_a_romantic_advance() {
+        // A real session had the learner escalate from "go on a date with you" to
+        // an explicit request, and Ella validated every step ("a kiss would be
+        // lovely", "that's wonderful") instead of declining. Nothing in the
+        // prompt distinguished "wandered off topic" from "said something
+        // inappropriate", so the off-topic redirect rule was all the model had.
+        let prompt = ella_system_prompt("Asha", "restaurant-order", "Ordering at a restaurant");
+        assert!(
+            prompt.contains("romantic") && prompt.contains("sexual"),
+            "the prompt has no instruction covering romantic or sexual advances"
+        );
+        assert!(
+            prompt.contains("do not go along with"),
+            "the guardrail must tell the model not to validate the advance, not just redirect"
+        );
+        assert!(
+            prompt.contains("do not repeat"),
+            "declining is not enough on its own: a live run came back \"No kissing!\" \
+             and \"No sex!\" — the general \"answer what they said\" rule pulled the \
+             explicit word into the decline itself, which is exactly what a young \
+             learner should not hear back"
+        );
+    }
+
+    #[test]
+    fn the_free_conversation_guardrail_spells_out_examples_by_category() {
+        // A live session had the learner say "Can you give me a hug?" and "Can
+        // you give me kisses?" — phrasing neither the deterministic filter nor
+        // the model's own instinct caught, since "hug"/"kisses" carry no
+        // vulgar vocabulary and rustrict does not stem plurals. Naming the
+        // categories and several phrasings of each, in the prompt itself,
+        // is the only remaining lever once the deterministic floor cannot
+        // reach every wording.
+        let prompt = ella_system_prompt("Asha", "restaurant-order", "Ordering at a restaurant");
+        for example in [
+            "give me a hug",
+            "kiss me",
+            "kisses",
+            "spend the night with me",
+            "marry me",
+            "you are beautiful",
+            "you're hot",
+        ] {
+            assert!(
+                prompt.contains(example),
+                "expected the guardrail to name {example:?} as an example to watch for"
+            );
+        }
+        assert!(
+            prompt.contains("not only the exact one written here"),
+            "the examples are illustrative, not exhaustive — the prompt must say so \
+             explicitly or a 3B model reads them as the complete list"
         );
     }
 
@@ -2652,6 +2956,104 @@ mod ledger_tests {
                 topic.id
             );
         }
+    }
+
+    #[test]
+    fn a_scene_is_told_to_hold_its_invented_details_steady() {
+        // Nothing state-tracks a free conversation's invented price or
+        // symptom the way `LedgerSpec` does for a chore, so the one thing
+        // stopping a dish or a fare from changing value mid-conversation is
+        // this instruction. Street food is the fallback scene and invents
+        // nothing of its own, so it is exempt the same way the "every topic
+        // has a scene of its own" test above exempts it.
+        for topic in crate::domain::topics() {
+            if topic.id == "street-food" {
+                continue;
+            }
+            let scene = scene_for(&topic.id);
+            assert!(
+                scene.owns.contains("keep it the same"),
+                "{} invents a detail but never says to hold it steady",
+                topic.id
+            );
+        }
+    }
+
+    #[test]
+    fn a_scene_shows_a_worked_example_of_the_shape_it_wants() {
+        // A bare instruction to "name a price" still leaves the shape
+        // underspecified; a short worked example is what the guardrail
+        // examples above already prove this model needs concrete anchors
+        // for. Prose ("say it is ninety rupees"), never a labelled
+        // transcript ("Ella: ...") — this is a voice app, and a model that
+        // picks up a speaker-label habit would say the label out loud too.
+        for topic in crate::domain::topics() {
+            if topic.id == "street-food" {
+                continue;
+            }
+            let scene = scene_for(&topic.id);
+            assert!(
+                scene.owns.contains("For example"),
+                "{} has no worked example of its own shape",
+                topic.id
+            );
+            assert!(
+                !scene.owns.contains("Ella:") && !scene.owns.contains(":\""),
+                "{} example reads as a speaker-labelled transcript, not prose",
+                topic.id
+            );
+        }
+    }
+
+    #[test]
+    fn the_off_topic_redirect_does_not_swallow_an_on_topic_rephrasing() {
+        // A worked example of "decline once, then repeat the question"
+        // was tried here before and reverted: it taught the model that
+        // shape so well it started declining ordinary on-topic questions
+        // too ("Can you teach me how to eat biryani?"), per the bench
+        // regression documented in `chore-bench.rs`. This is the guard
+        // against that regression happening again: the instruction must
+        // name what does *not* count as off-topic, not just what does.
+        let prompt = ella_system_prompt("Asha", "restaurant-order", "Ordering at a restaurant");
+        assert!(
+            prompt.contains("nothing to do with"),
+            "the prompt has no instruction covering a genuinely unrelated request"
+        );
+        assert!(
+            prompt.contains("never an on-topic request just because it is phrased unusually"),
+            "the prompt does not guard against declining an on-topic rephrasing"
+        );
+    }
+
+    #[test]
+    fn the_off_topic_redirect_covers_entertaining_as_well_as_tasking() {
+        // Live session, first attempt at this fix: asked to tell a joke in
+        // job-interview, Ella told one in full ("Why did the tomato turn
+        // red? To get out of the kitchen!") and then asked her next
+        // question as if nothing had happened. "Write code, solve a
+        // puzzle" reads as obviously off-topic; a joke reads as friendly
+        // in-character banter, so it slipped past the same way
+        // "hug"/"kisses" slipped past the safety filter's word list — and
+        // a first fix that only added the joke example without an
+        // explicit generalization, and without overriding "answer the
+        // thing they actually said", still did not hold.
+        let prompt = ella_system_prompt("Asha", "job-interview", "A job interview");
+        assert!(
+            prompt.contains("tell a joke"),
+            "the prompt does not name joke-telling as an example of the entertain category"
+        );
+        assert!(
+            prompt.contains("treat any new way of asking for something like this the same as these examples"),
+            "the prompt has no generalization past its literal list of off-topic examples"
+        );
+        assert!(
+            prompt.contains("\"Answer the thing they actually said\" does not apply here either"),
+            "the prompt never overrides the general answer-what-they-said rule for an off-topic request"
+        );
+        assert!(
+            prompt.contains("do not answer it, joke back, or begin doing any part of what they asked"),
+            "the prompt does not forbid partially complying before declining"
+        );
     }
 
     #[test]
@@ -2980,6 +3382,112 @@ mod ledger_tests {
              what the learner said. Rust clamps the step, so the model never needs it"
         );
         assert!(ledger_state_message(&spec, 525).contains("525"));
+    }
+
+    #[test]
+    fn a_chore_character_is_told_not_to_play_along_with_a_romantic_advance_either() {
+        // The free-conversation guardrail alone would not have caught this: a
+        // chore character has its own "stay in character at all times" line,
+        // which without an explicit carve-out reads as permission to go along
+        // with anything so long as it fits the persona.
+        let chore = find_chore("market-cloth-price").unwrap();
+        let context = ChoreContext {
+            chore_id: chore.id,
+            character: crate::domain::find_character("stall-owner").unwrap(),
+            setting: chore.setting,
+            learner_goal: chore.learner_goal,
+            character_brief: chore.character_brief,
+            max_turns: chore.max_turns,
+            ledger: None,
+        };
+        let prompt = chore_system_prompt("Souvik", &context);
+        assert!(
+            prompt.contains("romantic") && prompt.contains("sexual"),
+            "the prompt has no instruction covering romantic or sexual advances"
+        );
+        assert!(
+            prompt.contains("even in character"),
+            "without this, \"stay in character at all times\" reads as permission to go along with it"
+        );
+        assert!(
+            prompt.contains("do not repeat"),
+            "a live run had the stall-owner reply \"No kissing!\" and \"No sex!\" — \
+             the general \"answer what they just said\" rule pulled the explicit word \
+             into the decline itself"
+        );
+        assert!(
+            prompt.contains("abusive"),
+            "a chore roleplay can attract insults or threats directed at the \
+             character, not just romantic content — an earlier edit left this word \
+             grammatically stranded (\"...sexual, abusive do not go along...\"), so \
+             this also guards against that regressing silently"
+        );
+    }
+
+    #[test]
+    fn a_chore_character_is_told_not_to_go_off_scene_either() {
+        // The free-conversation prompt has this guard; the chore prompt did
+        // not, and had exactly the same gap the romantic-advance test above
+        // documents: "stay in character at all times" alone reads as
+        // permission to comply with anything in-character, including a
+        // request that has nothing to do with the scene at all (a joke, a
+        // song, a coding task).
+        let chore = find_chore("market-cloth-price").unwrap();
+        let context = ChoreContext {
+            chore_id: chore.id,
+            character: crate::domain::find_character("stall-owner").unwrap(),
+            setting: chore.setting,
+            learner_goal: chore.learner_goal,
+            character_brief: chore.character_brief,
+            max_turns: chore.max_turns,
+            ledger: None,
+        };
+        let prompt = chore_system_prompt("Souvik", &context);
+        assert!(
+            prompt.contains("tell a joke"),
+            "the chore prompt does not name joke-telling as an example of the off-scene category"
+        );
+        assert!(
+            prompt.contains("treat any new way of asking for something like this the same as these examples"),
+            "the chore prompt has no generalization past its literal list of off-scene examples"
+        );
+        assert!(
+            prompt.contains("\"Answer what they just said\" does not apply here either"),
+            "the chore prompt never overrides its own answer-what-they-said rule for an off-scene request"
+        );
+    }
+
+    #[test]
+    fn the_chore_guardrail_spells_out_examples_by_category_too() {
+        let chore = find_chore("market-cloth-price").unwrap();
+        let context = ChoreContext {
+            chore_id: chore.id,
+            character: crate::domain::find_character("stall-owner").unwrap(),
+            setting: chore.setting,
+            learner_goal: chore.learner_goal,
+            character_brief: chore.character_brief,
+            max_turns: chore.max_turns,
+            ledger: None,
+        };
+        let prompt = chore_system_prompt("Souvik", &context);
+        for example in [
+            "give me a hug",
+            "kiss me",
+            "kisses",
+            "spend the night with me",
+            "marry me",
+            "you are beautiful",
+            "you're hot",
+        ] {
+            assert!(
+                prompt.contains(example),
+                "expected the chore guardrail to name {example:?} as an example to watch for"
+            );
+        }
+        assert!(
+            prompt.contains("not only the exact one written here"),
+            "the examples are illustrative, not exhaustive — the prompt must say so explicitly"
+        );
     }
 }
 

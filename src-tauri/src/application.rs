@@ -17,7 +17,8 @@ use crate::{
     infrastructure::{
         audio::{quietest_cut_index, trim_to_speech, VadOutput},
         database::Database,
-        engines::{SpeechSegment, SpeechSink, TutorEngine, FREE_TOPIC_TURNS},
+        engines::{trailing_question, GeneratedReply, SpeechSegment, SpeechSink, TutorEngine, FREE_TOPIC_TURNS},
+        safety,
     },
     telemetry::LatencyTrace,
 };
@@ -740,11 +741,27 @@ impl AppService {
             turn,
             chore: chore_context.clone(),
         };
-        trace.stage(
-            "llm:start",
-            &format!("requesting tutor reply for turn {turn} ({} history messages)", request.messages.len()),
-        );
-        let mut generated = self.engine.reply(&request)?;
+        let mut generated = if safety::flagged(clean) {
+            // Skip the model entirely: a live session showed it does not
+            // reliably self-correct once one turn slips into a soft,
+            // validating register, so a flagged turn must never reach it.
+            // Handing back the learner's own unanswered question keeps the
+            // conversation from reading as though the dodge worked.
+            let question = request
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.speaker == Speaker::Ella)
+                .and_then(|message| trailing_question(&message.content));
+            trace.stage("llm:skipped", "learner turn flagged by the content filter");
+            GeneratedReply::plain(safety::redirect_reply(question), 0.0, 0.0)
+        } else {
+            trace.stage(
+                "llm:start",
+                &format!("requesting tutor reply for turn {turn} ({} history messages)", request.messages.len()),
+            );
+            self.engine.reply(&request)?
+        };
         trace.record_llm(generated.ttft_ms, generated.completion_ms);
         trace.stage(
             "llm:done",
@@ -761,10 +778,15 @@ impl AppService {
             return Err(EllaError::Engine("Ella returned an empty reply.".into()));
         }
         let created_at = now();
+        // A no-op on ordinary text; redacts anything rustrict recognizes as
+        // profane, offensive, or sexual before it is written to the
+        // transcript. `request.learner_text` (already sent to the model, or
+        // not, above) is left as `clean` — this only affects what gets
+        // persisted and read back later.
         let learner_message = Message {
             id: Uuid::new_v4().to_string(),
             speaker: Speaker::Learner,
-            content: clean.into(),
+            content: safety::censor(clean),
             turn,
             created_at: created_at.clone(),
         };
