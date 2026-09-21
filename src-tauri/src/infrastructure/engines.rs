@@ -1644,18 +1644,15 @@ impl LocalEngine {
         };
         let windows_stt = || Box::new(WindowsStt::default()) as Box<dyn SpeechToTextEngine>;
 
-        // Primary STT is platform-dependent:
-        // - Windows: Windows Built-in STT (primary) with Canary STT (fallback)
-        // - Mac / Linux / others: Canary STT
-        let default_stt = if cfg!(target_os = "windows") {
-            "windows"
-        } else {
-            "canary"
-        };
-        let stt_engine = env::var("ELLA_STT_ENGINE").unwrap_or_else(|_| default_stt.into());
+        // Canary is primary everywhere. On Windows, SAPI is the fallback;
+        // elsewhere there is none. `ELLA_STT_ENGINE=windows` swaps the
+        // Windows order back to SAPI first.
+        let stt_engine = env::var("ELLA_STT_ENGINE").unwrap_or_else(|_| "canary".into());
 
         let stt = if stt_engine.eq_ignore_ascii_case("windows") {
             SttRouter::new(windows_stt(), Some(canary()))
+        } else if cfg!(target_os = "windows") {
+            SttRouter::new(canary(), Some(windows_stt()))
         } else {
             SttRouter::new(canary(), None)
         };
@@ -2212,7 +2209,7 @@ impl LocalEngine {
                 "model": "local",
                 "messages": messages,
                 "temperature": 0.65,
-                "max_tokens": 90,
+                "max_tokens": 50,
                 // No presence/frequency penalty here on purpose. They look like
                 // the obvious cure for the repeated sentence template, and they
                 // make it worse: holding seed and prompt fixed, reuse of one

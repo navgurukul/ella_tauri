@@ -162,7 +162,7 @@ Environment overrides:
 
 - `ELLA_ENGINE_ROOT`
 - `ELLA_LLM_BASE_URL`
-- `ELLA_STT_ENGINE` (`windows` or `canary`; defaults to `windows` on Windows, `canary` elsewhere)
+- `ELLA_STT_ENGINE` (`canary` or `windows`; defaults to `canary` everywhere, with Windows Speech Recognition as the fallback on Windows; `windows` makes it the primary with Canary as the fallback)
 - `ELLA_PIPER_BINARY` and `ELLA_PIPER_VOICE`
 - `ELLA_CANARY_MODEL`, `ELLA_STT_THREADS`, `ELLA_CANARY_VERIFY_SHA256`
 
