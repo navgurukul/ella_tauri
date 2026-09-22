@@ -1,8 +1,9 @@
-# Builds the Windows installer on a Windows runner and publishes it, together
-# with the signed `latest.json` that installed copies poll for updates.
+# Builds the Windows installer on a Windows runner and the Apple Silicon app on
+# a macOS runner, and publishes both to one release, together with the signed
+# `latest.json` that installed copies poll for updates.
 #
-# The Intel Mac this project is developed on cannot cross-compile the MSVC
-# target, so this workflow is the only way a Windows build gets made.
+# A development Mac cannot cross-compile the MSVC target, so this workflow is
+# the only way a Windows build gets made.
 #
 # Cutting a release:
 #   npm version patch --no-git-tag-version   # keep package.json, Cargo.toml
@@ -81,15 +82,14 @@ jobs:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: "Ella __VERSION__"
           releaseBody: |
-            Windows installer for Ella.
+            Windows installer (`-setup.exe`) and Apple Silicon Mac app (`.dmg`) for Ella.
 
-            The installer is about 95 MB and carries the engines. On first
-            launch Ella downloads roughly 2.3 GB of speech and language
-            models, which happens once, resumes if the connection drops, and
-            needs about 3 GB free on the system drive.
+            On first launch Ella downloads about 2.3 GB of speech and language
+            models, once, resuming if the connection drops. Keep about 3 GB free.
 
-            This build is not code-signed, so Windows SmartScreen will warn on
-            first run: choose **More info** then **Run anyway**.
+            Neither build is code-signed, so the first launch is blocked once:
+            - Windows: on the SmartScreen warning, choose **More info** then **Run anyway**.
+            - Mac: open the app once, then choose **Open Anyway** in System Settings → Privacy & Security.
           # Publishing on tag: see the note at the top before widening the
           # audience beyond the team.
           releaseDraft: false
@@ -99,3 +99,56 @@ jobs:
           # update a per-user install without elevation.
           updaterJsonPreferNsis: true
           args: --target x86_64-pc-windows-msvc
+
+  macos:
+    # After Windows rather than beside it: each job merges its platform into
+    # the release's one latest.json, and two jobs rewriting it at the same
+    # moment can drop the other's entry. It also means the release, and its
+    # body above, already exist by the time this uploads into it.
+    needs: windows
+    runs-on: macos-14
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      # Binaries and a relocatable Python for Piper; weights still come down
+      # on first launch, as on Windows.
+      - name: Stage the macOS engines
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ELLA_PIPER_VOICE_URL: ${{ secrets.ELLA_PIPER_VOICE_URL }}
+        run: ./scripts/fetch-macos-engines.sh
+
+      # Not signed or notarized by Apple: there is no Developer ID yet, so
+      # Gatekeeper blocks the first launch until the tester allows it. The
+      # updater signature below is separate and still required.
+      - name: Build and publish
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: "Ella __VERSION__"
+          releaseDraft: false
+          prerelease: false
+          uploadUpdaterJson: true
+          args: --target aarch64-apple-darwin
