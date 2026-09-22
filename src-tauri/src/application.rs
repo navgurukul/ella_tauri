@@ -93,6 +93,13 @@ impl AppService {
         }
     }
 
+    /// Called from the app's exit event: Tauri never drops managed state, so
+    /// this is the only point at which the engine's processes and GPU buffers
+    /// can be released.
+    pub fn shutdown(&self) {
+        self.engine.shutdown();
+    }
+
     /// Hand the service somewhere to push sentences as they are synthesized.
     /// Called once, after the window exists.
     pub fn set_speech_broadcast(&self, broadcast: Arc<dyn SpeechBroadcast>) {
