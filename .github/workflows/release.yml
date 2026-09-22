@@ -28,9 +28,19 @@ on:
       tag:
         description: "Tag to build and attach the release to (e.g. v0.1.1)"
         required: true
+      # Adds one platform to a release that already exists without rebuilding
+      # the other, e.g. a Mac build for a version whose Mac job failed. The
+      # build uses the branch the run is started from, not the tag, and
+      # tauri-action merges its entry into the release's existing latest.json.
+      platforms:
+        description: "Which builds to run"
+        type: choice
+        options: [all, windows, macos]
+        default: all
 
 jobs:
   windows:
+    if: github.event_name == 'push' || inputs.platforms != 'macos'
     runs-on: windows-latest
     permissions:
       contents: write
@@ -106,6 +116,11 @@ jobs:
     # moment can drop the other's entry. It also means the release, and its
     # body above, already exist by the time this uploads into it.
     needs: windows
+    # Runs when Windows succeeded, or was deliberately skipped by a macos-only
+    # dispatch; a job whose dependency was skipped is otherwise skipped too.
+    if: >-
+      !cancelled() && needs.windows.result != 'failure' &&
+      (github.event_name == 'push' || inputs.platforms != 'windows')
     runs-on: macos-14
     permissions:
       contents: write
