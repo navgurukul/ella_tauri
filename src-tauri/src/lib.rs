@@ -197,6 +197,16 @@ pub fn run() {
             ipc::complete_session,
             ipc::reset_demo_data,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Ella");
+        .build(tauri::generate_context!())
+        .expect("error while building Ella")
+        .run(|app, event| {
+            // Tauri exits the process without dropping managed state, so this
+            // is the last chance to stop llama-server and free Canary's Metal
+            // buffers. See `DeferredEngine::shutdown`.
+            if let tauri::RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.0.shutdown();
+                }
+            }
+        });
 }

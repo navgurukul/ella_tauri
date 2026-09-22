@@ -16,7 +16,8 @@
 # ELLA_PIPER_VOICE_URL   private URL for en_IN-navgurukul-medium.onnx; its
 #                        .onnx.json sidecar is expected at the same URL + .json
 # ELLA_LLAMA_TAG         pin a llama.cpp release (default: newest with a build)
-# ELLA_PYTHON_TAG        pin a python-build-standalone release (default: latest)
+# ELLA_PYTHON_TAG        python-build-standalone release (default: 20260901)
+# ELLA_PYTHON_VERSION    CPython version inside that release (default: 3.12.14)
 # ELLA_PIPER_TTS_VERSION piper-tts to install (default: 1.8.0)
 # GITHUB_TOKEN           raises the GitHub API rate limit when set
 set -euo pipefail
@@ -91,9 +92,14 @@ rm -rf "$DEST/bin/llama"
 expand_into "$WORK/llama.tar.gz" "$DEST/bin/llama"
 
 # --- Piper, on a relocatable Python ----------------------------------------
-url="$(release_asset_url astral-sh/python-build-standalone \
-  '^cpython-3\.12\.[0-9]+\+[0-9]+-aarch64-apple-darwin-install_only_stripped\.tar\.gz$' \
-  "${ELLA_PYTHON_TAG:-}")"
+# Pinned and addressed directly, not looked up through the releases API: each
+# python-build-standalone release carries thousands of assets, so listing even
+# a few of them is megabytes of JSON that the API times out on (504) or cuts
+# off mid-body on the shared Actions IP pool.
+python_tag="${ELLA_PYTHON_TAG:-20260901}"
+python_version="${ELLA_PYTHON_VERSION:-3.12.14}"
+url="https://github.com/astral-sh/python-build-standalone/releases/download/$python_tag/cpython-$python_version%2B$python_tag-aarch64-apple-darwin-install_only_stripped.tar.gz"
+echo "python-build-standalone $python_tag: CPython $python_version" >&2
 fetch -o "$WORK/python.tar.gz" "$url"
 rm -rf "$DEST/piper-venv"
 expand_into "$WORK/python.tar.gz" "$DEST/piper-venv"

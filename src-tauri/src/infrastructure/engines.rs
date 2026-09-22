@@ -1489,6 +1489,10 @@ pub trait TutorEngine: Send + Sync {
     ) -> EllaResult<SynthesizedAudio> {
         self.synthesize(text)
     }
+
+    /// Release what this engine holds before the process exits. Nothing by
+    /// default; see `DeferredEngine::shutdown` for why the packaged app needs it.
+    fn shutdown(&self) {}
 }
 
 /// Where an installed build keeps the two halves of an engine tree. They are

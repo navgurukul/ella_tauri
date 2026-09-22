@@ -414,4 +414,30 @@ impl TutorEngine for DeferredEngine {
             None => Err(self.pending()),
         }
     }
+
+    /// Drops the real engine while the process can still clean up after it.
+    ///
+    /// Tauri exits without dropping managed state, so without this the engine
+    /// outlives every destructor that matters: `LlamaServer`'s never runs and
+    /// llama-server stays resident with its 2 GB model, and Canary still holds
+    /// Metal buffers when ggml's static device teardown asserts they are all
+    /// gone — which aborts, and macOS reports every quit as a crash.
+    ///
+    /// Bounded, because a turn in flight holds the read lock and a quit must
+    /// not hang on a slow reply; if the lock never frees, exit goes ahead
+    /// exactly as it did before.
+    fn shutdown(&self) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Ok(mut slot) = self.inner.try_write() {
+                drop(slot.take());
+                return;
+            }
+            if Instant::now() >= deadline {
+                eprintln!("[engines] shutdown: engine still busy, exiting without releasing it");
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
 }
