@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { LoaderCircle, X } from "lucide-react";
+import { CircleCheck, LoaderCircle, X } from "lucide-react";
 import { EllaGlyph, EllaMascot } from "./components/EllaMascot";
 import { HomeScreen } from "./components/HomeScreen";
 import { OnboardingFlow } from "./components/OnboardingFlow";
@@ -9,7 +9,12 @@ import { TalkScreen } from "./components/TalkScreen";
 import { bridge } from "./lib/bridge";
 import { recommendedTopicId, unfinishedSession } from "./lib/presentation";
 import { formatBytes, useSetupState, type SetupState } from "./lib/setup";
-import { applyUpdateIfAny, type UpdateProgress } from "./lib/updates";
+import {
+  downloadUpdateInBackground,
+  installExitsTheApp,
+  type ApplyUpdate,
+  type UpdateProgress,
+} from "./lib/updates";
 import type { VoiceCaptureResult } from "./lib/speech";
 import type { AppSnapshot, Session, SessionSummary, Topic } from "./types";
 
@@ -29,12 +34,25 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [update, setUpdate] = useState<UpdateProgress | null>(null);
+  const [applyUpdate, setApplyUpdate] = useState<ApplyUpdate | null>(null);
   const setup = useSetupState();
 
-  // Once, at launch: the only point where closing the app costs nothing.
+  // Once, at launch, and entirely in the background: the learner keeps using
+  // Ella while it downloads, and nothing installs mid-conversation.
   useEffect(() => {
-    void applyUpdateIfAny(setUpdate);
+    void downloadUpdateInBackground(setUpdate).then((apply) => {
+      if (apply) setApplyUpdate(() => apply);
+    });
   }, []);
+
+  const updateToast = (
+    <UpdateToast
+      progress={update}
+      raised={setup !== null && setup.stage !== "ready"}
+      onRestart={applyUpdate ? () => void applyUpdate() : undefined}
+      onDismiss={() => setUpdate(null)}
+    />
+  );
 
   useEffect(() => {
     let active = true;
@@ -191,11 +209,6 @@ export default function App() {
     setScreen(key);
   }
 
-  // An update replaces the running app, so it owns the screen while it works.
-  // "checking" is deliberately not shown: it is over in a moment, and a flash
-  // of update UI on every launch reads as instability.
-  if (update && update.stage !== "checking") return <UpdateScreen progress={update} />;
-
   if (!snapshot) return <BootScreen error={error} />;
 
   if (screen === "onboarding") {
@@ -209,6 +222,7 @@ export default function App() {
           onDone={() => setScreen("home")}
         />
         <SetupBanner setup={setup} />
+        {updateToast}
         {busy && <BusyVeil />}
       </>
     );
@@ -246,6 +260,7 @@ export default function App() {
         )}
       </main>
       <SetupBanner setup={setup} />
+      {updateToast}
       {busy && <BusyVeil />}
       {error && <Toast message={error} onClose={() => setError(null)} />}
     </div>
@@ -320,32 +335,66 @@ function SetupBanner({ setup }: { setup: SetupState | null }) {
   );
 }
 
-/** An update rewrites the app underneath itself, so nothing else is on screen. */
-function UpdateScreen({ progress }: { progress: UpdateProgress }) {
+/**
+ * A new version downloading behind the app, in the corner and out of the way.
+ * It wears the first-run strip's styling so both read as the same kind of
+ * background work, and it sits above that strip whenever both are showing.
+ */
+function UpdateToast({
+  progress,
+  raised,
+  onRestart,
+  onDismiss,
+}: {
+  progress: UpdateProgress | null;
+  raised: boolean;
+  onRestart?: () => void;
+  onDismiss: () => void;
+}) {
+  if (!progress) return null;
+
+  const ready = progress.stage === "ready";
   const percent =
     progress.totalBytes > 0
       ? Math.min(100, Math.round((progress.downloadedBytes / progress.totalBytes) * 100))
       : null;
-  const heading =
-    progress.stage === "restarting" ? "Starting the new Ella…" : "Updating Ella…";
+  const detail = ready
+    ? installExitsTheApp()
+      ? "Installs when you close Ella"
+      : "Starts next time you open Ella"
+    : percent !== null
+      ? `Version ${progress.version} — ${percent}%`
+      : `Version ${progress.version}`;
 
   return (
-    <div className="boot">
-      <div className="wordmark wordmark--lg">
-        <EllaGlyph size={48} />
-        <span>Ella</span>
-      </div>
-      <h1 className="display display--md">{heading}</h1>
-      <p>
-        {progress.version ? `Version ${progress.version}. ` : ""}
-        This only takes a moment, and your talks are kept.
-      </p>
-      {percent !== null && (
-        <div className="setup-strip__bar setup-strip__bar--wide" role="progressbar" aria-valuenow={percent}>
-          <span style={{ width: `${percent}%` }} />
-        </div>
+    <div className={`update-toast ${raised ? "update-toast--raised" : ""}`.trim()} aria-live="polite">
+      {ready ? (
+        <CircleCheck className="update-toast__icon" size={20} aria-hidden="true" />
+      ) : (
+        <LoaderCircle className="update-toast__icon spin" size={20} aria-hidden="true" />
       )}
-      <LoaderCircle className="spin" aria-label="Updating" />
+      <div className="setup-strip__text">
+        <strong>{ready ? "Update ready" : "Updating Ella"}</strong>
+        <span>{detail}</span>
+      </div>
+      {ready ? (
+        <>
+          {onRestart && (
+            <button className="update-toast__restart" onClick={onRestart}>
+              Restart
+            </button>
+          )}
+          <button className="update-toast__dismiss" onClick={onDismiss} aria-label="Dismiss">
+            <X size={14} />
+          </button>
+        </>
+      ) : (
+        percent !== null && (
+          <div className="setup-strip__bar" role="progressbar" aria-valuenow={percent}>
+            <span style={{ width: `${percent}%` }} />
+          </div>
+        )
+      )}
     </div>
   );
 }

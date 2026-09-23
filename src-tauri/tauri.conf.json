@@ -44,7 +44,9 @@
     "shortDescription": "Voice-first English practice with Ella",
     "longDescription": "A local-first desktop app for Ella, NavGurukul's voice-first English learning companion.",
     "macOS": {
-      "minimumSystemVersion": "12.0"
+      "minimumSystemVersion": "12.0",
+      "signingIdentity": "-",
+      "hardenedRuntime": false
     },
     "createUpdaterArtifacts": true,
     "windows": {
