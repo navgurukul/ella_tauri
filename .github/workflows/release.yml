@@ -1,6 +1,6 @@
-# Builds the Windows installer on a Windows runner and the Apple Silicon app on
-# a macOS runner, and publishes both to one release, together with the signed
-# `latest.json` that installed copies poll for updates.
+# Builds the Windows installer, the Apple Silicon Mac app and the Intel Mac app,
+# each on its own runner, and publishes all three to one release, together with
+# the signed `latest.json` that installed copies poll for updates.
 #
 # A development Mac cannot cross-compile the MSVC target, so this workflow is
 # the only way a Windows build gets made.
@@ -92,7 +92,8 @@ jobs:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: "Ella __VERSION__"
           releaseBody: |
-            Windows installer (`-setup.exe`) and Apple Silicon Mac app (`.dmg`) for Ella.
+            Windows installer (`-setup.exe`) and Mac apps for Ella: `aarch64.dmg`
+            for Apple Silicon, `x64.dmg` for Intel Macs.
 
             On first launch Ella downloads about 2.3 GB of speech and language
             models, once, resuming if the connection drops. Keep about 3 GB free.
@@ -167,3 +168,57 @@ jobs:
           prerelease: false
           uploadUpdaterJson: true
           args: --target aarch64-apple-darwin
+
+  macos-intel:
+    # Same shape as the Apple Silicon job, on GitHub's Intel Mac runner, and
+    # after it for the same latest.json reason. An Intel Mac cannot run the
+    # arm64 build at all, and the updater only offers what latest.json lists
+    # for the platform asking.
+    needs: macos
+    if: >-
+      !cancelled() && needs.macos.result != 'failure' &&
+      (github.event_name == 'push' || inputs.platforms != 'windows')
+    runs-on: macos-15-intel
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      # The script stages for the architecture it runs on, so this runner
+      # gets llama.cpp's macos-x64 build and an x86_64 Python with Piper's
+      # Intel wheels.
+      - name: Stage the macOS engines
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ELLA_PIPER_VOICE_URL: ${{ secrets.ELLA_PIPER_VOICE_URL }}
+        run: ./scripts/fetch-macos-engines.sh
+
+      - name: Build and publish
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: "Ella __VERSION__"
+          releaseDraft: false
+          prerelease: false
+          uploadUpdaterJson: true
+          args: --target x86_64-apple-darwin
