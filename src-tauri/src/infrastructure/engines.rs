@@ -129,19 +129,20 @@ impl PiperDaemon {
         let started = Instant::now();
         let script_path = env::temp_dir().join("ella-piper-daemon.py");
         fs::write(&script_path, PIPER_DAEMON_SOURCE)?;
-        let mut child = Command::new(&self.python)
+        let mut command = Command::new(&self.python);
+        command
             .arg(&script_path)
             .arg(&self.voice)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| {
-                EllaError::Engine(format!(
-                    "Could not start the resident Piper daemon with {}: {error}",
-                    self.python.display()
-                ))
-            })?;
+            .stderr(Stdio::null());
+        suppress_console_window(&mut command);
+        let mut child = command.spawn().map_err(|error| {
+            EllaError::Engine(format!(
+                "Could not start the resident Piper daemon with {}: {error}",
+                self.python.display()
+            ))
+        })?;
         let stdin = child
             .stdin
             .take()
@@ -401,6 +402,19 @@ impl SentenceSplitter {
         Some(cut)
     }
 }
+
+/// Stops Windows from popping a visible console window for a spawned child.
+/// Our GUI process has no console of its own for the child to inherit, so
+/// without this flag Windows allocates one from scratch on every launch.
+#[cfg(target_os = "windows")]
+fn suppress_console_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn suppress_console_window(_command: &mut Command) {}
 
 /// The text of a segment as Piper should read it. Bracketed control tokens are
 /// dropped; nothing else is touched, because the reply the learner reads is
@@ -2320,20 +2334,21 @@ impl LocalEngine {
             text.chars().count()
         );
         let started = Instant::now();
-        let mut child = Command::new(&self.piper_binary)
+        let mut command = Command::new(&self.piper_binary);
+        command
             .arg("--model")
             .arg(&self.piper_voice)
             .arg("--output_raw")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| {
-                EllaError::Engine(format!(
-                    "Could not start Piper at {}: {error}",
-                    self.piper_binary.display()
-                ))
-            })?;
+            .stderr(Stdio::piped());
+        suppress_console_window(&mut command);
+        let mut child = command.spawn().map_err(|error| {
+            EllaError::Engine(format!(
+                "Could not start Piper at {}: {error}",
+                self.piper_binary.display()
+            ))
+        })?;
         eprintln!(
             "[LATENCY]     tts> +{:.1}ms Piper process spawned",
             started.elapsed().as_secs_f64() * 1_000.0

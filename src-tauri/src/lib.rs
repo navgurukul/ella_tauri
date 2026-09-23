@@ -133,14 +133,40 @@ impl SpeechBroadcast for WindowSpeech {
     }
 }
 
+/// Shuts the engine down when Tauri clears the app's resource table.
+///
+/// On Windows the updater runs the installer and then calls `process::exit`
+/// itself, which skips `RunEvent::Exit`; the only thing it does first is
+/// `cleanup_before_exit`, which drops every entry in this table. Without the
+/// guard, llama-server would outlive the app and still hold the files the
+/// installer is trying to replace.
+struct EngineShutdownGuard(Arc<AppService>);
+
+impl tauri::Resource for EngineShutdownGuard {}
+
+impl Drop for EngineShutdownGuard {
+    fn drop(&mut self) {
+        self.0.shutdown();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        // Both plugins exist for one flow: check for a signed update, install
+        // Both plugins exist for one flow: download a signed update, install
         // it, restart into it.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            // The running build's version in the title bar, where a tester can
+            // read it off a screenshot. Taken from the bundle rather than
+            // written into tauri.conf.json, so it follows an update.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_title(&format!(
+                    "Ella {} — Speak English every day",
+                    app.package_info().version
+                ));
+            }
             let data_dir = app.path().app_data_dir()?;
             let packaged_engine_root = app
                 .path()
@@ -177,7 +203,8 @@ pub fn run() {
                 Arc::new(AppService::new(database, engine_from_environment(paths)))
             };
             service.set_speech_broadcast(Arc::new(WindowSpeech(app.handle().clone())));
-            app.manage(AppState(service));
+            app.manage(AppState(Arc::clone(&service)));
+            app.resources_table().add(EngineShutdownGuard(service));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

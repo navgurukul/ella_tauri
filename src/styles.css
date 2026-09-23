@@ -2244,4 +2244,55 @@ button { font-family: inherit; }
   background: var(--violet);
   transition: width 240ms ease-out;
 }
-.setup-strip__bar--wide { width: min(320px, 60vw); margin: 14px auto 0; height: 10px; }
+/* A new version downloading behind the app. Same card as the setup strip, but
+   in the corner: it matters less than first-run setup, and it must not sit on
+   the talk controls along the bottom. */
+.update-toast {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: min(320px, calc(100vw - 36px));
+  padding: 12px 14px;
+  border: 1px solid var(--ink-10);
+  border-radius: 18px;
+  background: var(--white);
+  box-shadow: 0 10px 30px rgba(38, 38, 38, 0.12);
+  animation: update-toast-in 240ms ease-out;
+}
+/* Clears the setup strip when a fresh install is also fetching its models. */
+.update-toast--raised { bottom: 96px; }
+.update-toast__icon { flex: none; color: var(--violet); }
+.update-toast .setup-strip__bar { width: 64px; }
+.update-toast__restart {
+  flex: none;
+  margin-left: auto;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 999px;
+  background: var(--violet);
+  color: var(--white);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.update-toast__restart:hover { background: var(--violet-deep); }
+.update-toast__dismiss {
+  display: flex;
+  flex: none;
+  padding: 2px;
+  border: none;
+  background: none;
+  color: var(--ink-45);
+  cursor: pointer;
+}
+.update-toast__dismiss:hover { color: var(--ink); }
+
+@keyframes update-toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}

@@ -93,6 +93,16 @@ impl LlamaServer {
             command.env(library_path_variable(), joined);
         }
 
+        // Without this, Windows pops a visible console window for
+        // llama-server every time it starts, since our own GUI process has
+        // none of its own for the child to inherit.
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+
         let mut child = command.spawn().map_err(|reason| {
             EllaError::Engine(format!(
                 "Could not start llama-server at {}: {reason}",
