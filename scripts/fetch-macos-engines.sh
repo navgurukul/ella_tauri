@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Fills src-tauri/resources/engines with the Apple Silicon binaries a macOS
-# bundle has to carry, fetching each from its upstream release. The macOS
+# Fills src-tauri/resources/engines with the binaries a macOS bundle has to
+# carry, fetching each from its upstream release. The macOS
 # counterpart of fetch-windows-engines.ps1; weights are not staged here either,
 # the app downloads them into app data on first launch.
 #
@@ -12,6 +12,9 @@
 # runs the resident Piper daemon rather than reloading the voice every turn.
 #
 #   ./scripts/fetch-macos-engines.sh [destination]
+#
+# Stages for the architecture it runs on: Apple Silicon on an arm64 Mac, Intel
+# on an x86_64 one.
 #
 # ELLA_PIPER_VOICE_URL   private URL for en_IN-navgurukul-medium.onnx; its
 #                        .onnx.json sidecar is expected at the same URL + .json
@@ -26,10 +29,20 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="${1:-$ROOT/src-tauri/resources/engines}"
 PIPER_TTS_VERSION="${ELLA_PIPER_TTS_VERSION:-1.8.0}"
 
-if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
-  echo "This stages Apple Silicon engines and must run on an arm64 Mac: pip picks wheels for the host." >&2
+# Staged for the machine this runs on, because pip resolves Piper's wheels for
+# the host: an Intel bundle has to be staged on an Intel Mac, and an Apple
+# Silicon one on Apple Silicon. CI runs each on its own runner.
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "This stages macOS engines and must run on a Mac." >&2
   exit 1
 fi
+
+case "$(uname -m)" in
+  arm64)  LLAMA_ARCH="arm64";  PYTHON_ARCH="aarch64" ;;
+  x86_64) LLAMA_ARCH="x64";    PYTHON_ARCH="x86_64" ;;
+  *) echo "Unsupported Mac architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+echo "Staging engines for $(uname -m)" >&2
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -86,7 +99,7 @@ mkdir -p "$DEST"
 # --- llama.cpp -------------------------------------------------------------
 # Its dylibs carry an @loader_path rpath, so they only need to sit beside the
 # binary; the app also points DYLD_LIBRARY_PATH at this directory.
-url="$(release_asset_url ggml-org/llama.cpp '^llama-.*-bin-macos-arm64\.tar\.gz$' "${ELLA_LLAMA_TAG:-}")"
+url="$(release_asset_url ggml-org/llama.cpp "^llama-.*-bin-macos-$LLAMA_ARCH\\.tar\\.gz\$" "${ELLA_LLAMA_TAG:-}")"
 fetch -o "$WORK/llama.tar.gz" "$url"
 rm -rf "$DEST/bin/llama"
 expand_into "$WORK/llama.tar.gz" "$DEST/bin/llama"
@@ -98,7 +111,7 @@ expand_into "$WORK/llama.tar.gz" "$DEST/bin/llama"
 # off mid-body on the shared Actions IP pool.
 python_tag="${ELLA_PYTHON_TAG:-20260901}"
 python_version="${ELLA_PYTHON_VERSION:-3.12.14}"
-url="https://github.com/astral-sh/python-build-standalone/releases/download/$python_tag/cpython-$python_version%2B$python_tag-aarch64-apple-darwin-install_only_stripped.tar.gz"
+url="https://github.com/astral-sh/python-build-standalone/releases/download/$python_tag/cpython-$python_version%2B$python_tag-$PYTHON_ARCH-apple-darwin-install_only_stripped.tar.gz"
 echo "python-build-standalone $python_tag: CPython $python_version" >&2
 fetch -o "$WORK/python.tar.gz" "$url"
 rm -rf "$DEST/piper-venv"
