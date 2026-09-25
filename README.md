@@ -50,34 +50,62 @@ cargo run --release --manifest-path src-tauri/Cargo.toml --bin stt-benchmark -- 
 
 ## User interface
 
-The UI implements the **Ella v6** design system (Claude Design project
-`549e2295-3339-4b07-9009-1ac4475aad21`, file `Ella v6.dc.html`).
+The UI implements the **Ella Desktop** design (Claude Design project
+`d4c02bb0-7d53-42ff-8c5b-ea4750e899ee`, file `Ella Desktop.dc.html`). The
+design's window chrome — title bar and traffic lights — is left to the OS.
 
-- Tokens, type and geometry live in [`src/styles.css`](src/styles.css). Fonts are
-  bundled under `public/assets/fonts` because the Tauri CSP is `font-src 'self'`
-  — nothing is fetched from Google Fonts at runtime.
+- Tokens, type, geometry and motion live in [`src/styles.css`](src/styles.css).
+  Fonts are bundled under `public/assets/fonts` because the Tauri CSP is
+  `font-src 'self'` — nothing is fetched from Google Fonts at runtime.
 - Ella herself is drawn in CSS, not illustrated: see
-  [`src/components/EllaMascot.tsx`](src/components/EllaMascot.tsx). One 660x450
-  blob is the single source of truth for her face; every other size is that blob
-  under a CSS scale.
-- Onboarding is the five-step flow from v6 — welcome, name, age, mic check,
-  placement talk — in
+  [`src/components/EllaMascot.tsx`](src/components/EllaMascot.tsx). The design
+  draws her afresh for each placement, so each placement is a variant whose face
+  is a block of custom properties on `.ella--{variant}`. Her eyes follow the
+  cursor and blink, she flies in when a screen opens, and she squishes when
+  poked. On the talk stage she bobs, leans in to listen, bounces as she speaks
+  and sways while she thinks; when the mic opens she dives away and comes back
+  from a random side, ears pricked (or looming, if she came from above).
+- Onboarding is the five-step flow — welcome, name, age, mic check, placement
+  talk — in
   [`src/components/OnboardingFlow.tsx`](src/components/OnboardingFlow.tsx). The
-  mic check and the placement talk open the real microphone; the level the
-  placement talk reports is still the placeholder band, because nothing scores
-  the recording yet.
-- Then four screens: home, talk, summary and garden. The design file covers
-  home, talk and garden; the post-conversation summary is built from the same
-  parts. A conversation hides the sidebar and fills the window.
-- The design shows curriculum framing the Rust backend does not model yet — a
-  CEFR band, a talking streak, named garden units, per-topic category and
-  duration, a weekly digest. All of it is resolved in
+  mic check and the placement talk open the real microphone. The profile can run
+  the mic check again.
+- Then the sidebar screens: **Home**, **Talk partners** and the **Profile**
+  (from the name at the foot of the sidebar), plus the conversation and its
+  summary. A conversation hides the sidebar and fills the window; Space works
+  its microphone. The summary is not in the design and is built from Home's
+  parts.
+- Talk partners are real where the backend is: Bippo's and Grumble's goals start
+  the chores in `chores()` through `start_chore`, which plays the character and
+  keeps the score. Dr Wobble's goal opens the doctor topic, and Zig's debate has
+  no chore yet, so it shows as coming soon. Goals a learner is too young for are
+  left out, mirroring `catalog_for`.
+- A laptop keeps one learner, with their talks, progress and avatar colour, all
+  in the local SQLite database. The profile edits them through `save_learner`
+  and saves the avatar colour through `save_avatar_color`. "Log out"
+  (`log_out`) only signs out and deletes nothing. "Log in" (`log_in`) then
+  greets the saved learner by name, in their own colour, and "Take me in"
+  brings back every talk, the streak and the badges; on a laptop nobody has used
+  yet it asks for a name and goes straight in. "Let's start" after a log out
+  is the same learner onboarding again: `save_learner` signs them in and their
+  history stays theirs.
+- The design shows framing the Rust backend does not model yet — per-topic
+  category and duration, a mentor lesson, badges, minutes spoken, the cast's
+  names. All of it is resolved in
   [`src/lib/presentation.ts`](src/lib/presentation.ts), which derives what it can
-  from `AppSnapshot` and marks the rest `PLACEHOLDER`. When the backend grows a
-  field, delete the constant and read the snapshot instead.
+  from `AppSnapshot` and marks the rest `PLACEHOLDER`. The streak, the week
+  strip, talks and answers, and the earned badges all come from
+  `AppSnapshot.progress`, which the backend sums over the learner's whole
+  history. A day counts once the learner has answered on it. The home screen's
+  weekly talk count includes every talk with an answer, on the day of its first
+  answer; the profile's talks done and the First talk badge count only talks
+  finished with at least one answer. Where the design shows a
+  number nothing can back — "minutes spoken" — the screen shows answers spoken
+  instead of a made-up figure. When the backend grows a field, delete the
+  constant and read the snapshot instead.
 
-The intended window is 1440x900. Below 1280px wide the home bento reflows from
-the design's four columns to two.
+The intended window is 1440x900; the layout holds down to the 1240x740 minimum,
+with the tallest mascots scaling down on short windows.
 
 ## Run the complete local voice POC
 
@@ -306,6 +334,36 @@ download, and only the talking itself waits.
 free port, readiness poll, killed on exit. The development scripts are
 unchanged: setting `ELLA_LLM_BASE_URL` means someone else owns the server, and
 Ella will not start a second one.
+
+## Where a learner's data is kept
+
+The learner's profile, talks and answers are kept in one SQLite database,
+`ella.sqlite3`, in the app's data folder
+(`~/Library/Application Support/org.navgurukul.ella.desktop/` on macOS,
+`%APPDATA%\org.navgurukul.ella.desktop\` on Windows). None of it leaves the
+laptop, and nothing in the app deletes it: "Log out" only signs out. While Ella
+runs, the newest writes sit in `ella.sqlite3-wal` beside it, and quitting folds
+them into `ella.sqlite3`; to back up or move a tester's data, quit Ella and copy
+every `ella.sqlite3*` file together. Every saved turn is synced to the drive
+before Ella moves on (`synchronous = FULL`, plus `fullfsync` on macOS), so it
+survives a crash, a force-quit or a battery that dies.
+
+A development build has the same identifier, so it opens the same database and
+sees the installed app's learner. Opening a v0.1.6 database only adds two
+columns to its learner (the avatar colour and whether they are signed out), so
+v0.1.6 can still open it afterwards. A database from an unreleased development
+build that briefly kept several learners on one laptop is converted back once:
+it keeps the learner who was signed in, or else whoever was about most recently
+(still signed out), and every talk. Before running a development build on a
+tester's laptop, quit the installed app and back up every `ella.sqlite3*` file
+all the same. The browser preview keeps its own, separate copy in the browser's
+local storage, and reads what older previews left there the same way.
+
+Once the models are downloaded on the first launch, Ella needs no internet: the
+speech, language and voice engines all run on the laptop, and the update check
+gives up quietly when offline. If the models cannot be refreshed — no internet
+after an update that names a newer model, or a lost download record — Ella
+loads the weights already on disk and tries again on the next launch.
 
 ## POC boundaries
 

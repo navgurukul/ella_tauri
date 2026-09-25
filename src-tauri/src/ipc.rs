@@ -42,6 +42,27 @@ pub async fn save_learner(
 }
 
 #[tauri::command]
+pub async fn log_in(state: State<'_, AppState>) -> Result<Learner, String> {
+    let service = state.0.clone();
+    off_main_thread(move || service.log_in()).await
+}
+
+#[tauri::command]
+pub async fn log_out(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
+    let service = state.0.clone();
+    off_main_thread(move || service.log_out()).await
+}
+
+#[tauri::command]
+pub async fn save_avatar_color(
+    state: State<'_, AppState>,
+    color: String,
+) -> Result<Learner, String> {
+    let service = state.0.clone();
+    off_main_thread(move || service.save_avatar_color(&color)).await
+}
+
+#[tauri::command]
 pub async fn start_session(
     state: State<'_, AppState>,
     topic_id: String,
@@ -166,10 +187,4 @@ pub async fn complete_session(
 ) -> Result<SessionSummary, String> {
     let service = state.0.clone();
     off_main_thread(move || service.complete_session(&session_id)).await
-}
-
-#[tauri::command]
-pub async fn reset_demo_data(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
-    let service = state.0.clone();
-    off_main_thread(move || service.reset_demo_data()).await
 }

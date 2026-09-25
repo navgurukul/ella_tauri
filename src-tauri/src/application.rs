@@ -10,8 +10,9 @@ use uuid::Uuid;
 use crate::{
     domain::{
         find_character, find_chore, topics, topics_for_age, AppSnapshot, ChoreContext, LedgerTurn,
-        AudioPayload, LedgerView, Learner, Message, Session, SessionSummary, SpeechStreamEvent,
-        SpokenLine, TurnSignal, WinCondition, Speaker, Topic, TurnResult, TutorRequest, WordSpan,
+        AudioPayload, LedgerView, Learner, LearnerProfile, LearnerProgress, Message, Session,
+        SessionSummary, SpeechStreamEvent, SpokenLine, TurnSignal, WinCondition, Speaker, Topic,
+        TurnResult, TutorRequest, WordSpan,
     },
     error::{EllaError, EllaResult},
     infrastructure::{
@@ -95,8 +96,21 @@ impl AppService {
 
     /// Called from the app's exit event: Tauri never drops managed state, so
     /// this is the only point at which the engine's processes and GPU buffers
-    /// can be released.
+    /// can be released, and the only point at which the whole of the
+    /// database's write-ahead log is folded into `ella.sqlite3`.
+    ///
+    /// The checkpoint goes first because it is quick and the engine can take
+    /// seconds to let go. Both are safe to run twice, which they are on every
+    /// ordinary quit: the exit event calls this, and then Tauri's resource
+    /// cleanup drops `EngineShutdownGuard`, which calls it again. The Windows
+    /// updater skips the exit event, so there only the guard calls it.
     pub fn shutdown(&self) {
+        if let Err(error) = self.database.checkpoint() {
+            // Nothing is lost: every commit is already durable in the log.
+            // The next launch reads it back from there, and a later
+            // checkpoint (at the latest, the next quit) folds it in.
+            eprintln!("[database] shutdown: could not fold the write-ahead log into ella.sqlite3: {error}");
+        }
         self.engine.shutdown();
     }
 
@@ -116,28 +130,34 @@ impl AppService {
             .clone()
     }
 
+    /// Everything the window needs to draw. Signed out, the only learner
+    /// data in it is `saved_learner`, the name and colour the welcome-back
+    /// step greets them with; their talks and figures wait for "Log in".
     pub fn bootstrap(&self) -> EllaResult<AppSnapshot> {
-        let learner = self.database.learner()?;
+        let saved = self.database.learner()?;
+        let saved_learner = saved.as_ref().map(|(learner, _)| LearnerProfile::from(learner));
+        let learner = saved.and_then(|(learner, signed_in)| signed_in.then_some(learner));
+        let (recent_sessions, progress) = if learner.is_some() {
+            (self.database.recent_sessions(5)?, self.database.progress()?)
+        } else {
+            (Vec::new(), LearnerProgress::default())
+        };
         Ok(AppSnapshot {
             topics: topics_for_age(learner.as_ref().and_then(|learner| learner.age)),
             learner,
-            recent_sessions: self.database.recent_sessions(5)?,
+            saved_learner,
+            recent_sessions,
+            progress,
             engine_status: self.engine.status(),
         })
     }
 
+    /// The onboarding name step, which also signs the learner in. There is
+    /// one learner per laptop, so this always saves that learner: signed in,
+    /// it corrects them; signed out, "Let's start" is the same person
+    /// onboarding again, and their talks and progress stay theirs.
     pub fn save_learner(&self, name: &str, age: Option<u8>) -> EllaResult<Learner> {
-        let clean = name.trim();
-        if clean.chars().count() < 2 {
-            return Err(EllaError::Validation(
-                "Please enter at least two letters.".into(),
-            ));
-        }
-        if clean.chars().count() > 40 {
-            return Err(EllaError::Validation(
-                "Please use a name shorter than 40 letters.".into(),
-            ));
-        }
+        let clean = clean_name(name)?;
         if let Some(age) = age {
             if !(3..=120).contains(&age) {
                 return Err(EllaError::Validation(
@@ -145,20 +165,40 @@ impl AppService {
                 ));
             }
         }
-        let existing = self.database.learner()?;
-        let created_at = existing
-            .as_ref()
-            .map(|learner| learner.created_at.clone())
-            .unwrap_or_else(now);
-        let learner = Learner {
-            name: clean.into(),
-            // Onboarding can be re-run without the age step; keep what we know.
-            age: age.or_else(|| existing.as_ref().and_then(|learner| learner.age)),
-            level_name: "Morning Meadow".into(),
-            created_at,
-        };
-        self.database.save_learner(&learner)?;
-        Ok(learner)
+        // Onboarding can be re-run without the age step; the database keeps
+        // the age it already knows when none is given.
+        self.database.save_learner(clean, age, "Morning Meadow", &now())
+    }
+
+    /// "Log in" on the welcome screen: the learner saved on this laptop
+    /// comes back to everything they had. There is nobody else it could be,
+    /// so there is no name to type.
+    pub fn log_in(&self) -> EllaResult<Learner> {
+        self.database
+            .sign_in()?
+            .ok_or_else(|| EllaError::Conflict("Tell Ella your name first.".into()))
+    }
+
+    /// Sign out and nothing more: the learner, their talks and their progress
+    /// stay on this laptop for the next time they log in.
+    pub fn log_out(&self) -> EllaResult<AppSnapshot> {
+        self.database.sign_out()?;
+        self.bootstrap()
+    }
+
+    pub fn save_avatar_color(&self, color: &str) -> EllaResult<Learner> {
+        let signed_out = || EllaError::Conflict("Tell Ella your name first.".into());
+        if self.database.signed_in_learner()?.is_none() {
+            return Err(signed_out());
+        }
+        if !is_hex_color(color) {
+            return Err(EllaError::Validation(
+                "Please choose one of the colours on the profile screen.".into(),
+            ));
+        }
+        // `None` here means a log out landed in between; the colour was not
+        // stored, and saying so is the same as if it had come first.
+        self.database.save_avatar_color(color)?.ok_or_else(signed_out)
     }
 
     /// Say Ella's opening line aloud.
@@ -222,7 +262,7 @@ impl AppService {
 
     pub fn start_session(&self, topic_id: &str) -> EllaResult<Session> {
         let topic = find_topic(topic_id)?;
-        let learner = self.database.learner()?.ok_or_else(|| {
+        let learner = self.database.signed_in_learner()?.ok_or_else(|| {
             EllaError::Conflict("Tell Ella your name before starting a conversation.".into())
         })?;
         let started_at = now();
@@ -258,7 +298,7 @@ impl AppService {
                 chore.character_id
             ))
         })?;
-        let learner = self.database.learner()?.ok_or_else(|| {
+        let learner = self.database.signed_in_learner()?.ok_or_else(|| {
             EllaError::Conflict("Tell Ella your name before starting a conversation.".into())
         })?;
 
@@ -727,7 +767,7 @@ impl AppService {
                 "This conversation has already ended.".into(),
             ));
         }
-        let learner = self.database.learner()?.ok_or_else(|| {
+        let learner = self.database.signed_in_learner()?.ok_or_else(|| {
             EllaError::Conflict("Tell Ella your name before starting a conversation.".into())
         })?;
         let turn = session
@@ -975,16 +1015,25 @@ impl AppService {
             .iter()
             .filter(|message| message.speaker == Speaker::Learner)
             .count() as u32;
-        let conversations = self.database.completed_conversations()?;
         let headline = if turns >= 3 {
             "You kept that conversation going".into()
         } else {
             "Every answer counts".into()
         };
-        let encouragement = format!(
-            "That is {conversations} conversation{} finished. Come back and talk to Ella again.",
-            if conversations == 1 { "" } else { "s" }
-        );
+        // A talk the learner never answered in is not one they finished, so
+        // it does not add to the count, and quoting the unchanged number back
+        // at them would read as though it had.
+        let encouragement = if turns == 0 {
+            "Say a few words next time and it counts. Come back and talk to Ella again.".into()
+        } else {
+            // The same figure the profile shows: the learner's finished talks
+            // over their whole history, this one included.
+            let conversations = self.database.progress()?.talks_finished;
+            format!(
+                "That is {conversations} conversation{} finished. Come back and talk to Ella again.",
+                if conversations == 1 { "" } else { "s" }
+            )
+        };
         Ok(SessionSummary {
             session_id: session.id,
             topic_label: session.topic_label,
@@ -993,11 +1042,31 @@ impl AppService {
             encouragement,
         })
     }
+}
 
-    pub fn reset_demo_data(&self) -> EllaResult<AppSnapshot> {
-        self.database.reset()?;
-        self.bootstrap()
+/// What the name step accepts: two to forty characters once the spaces
+/// around them are trimmed, as it always has.
+fn clean_name(name: &str) -> EllaResult<&str> {
+    let clean = name.trim();
+    if clean.chars().count() < 2 {
+        return Err(EllaError::Validation(
+            "Please enter at least two letters.".into(),
+        ));
     }
+    if clean.chars().count() > 40 {
+        return Err(EllaError::Validation(
+            "Please use a name shorter than 40 letters.".into(),
+        ));
+    }
+    Ok(clean)
+}
+
+/// `#RRGGBB` and nothing else: the window draws the avatar with the stored
+/// value as a CSS colour, so anything looser would be handed straight to it.
+fn is_hex_color(color: &str) -> bool {
+    color.len() == 7
+        && color.starts_with('#')
+        && color[1..].chars().all(|character| character.is_ascii_hexdigit())
 }
 
 /// Transcribe one streamed chunk. Runs on a background thread during
@@ -1233,6 +1302,320 @@ mod tests {
         assert!(service
             .send_text_turn(&session.id, "One more thing")
             .is_err());
+    }
+
+    /// One answered talk, finished. Returns the session id.
+    fn answered_talk(service: &AppService, topic_id: &str) -> String {
+        let session = service.start_session(topic_id).unwrap();
+        service
+            .send_text_turn(&session.id, "I ate poha this morning")
+            .unwrap();
+        service.complete_session(&session.id).unwrap();
+        session.id
+    }
+
+    fn profile(name: &str, avatar_color: Option<&str>) -> Option<LearnerProfile> {
+        Some(LearnerProfile {
+            name: name.into(),
+            avatar_color: avatar_color.map(Into::into),
+        })
+    }
+
+    #[test]
+    fn log_out_keeps_everything_and_log_in_brings_it_back() {
+        let service = service();
+        service.save_learner("Asha", Some(14)).unwrap();
+        let asha = service.save_avatar_color("#FF8800").unwrap();
+        let talk = answered_talk(&service, "street-food");
+        let chore = service.start_chore("market-cloth-price").unwrap();
+        let signed_in = service.bootstrap().unwrap();
+        assert_eq!(signed_in.learner.as_ref(), Some(&asha));
+        assert_eq!(signed_in.saved_learner, profile("Asha", Some("#FF8800")));
+        assert_eq!(signed_in.recent_sessions.len(), 2);
+        assert_eq!(signed_in.progress.talks_finished, 1);
+
+        let signed_out = service.log_out().unwrap();
+        assert_eq!(signed_out.learner, None);
+        assert!(signed_out.recent_sessions.is_empty());
+        assert_eq!(signed_out.progress, LearnerProgress::default());
+        assert_eq!(
+            signed_out.saved_learner,
+            profile("Asha", Some("#FF8800")),
+            "the welcome-back step still knows who to greet"
+        );
+        assert_eq!(signed_out.topics, topics_for_age(None));
+        assert_eq!(service.bootstrap().unwrap(), signed_out, "and so does the next launch");
+        // Logging out deleted nothing.
+        assert_eq!(service.get_session(&talk).unwrap().messages.len(), 3);
+        assert_eq!(service.get_session(&chore.id).unwrap().messages.len(), 1);
+
+        // Signed out, nothing can be said or changed on the learner's behalf.
+        let refused = service.start_session("street-food").unwrap_err();
+        assert!(matches!(refused, EllaError::Conflict(_)));
+        assert_eq!(
+            refused.to_string(),
+            "Tell Ella your name before starting a conversation."
+        );
+        assert!(matches!(
+            service.start_chore("market-cloth-price"),
+            Err(EllaError::Conflict(_))
+        ));
+        assert!(matches!(
+            service.send_text_turn(&chore.id, "Four hundred?"),
+            Err(EllaError::Conflict(_))
+        ));
+        assert_eq!(
+            service.save_avatar_color("#000000").unwrap_err().to_string(),
+            "Tell Ella your name first."
+        );
+        assert_eq!(service.get_session(&chore.id).unwrap().messages.len(), 1);
+
+        assert_eq!(service.log_in().unwrap(), asha, "the same learner, unchanged");
+        assert_eq!(service.bootstrap().unwrap(), signed_in, "with everything they had");
+        // Logging in twice is harmless.
+        assert_eq!(service.log_in().unwrap(), asha);
+        assert!(service.send_text_turn(&chore.id, "Four hundred?").is_ok());
+    }
+
+    #[test]
+    fn lets_start_after_a_log_out_is_the_same_learner_again() {
+        let service = service();
+        let asha = service.save_learner("Asha", Some(14)).unwrap();
+        service.save_avatar_color("#FF8800").unwrap();
+        answered_talk(&service, "street-food");
+        answered_talk(&service, "booking-a-cab");
+        let before = service.bootstrap().unwrap();
+        service.log_out().unwrap();
+
+        // The five onboarding steps again, with a longer name this time.
+        let again = service.save_learner("  Asha Rao ", None).unwrap();
+        assert_eq!(again.name, "Asha Rao");
+        assert_eq!(again.age, Some(14), "no age given keeps the one we know");
+        assert_eq!(again.created_at, asha.created_at);
+        assert_eq!(again.avatar_color.as_deref(), Some("#FF8800"));
+        let snapshot = service.bootstrap().unwrap();
+        assert_eq!(snapshot.learner, Some(again.clone()), "signed straight in");
+        assert_eq!(snapshot.saved_learner, profile("Asha Rao", Some("#FF8800")));
+        assert_eq!(snapshot.recent_sessions, before.recent_sessions);
+        assert_eq!(snapshot.progress, before.progress);
+        assert_eq!(snapshot.progress.talks_finished, 2);
+
+        // A new age is taken, and the topics follow it.
+        let younger = service.save_learner("Asha Rao", Some(8)).unwrap();
+        assert_eq!(younger.age, Some(8));
+        assert_eq!(service.bootstrap().unwrap().topics, topics_for_age(Some(8)));
+    }
+
+    #[test]
+    fn log_in_on_a_laptop_with_nobody_saved_asks_for_a_name() {
+        let service = service();
+        let fresh = service.bootstrap().unwrap();
+        assert_eq!((fresh.learner, fresh.saved_learner), (None, None));
+
+        let refused = service.log_in().unwrap_err();
+        assert!(matches!(refused, EllaError::Conflict(_)));
+        assert_eq!(refused.to_string(), "Tell Ella your name first.");
+        let after = service.bootstrap().unwrap();
+        assert_eq!((after.learner, after.saved_learner), (None, None), "nobody made up");
+
+        // Log out with nobody saved is harmless too.
+        assert_eq!(service.log_out().unwrap().saved_learner, None);
+
+        // The returning-mode name step saves them and goes straight in.
+        let kabir = service.save_learner("Kabir", None).unwrap();
+        assert_eq!(service.bootstrap().unwrap().learner, Some(kabir));
+    }
+
+    #[test]
+    fn the_name_step_checks_what_it_is_given() {
+        let service = service();
+        for (name, age) in [
+            (" A ", Some(14)),
+            (&*"a".repeat(41), Some(14)),
+            ("Asha", Some(2)),
+            ("Asha", Some(121)),
+        ] {
+            assert!(
+                matches!(service.save_learner(name, age), Err(EllaError::Validation(_))),
+                "{name:?} aged {age:?} must be refused"
+            );
+        }
+        assert_eq!(service.bootstrap().unwrap().saved_learner, None);
+        assert_eq!(service.save_learner(&"a".repeat(40), Some(3)).unwrap().age, Some(3));
+        assert_eq!(service.save_learner("Al", Some(120)).unwrap().name, "Al");
+    }
+
+    #[test]
+    fn progress_and_the_summary_count_every_finished_talk() {
+        let service = service();
+        service.save_learner("Kabir", Some(16)).unwrap();
+        for talk in 1..=7 {
+            let session = service.start_session("street-food").unwrap();
+            service
+                .send_text_turn(&session.id, "I love dosa because it is crispy")
+                .unwrap();
+            let summary = service.complete_session(&session.id).unwrap();
+            let expected = format!(
+                "That is {talk} conversation{} finished. Come back and talk to Ella again.",
+                if talk == 1 { "" } else { "s" }
+            );
+            assert_eq!(summary.encouragement, expected);
+        }
+        let snapshot = service.bootstrap().unwrap();
+        assert_eq!(snapshot.recent_sessions.len(), 5, "the home list stays short");
+        assert_eq!(snapshot.progress.talks_finished, 7);
+        assert_eq!(snapshot.progress.answers, 7);
+        // Midnight-proof: however the talks fell across days, each is counted
+        // on exactly one of them.
+        assert_eq!(
+            snapshot.progress.days.iter().map(|day| day.talks).sum::<u32>(),
+            7
+        );
+
+        // A talk with no answers finishes nothing and says so.
+        let silent = service.start_session("restaurant-order").unwrap();
+        let summary = service.complete_session(&silent.id).unwrap();
+        assert_eq!(summary.turns, 0);
+        assert_eq!(
+            summary.encouragement,
+            "Say a few words next time and it counts. Come back and talk to Ella again."
+        );
+        let after = service.bootstrap().unwrap().progress;
+        assert_eq!(after, snapshot.progress);
+        assert!(!after.finished_topics.contains(&"restaurant-order".to_string()));
+    }
+
+    #[test]
+    fn the_avatar_colour_is_checked_and_kept_with_the_learner() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ella.sqlite3");
+        let service = AppService::new(Database::open(&path).unwrap(), Box::new(DemoEngine));
+
+        let signed_out = service.save_avatar_color("#7C5CFF").unwrap_err();
+        assert!(matches!(signed_out, EllaError::Conflict(_)));
+        assert_eq!(signed_out.to_string(), "Tell Ella your name first.");
+        // Signed out comes first, even for a colour that would be refused.
+        assert!(matches!(service.save_avatar_color("red"), Err(EllaError::Conflict(_))));
+
+        let asha = service.save_learner("Asha", Some(14)).unwrap();
+        assert_eq!(asha.avatar_color, None);
+        for bad in [
+            "7C5CFF", "#7C5CF", "#7C5CFFF", "#7C5CFG", "red", "", "#é1234", " #7C5CFF",
+        ] {
+            let refused = service.save_avatar_color(bad).unwrap_err();
+            assert!(matches!(refused, EllaError::Validation(_)), "{bad:?} must be refused");
+            assert_eq!(
+                refused.to_string(),
+                "Please choose one of the colours on the profile screen."
+            );
+        }
+        assert_eq!(service.bootstrap().unwrap().learner.unwrap().avatar_color, None);
+        let saved = service.save_avatar_color("#7c5CfF").unwrap();
+        assert_eq!(
+            saved,
+            Learner {
+                avatar_color: Some("#7c5CfF".into()),
+                ..asha
+            }
+        );
+        drop(service);
+
+        // The next launch, from the same file.
+        let service = AppService::new(Database::open(&path).unwrap(), Box::new(DemoEngine));
+        let snapshot = service.bootstrap().unwrap();
+        assert_eq!(snapshot.learner, Some(saved.clone()));
+        assert_eq!(snapshot.saved_learner, profile("Asha", Some("#7c5CfF")));
+        service.log_out().unwrap();
+        drop(service);
+
+        // Logged out, relaunched and logged back in, the colour is still theirs.
+        let service = AppService::new(Database::open(&path).unwrap(), Box::new(DemoEngine));
+        assert_eq!(
+            service.bootstrap().unwrap().saved_learner,
+            profile("Asha", Some("#7c5CfF"))
+        );
+        assert_eq!(service.log_in().unwrap(), saved);
+    }
+
+    #[test]
+    fn the_snapshot_uses_the_field_names_the_window_reads() {
+        // The TypeScript types mirror these names exactly; a rename here
+        // would leave the window reading `undefined` without a compile error.
+        fn keys(value: &serde_json::Value) -> Vec<&str> {
+            let mut keys = value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            keys.sort();
+            keys
+        }
+        let snapshot_keys = vec![
+            "engine_status",
+            "learner",
+            "progress",
+            "recent_sessions",
+            "saved_learner",
+            "topics",
+        ];
+        let service = service();
+        let fresh = serde_json::to_value(service.bootstrap().unwrap()).unwrap();
+        assert_eq!(keys(&fresh), snapshot_keys, "no `learners` any more");
+        assert_eq!(fresh["learner"], serde_json::Value::Null);
+        assert_eq!(fresh["saved_learner"], serde_json::Value::Null);
+        assert_eq!(
+            fresh["progress"],
+            serde_json::json!({ "days": [], "talks_finished": 0, "answers": 0, "finished_topics": [] })
+        );
+
+        service.save_learner("Asha", Some(14)).unwrap();
+        service.save_avatar_color("#7C5CFF").unwrap();
+        answered_talk(&service, "street-food");
+        let snapshot = serde_json::to_value(service.bootstrap().unwrap()).unwrap();
+        assert_eq!(keys(&snapshot), snapshot_keys);
+        assert_eq!(
+            keys(&snapshot["learner"]),
+            vec!["age", "avatar_color", "created_at", "level_name", "name"],
+            "no `id`: there is only ever one learner"
+        );
+        assert_eq!(snapshot["learner"]["name"], "Asha");
+        assert_eq!(snapshot["learner"]["age"], 14);
+        assert_eq!(snapshot["learner"]["avatar_color"], "#7C5CFF");
+        assert_eq!(
+            snapshot["saved_learner"],
+            serde_json::json!({ "name": "Asha", "avatar_color": "#7C5CFF" })
+        );
+        let day = &snapshot["progress"]["days"][0];
+        assert_eq!(day["day"].as_str().unwrap().len(), "YYYY-MM-DD".len());
+        assert_eq!(day["talks"], 1);
+        assert_eq!(day["answers"], 1);
+        assert_eq!(snapshot["progress"]["talks_finished"], 1);
+        assert_eq!(snapshot["progress"]["answers"], 1);
+        assert_eq!(snapshot["progress"]["finished_topics"], serde_json::json!(["street-food"]));
+        assert!(snapshot["recent_sessions"].is_array());
+        assert!(snapshot["topics"].is_array());
+        assert!(snapshot["engine_status"].is_object());
+
+        // Signed out: the saved learner, and nothing of their history.
+        let signed_out = serde_json::to_value(service.log_out().unwrap()).unwrap();
+        assert_eq!(keys(&signed_out), snapshot_keys);
+        assert_eq!(signed_out["learner"], serde_json::Value::Null);
+        assert_eq!(signed_out["saved_learner"], snapshot["saved_learner"]);
+        assert_eq!(signed_out["recent_sessions"], serde_json::json!([]));
+        assert_eq!(signed_out["progress"], fresh["progress"]);
+
+        let learner = serde_json::to_value(service.log_in().unwrap()).unwrap();
+        assert_eq!(learner, snapshot["learner"]);
+    }
+
+    #[test]
+    fn shutdown_can_run_twice() {
+        let service = service();
+        service.save_learner("Asha", Some(14)).unwrap();
+        service.shutdown();
+        service.shutdown();
+        assert_eq!(service.bootstrap().unwrap().learner.unwrap().name, "Asha");
     }
 
     #[test]

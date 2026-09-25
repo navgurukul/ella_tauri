@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { LoaderCircle } from "lucide-react";
-import { EllaMascot, VoiceMeter, type EllaState } from "./EllaMascot";
+import { EllaMascot, LearnerAvatar, VoiceMeter, type EllaState } from "./EllaMascot";
 import { MicGlyph } from "./HomeScreen";
+import { avatarColorFor } from "../lib/avatar";
 import { createVoiceCapture, type VoiceCaptureResult } from "../lib/speech";
+import type { LearnerProfile } from "../types";
 
-export type ObStep = "welcome" | "name" | "age" | "miccheck" | "placement";
+/** `welcome-back` is Log in's own step, off to the side of the five in order. */
+export type ObStep = "welcome" | "welcome-back" | "name" | "age" | "miccheck" | "placement";
 
 const ORDER: ObStep[] = ["welcome", "name", "age", "miccheck", "placement"];
 /** The dots track the four steps after the welcome screen. */
@@ -15,14 +18,20 @@ type MicState = "idle" | "requesting" | "listening" | "done" | "error";
 export function OnboardingFlow({
   busy,
   error,
+  savedLearner,
   onSaveLearner,
+  onLogIn,
   onPlacement,
   onDone,
 }: {
   busy: boolean;
   error: string | null;
+  /** The learner this laptop keeps, or null while nobody has been saved. */
+  savedLearner: LearnerProfile | null;
   /** Persists the learner; resolves false when the backend rejected the name. */
   onSaveLearner: (name: string, age: number | null) => Promise<boolean>;
+  /** Signs the saved learner back in; resolves false when that was refused. */
+  onLogIn: () => Promise<boolean>;
   /** Runs the recorded first answer as a real conversation turn. */
   onPlacement: (capture: VoiceCaptureResult) => Promise<void>;
   onDone: () => void;
@@ -49,6 +58,10 @@ export function OnboardingFlow({
     if (await onSaveLearner(name, null)) onDone();
   }
 
+  async function comeBack() {
+    if (await onLogIn()) onDone();
+  }
+
   /**
    * The learner is saved here rather than at the end, because the placement
    * talk that follows is a real conversation and the backend will not start a
@@ -67,26 +80,41 @@ export function OnboardingFlow({
             next();
           }}
           onLogIn={() => {
+            // A laptop keeps one learner, so once someone is saved, Log in can
+            // only be them: Ella greets them and there is nothing to type. On
+            // a laptop nobody has used yet it asks for a name and goes in.
+            if (savedLearner) {
+              setStep("welcome-back");
+              return;
+            }
             setReturning(true);
             setStep("name");
           }}
         />
       )}
 
+      {step === "welcome-back" && savedLearner && (
+        <>
+          <BackButton onClick={() => setStep("welcome")} />
+          <CornerElla />
+          <WelcomeBackStep learner={savedLearner} busy={busy} onLogIn={() => void comeBack()} />
+        </>
+      )}
+
       {isForm && (
         <>
-          <button className="ob__back" onClick={back} aria-label="Go back">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M15 5l-7 7 7 7" />
-            </svg>
-          </button>
+          <BackButton onClick={back} />
           <ol className="ob__dots" aria-label={`Step ${index} of ${DOT_COUNT}`}>
             {Array.from({ length: DOT_COUNT }, (_, dot) => (
               <li key={dot} className={dot === index - 1 ? "is-current" : dot < index - 1 ? "is-done" : ""} />
             ))}
           </ol>
-          {step !== "miccheck" && <EllaMascot className="ella--corner-ob" scale={0.7} rotate={-5} />}
         </>
+      )}
+      {/* The age step has its own, bigger Ella; the other two keep her in the
+          corner, where she peeks up to say hello once there is a name. */}
+      {(step === "name" || step === "miccheck") && (
+        <CornerElla greeting={step === "name" && name.trim() ? `Hi, ${greetName}!` : null} />
       )}
 
       {step === "name" && (
@@ -122,11 +150,53 @@ export function OnboardingFlow({
   );
 }
 
+/**
+ * The mic check again, opened from the profile's settings rather than as a
+ * step of onboarding: same check, but it leads back to the profile.
+ */
+export function MicRecheck({ onExit }: { onExit: () => void }) {
+  return (
+    <div className="ob" data-step="miccheck">
+      <BackButton onClick={onExit} />
+      <CornerElla />
+      <MicCheckStep onNext={onExit} doneLabel="Back to my profile" skipLabel="Not now" />
+    </div>
+  );
+}
+
+function BackButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button className="ob__back" onClick={onClick} aria-label="Go back">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M15 5l-7 7 7 7" />
+      </svg>
+    </button>
+  );
+}
+
+function CornerElla({ greeting = null }: { greeting?: string | null }) {
+  return (
+    <>
+      {greeting && (
+        <p className="ob-bubble" aria-hidden="true">
+          {greeting}
+        </p>
+      )}
+      <EllaMascot
+        variant="corner"
+        className={`ella--corner-ob ${greeting ? "is-peeking" : ""}`.trim()}
+        pokeable
+        decorative
+      />
+    </>
+  );
+}
+
 function Welcome({ onStart, onLogIn }: { onStart: () => void; onLogIn: () => void }) {
   return (
     <div className="ob-welcome" data-screen="onboarding-welcome">
       <h1 className="display ob-welcome__title">Hi buddy!</h1>
-      <EllaMascot className="ella--ob-hero" variant="hero" />
+      <EllaMascot className="ella--ob-welcome" variant="welcome" pokeable />
       <div className="ob-welcome__foot">
         <button className="btn btn--light ob-welcome__cta" onClick={onStart}>
           Let&rsquo;s start
@@ -165,29 +235,61 @@ function NameStep({
         if (ready) onNext();
       }}
     >
-      <h1 className="display ob-step__title">
-        <label htmlFor="ob-name">
-          {returning ? "Welcome back! What is your name?" : "What should Ella call you?"}
-        </label>
-      </h1>
-      <input
-        id="ob-name"
-        className="ob-step__field"
-        value={value}
-        maxLength={40}
-        autoFocus
-        placeholder="Your name"
-        onChange={(event) => onChange(event.target.value)}
-      />
-      <p className="ob-step__hint">
-        {returning
-          ? "Use the same name as before and Ella picks up where you left off."
-          : "A nickname works too. This stays between you two."}
-      </p>
-      <button className="btn btn--violet ob-step__cta" disabled={!ready}>
-        {returning ? "Take me in" : "Continue"}
-      </button>
+      <div className="ob-step__column">
+        <h1 className="display ob-step__title">
+          <label htmlFor="ob-name">
+            {returning ? "Welcome back! What is your name?" : "What should Ella call you?"}
+          </label>
+        </h1>
+        <input
+          id="ob-name"
+          className="ob-step__field"
+          value={value}
+          maxLength={40}
+          autoFocus
+          placeholder="Your name"
+          onChange={(event) => onChange(event.target.value)}
+        />
+        <p className="ob-step__hint">
+          {returning
+            ? "Use the same name as before and Ella picks up where you left off."
+            : "A nickname works too. This stays between you two."}
+        </p>
+        <button className="btn btn--violet btn--block ob-step__cta" disabled={!ready}>
+          {returning ? "Take me in" : "Continue"}
+        </button>
+        <p className="ob-step__enter">or press Enter</p>
+      </div>
     </form>
+  );
+}
+
+/**
+ * Log in on a laptop that already knows its learner. It only ever keeps one,
+ * so there is no name to type or pick: Ella greets them in their own colour,
+ * and one press takes them back to everything they left.
+ */
+function WelcomeBackStep({
+  learner,
+  busy,
+  onLogIn,
+}: {
+  learner: LearnerProfile;
+  busy: boolean;
+  onLogIn: () => void;
+}) {
+  return (
+    <div className="ob-step" data-screen="onboarding-welcome-back">
+      <div className="ob-step__column">
+        <LearnerAvatar color={avatarColorFor(learner)} size="lg" />
+        <h1 className="display ob-step__title ob-step__title--greeting">Welcome back, {learner.name}!</h1>
+        <p className="ob-step__sub">Your talks and your streak are just as you left them.</p>
+        {/* Focused, so Enter takes them in as it does on the other steps. */}
+        <button className="btn btn--violet btn--block ob-step__cta" disabled={busy} autoFocus onClick={onLogIn}>
+          Take me in
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -207,40 +309,54 @@ function AgeStep({
   const parsed = Number(value);
   const ready = value !== "" && parsed >= 3 && parsed <= 120 && !busy;
   return (
-    <form
-      className="ob-step"
-      data-screen="onboarding-age"
-      onSubmit={(event) => {
-        event.preventDefault();
-        if (ready) onNext();
-      }}
-    >
-      <h1 className="display ob-step__title">
-        <label htmlFor="ob-age">And how old are you, {greetName}?</label>
-      </h1>
-      <p className="ob-step__sub">Ella picks topics that fit your age.</p>
-      <input
-        id="ob-age"
-        className="ob-step__field ob-step__field--short"
-        value={value}
-        inputMode="numeric"
-        maxLength={3}
-        autoFocus
-        placeholder="Age"
-        onChange={(event) => onChange(event.target.value.replace(/[^0-9]/g, ""))}
+    <>
+      {/* She springs up from the corner as soon as there is an age to react to. */}
+      <EllaMascot
+        variant="age"
+        className={`ella--ob-age ${value ? "is-up" : ""}`.trim()}
+        entrance={false}
+        pokeable
+        decorative
       />
-      <button className="btn btn--violet ob-step__cta" disabled={!ready}>
-        Continue
-      </button>
-    </form>
+      <form
+        className="ob-step ob-step--top"
+        data-screen="onboarding-age"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (ready) onNext();
+        }}
+      >
+        <div className="ob-step__column">
+          <h1 className="display ob-step__title">
+            <label htmlFor="ob-age">And how old are you, {greetName}?</label>
+          </h1>
+          <p className="ob-step__sub">Ella picks topics that fit your age.</p>
+          <div className="ob-step__inline">
+            <input
+              id="ob-age"
+              className="ob-step__field ob-step__field--short"
+              value={value}
+              inputMode="numeric"
+              maxLength={3}
+              autoFocus
+              placeholder="Age"
+              onChange={(event) => onChange(event.target.value.replace(/[^0-9]/g, ""))}
+            />
+            <button className="btn btn--violet ob-step__cta" disabled={!ready}>
+              Continue
+            </button>
+          </div>
+        </div>
+      </form>
+    </>
   );
 }
 
 const MIC_HINT: Record<MicState, string> = {
-  idle: "Tap the mic and say hello",
+  idle: "Click, then say anything",
   requesting: "Opening your microphone…",
-  listening: "Listening… say anything",
-  done: "Perfect! Ella can hear you.",
+  listening: "Listening…",
+  done: "All good! Ella hears you.",
   error: "Let’s try that once more",
 };
 
@@ -248,10 +364,17 @@ const MIC_HINT: Record<MicState, string> = {
  * A real check, not a mimed one: it opens the microphone and watches the input
  * level, so "Ella hears you" only appears once she actually has.
  */
-function MicCheckStep({ onNext }: { onNext: () => void }) {
+function MicCheckStep({
+  onNext,
+  doneLabel = "Start my first talk",
+  skipLabel = "Skip this check",
+}: {
+  onNext: () => void;
+  doneLabel?: string;
+  skipLabel?: string;
+}) {
   const [mic, setMic] = useState<MicState>("idle");
   const [level, setLevel] = useState(0);
-  const [heardSignal, setHeardSignal] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
   const voice = useRef(createVoiceCapture());
   const heard = useRef(false);
@@ -278,7 +401,7 @@ function MicCheckStep({ onNext }: { onNext: () => void }) {
       setMic("done");
       return;
     }
-    setFailed("I didn’t hear anything. Check your input and tap the mic to try again.");
+    setFailed("I didn’t hear anything. Check your input and click the mic to try again.");
     setMic("error");
   }
 
@@ -289,7 +412,6 @@ function MicCheckStep({ onNext }: { onNext: () => void }) {
       return;
     }
     setFailed(null);
-    setHeardSignal(false);
     heard.current = false;
     active.current = true;
     setMic("requesting");
@@ -300,7 +422,6 @@ function MicCheckStep({ onNext }: { onNext: () => void }) {
           setLevel(value);
           if (value > 0.06 && !heard.current) {
             heard.current = true;
-            setHeardSignal(true);
             autoFinishTimer.current = window.setTimeout(() => void finishCheck(true), 1100);
           }
         },
@@ -316,28 +437,15 @@ function MicCheckStep({ onNext }: { onNext: () => void }) {
     }
   }
 
-  const ellaState: EllaState =
-    mic === "requesting" ? "thinking" : mic === "listening" ? "listening" : "resting";
-  const hint = mic === "listening" && heardSignal ? "I hear you, that sounds clear!" : MIC_HINT[mic];
-
   return (
     <div className="ob-step" data-screen="onboarding-miccheck">
-      <h1 className="display ob-step__title">Quick mic check first.</h1>
-      <p className="ob-step__sub">
-        Ella wants to hear you loud and clear before your first talk. Say anything!
-      </p>
+      <div className="ob-step__column ob-step__column--wide">
+        <h1 className="display ob-step__title">Quick mic check first.</h1>
+        <p className="ob-step__sub">
+          Ella wants to hear you loud and clear before your first talk. Say anything!
+        </p>
 
-      <div className={`ob-mic-stage is-${mic}`} data-mic-state={mic}>
-        <EllaMascot
-          variant="celebration"
-          className="ella--mic-check"
-          scale={0.5}
-          state={ellaState}
-          reaction={mic === "done" ? "success" : mic === "error" ? "error" : null}
-          activity={level}
-          decorative
-        />
-        <div className="ob-mic-wrap">
+        <div className={`ob-mic-wrap is-${mic}`} data-mic-state={mic}>
           {mic === "listening" && (
             <>
               <span className="ob-mic-pulse" />
@@ -368,33 +476,39 @@ function MicCheckStep({ onNext }: { onNext: () => void }) {
                 <path d="M20 6L9 17L4 12" />
               </svg>
             ) : (
-              <MicGlyph size={34} />
+              <MicGlyph size={40} />
             )}
           </button>
         </div>
+
+        <p className="ob-mic-hint" aria-live="polite">
+          {MIC_HINT[mic]}
+        </p>
+        {mic === "listening" && <VoiceMeter level={level} />}
+        {failed && <p className="inline-error ob-mic-error" role="alert">{failed}</p>}
+
+        {mic === "done" ? (
+          <button className="btn btn--green ob-mic-cta" onClick={onNext}>
+            {doneLabel}
+          </button>
+        ) : (
+          <button className="link-button link-button--muted ob-step__skip" onClick={onNext}>
+            {skipLabel}
+          </button>
+        )}
       </div>
-
-      <p className="ob-mic-hint" aria-live="polite">
-        <span className="ob-mic-hint__dot" aria-hidden="true" />
-        {hint}
-      </p>
-      {mic === "listening" && <VoiceMeter level={level} />}
-      {failed && <p className="inline-error ob-mic-error" role="alert">{failed}</p>}
-
-      {mic === "done" ? (
-        <button className="btn btn--green ob-step__cta" onClick={onNext}>
-          Start my first talk
-        </button>
-      ) : (
-        <button className="link-button link-button--muted ob-step__skip" onClick={onNext}>
-          Skip this check
-        </button>
-      )}
     </div>
   );
 }
 
 type PlacementCall = "prompt" | "listening" | "working" | "done";
+
+const CALL_HINT: Record<PlacementCall, string> = {
+  prompt: "Click to speak",
+  listening: "Listening… click when you finish",
+  working: "Ella is listening back…",
+  done: "Talk finished",
+};
 
 /**
  * The first talk. Ella asks one open question and the recorded answer runs
@@ -442,14 +556,14 @@ function PlacementStep({
     }
   }
 
-  const ellaState: EllaState = call === "listening" ? "listening" : call === "working" ? "thinking" : "resting";
+  const ellaState: EllaState = call === "working" ? "thinking" : "resting";
 
   return (
     <div className="screen screen--talk ob-placement" data-screen="onboarding-placement">
       <header className="talk-head">
         <span className="pill pill--white">First talk</span>
         <button className="btn btn--quiet" onClick={onDone} disabled={busy || call === "working"}>
-          Skip for now
+          Skip
         </button>
       </header>
 
@@ -457,8 +571,8 @@ function PlacementStep({
         {call === "done" ? (
           <>
             <p className="talk-prompt">That was lovely, {greetName}!</p>
-            <button className="btn btn--green" onClick={onDone} disabled={busy}>
-              Start talking
+            <button className="btn btn--green ob-placement__go" onClick={onDone} disabled={busy}>
+              Let&rsquo;s go!
             </button>
           </>
         ) : call === "working" ? (
@@ -474,26 +588,39 @@ function PlacementStep({
 
       <div className="talk-dock">
         <EllaMascot variant="conversation" className="ella--stage-talk" state={ellaState}>
-          {call !== "done" && (
-            <div className="mic-stack">
-              <div className="mic-wrap">
-                {call === "listening" && (
-                  <>
-                    <span className="mic-pulse" />
-                    <span className="mic-pulse mic-pulse--delayed" />
-                  </>
-                )}
-                <button
-                  className={`mic ${call === "listening" ? "is-live" : ""}`}
-                  disabled={call === "working"}
-                  onClick={() => void tap()}
-                  aria-label={call === "listening" ? "Stop and finish" : "Start speaking"}
-                >
+          <div className="mic-stack">
+            <div className="mic-wrap">
+              {call === "listening" && (
+                <>
+                  <span className="mic-pulse" />
+                  <span className="mic-pulse mic-pulse--delayed" />
+                </>
+              )}
+              <button
+                className={`mic ${call === "done" ? "is-done" : ""}`.trim()}
+                disabled={call === "working" || call === "done"}
+                onClick={() => void tap()}
+                aria-label={
+                  call === "done"
+                    ? "First talk finished"
+                    : call === "listening"
+                      ? "Stop and finish"
+                      : "Start speaking"
+                }
+              >
+                {call === "done" ? (
+                  <svg className="mic__check" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M20 6L9 17L4 12" />
+                  </svg>
+                ) : call === "working" ? (
+                  <LoaderCircle className="spin" size={30} aria-hidden="true" />
+                ) : (
                   <MicGlyph />
-                </button>
-              </div>
+                )}
+              </button>
             </div>
-          )}
+            <p className="mic-hint mic-hint--soft">{CALL_HINT[call]}</p>
+          </div>
         </EllaMascot>
       </div>
     </div>

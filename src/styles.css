@@ -1,8 +1,8 @@
 /* ==========================================================================
-   Ella v5 — design system
-   Palette, type and geometry taken from the "Ella v5" design canvas.
-   Fonts are bundled locally: the Tauri CSP is `font-src 'self'`, so nothing
-   may be fetched from Google Fonts at runtime.
+   Ella Desktop — design system
+   Palette, type, geometry and motion taken from the "Ella Desktop" design
+   canvas. Fonts are bundled locally: the Tauri CSP is `font-src 'self'`, so
+   nothing may be fetched from Google Fonts at runtime.
    ========================================================================== */
 
 @font-face { font-family: "Synonym"; src: url("/assets/fonts/Synonym-Regular.otf") format("opentype");  font-weight: 400; font-display: block; }
@@ -40,44 +40,47 @@
 :root {
   --ink: #262626;
   --ink-72: rgba(38, 38, 38, 0.75);
+  --ink-70: rgba(38, 38, 38, 0.7);
   --ink-62: rgba(38, 38, 38, 0.62);
+  --ink-60: rgba(38, 38, 38, 0.6);
+  --ink-55: rgba(38, 38, 38, 0.55);
+  --ink-50: rgba(38, 38, 38, 0.5);
   --ink-48: rgba(38, 38, 38, 0.48);
   --ink-45: rgba(38, 38, 38, 0.45);
+  --ink-40: rgba(38, 38, 38, 0.4);
   --ink-18: rgba(38, 38, 38, 0.18);
+  --ink-16: rgba(38, 38, 38, 0.16);
   --ink-12: rgba(38, 38, 38, 0.12);
   --ink-10: rgba(38, 38, 38, 0.10);
+  --ink-08: rgba(38, 38, 38, 0.08);
   --ink-07: rgba(38, 38, 38, 0.07);
 
   --violet: #9347dd;
   --violet-deep: #7e3cbe;
   --lilac: #ede2fa;
   --pink: #ff3181;
+  --pink-deep: #d91f68;
   --green: #68b506;
-  --green-deep: #4e8804;
-  --green-path: #8dd67c;
-  --green-soft: #a4d36a;
+  --green-deep: #5aa004;
   --orange: #ff7a00;
-  --soil: #ffc38c;
-  --bark: rgba(154, 106, 68, 0.12);
+  --orange-soft: #fff1e3;
 
   --white: #ffffff;
   --canvas: #f3f9eb;
   --page: #e4f1d0;
-  --sand: #f5eadb;
 
   --display: "Baloo 2", "Trebuchet MS", system-ui, sans-serif;
   --body: "Synonym", system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 
-  --r-window: 28px;
-  --r-hero: 24px;
-  --r-card: 20px;
-  --r-tile: 16px;
+  --r-panel: 28px;
+  --r-card: 24px;
+  --r-tile: 20px;
   --r-nav: 14px;
   --r-pill: 999px;
 
   --sidebar-w: 236px;
-  --rail-w: 280px;
+  --rail-w: 300px;
 }
 
 * { box-sizing: border-box; }
@@ -129,10 +132,7 @@ button { font-family: inherit; }
   line-height: 1;
   letter-spacing: -0.005em;
 }
-.display--xl { font-size: 52px; line-height: 1.02; }
-.display--lg { font-size: 42px; }
 .display--md { font-size: 34px; }
-.display--sm { font-size: 22px; }
 
 .mono {
   font-family: var(--mono);
@@ -140,6 +140,18 @@ button { font-family: inherit; }
   font-weight: 700;
   letter-spacing: 0.08em;
 }
+
+/* The mono micro-heading over a card: TODAY'S TALK, THIS WEEK, YOUR MENTOR. */
+.eyebrow {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-45);
+}
+.eyebrow--violet { color: var(--violet-deep); }
 
 .underline-pink {
   font-style: normal;
@@ -152,7 +164,20 @@ button { font-family: inherit; }
 @keyframes waveBar { 0%, 100% { height: 8px; } 50% { height: 24px; } }
 @keyframes micPulse { 0% { transform: scale(1); opacity: 0.5; } 100% { transform: scale(1.65); opacity: 0; } }
 @keyframes dotBlink { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
-@keyframes floatWord { 0%, 100% { transform: translateY(0) rotate(-3deg); } 50% { transform: translateY(-10px) rotate(-3deg); } }
+
+/* Ella's moods and moves, as the design names them. */
+@keyframes bobIdle { 0%, 100% { transform: translateY(0) scale(1); } 50% { transform: translateY(-8px) scale(1.008); } }
+@keyframes partnerBreathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.025, 1.035); } }
+@keyframes leanListen { 0%, 100% { transform: translateY(-16px) rotate(-1deg); } 50% { transform: translateY(-22px) rotate(1deg); } }
+@keyframes bounceSpeak { 0%, 100% { transform: translateY(0) scale(1); } 30% { transform: translateY(-13px) scale(1.02, 0.985); } 60% { transform: translateY(2px) scale(0.99, 1.012); } }
+@keyframes thinkSway { 0%, 100% { transform: translateY(0) rotate(-1.4deg); } 50% { transform: translateY(-3px) rotate(1.4deg); } }
+@keyframes peekUp { 0% { transform: translate(0, 0) rotate(0deg); } 100% { transform: translate(-40px, -80px) rotate(-4deg); } }
+@keyframes pokeSquish { 0% { transform: translateY(0) scale(1, 1); } 25% { transform: translateY(6px) scale(1.06, 0.9); } 55% { transform: translateY(-16px) scale(0.95, 1.07); } 80% { transform: translateY(2px) scale(1.03, 0.97); } 100% { transform: translateY(0) scale(1, 1); } }
+@keyframes earTwitchL { 0%, 44%, 100% { transform: rotate(0deg) translateY(0); } 48% { transform: rotate(-17deg) translateY(-2px); } 52% { transform: rotate(4deg); } 56% { transform: rotate(-11deg); } 60% { transform: rotate(0deg); } 74% { transform: rotate(-8deg); } 78% { transform: rotate(2deg); } 82% { transform: rotate(0deg); } }
+@keyframes earTwitchR { 0%, 30%, 100% { transform: rotate(0deg) translateY(0); } 34% { transform: rotate(15deg) translateY(-2px); } 38% { transform: rotate(-5deg); } 42% { transform: rotate(10deg); } 47% { transform: rotate(0deg); } 88% { transform: rotate(7deg); } 92% { transform: rotate(-2deg); } 96% { transform: rotate(0deg); } }
+@keyframes earLoomL { 0%, 100% { transform: rotate(-6deg) scale(1.32) translateY(4px); } 18% { transform: rotate(-22deg) scale(1.4) translateY(2px); } 34% { transform: rotate(8deg) scale(1.36) translateY(5px); } 52% { transform: rotate(-15deg) scale(1.42) translateY(3px); } 70% { transform: rotate(5deg) scale(1.34) translateY(5px); } 86% { transform: rotate(-11deg) scale(1.38) translateY(3px); } }
+@keyframes earLoomR { 0%, 100% { transform: rotate(6deg) scale(1.3) translateY(4px); } 15% { transform: rotate(20deg) scale(1.38) translateY(2px); } 33% { transform: rotate(-7deg) scale(1.34) translateY(5px); } 50% { transform: rotate(16deg) scale(1.4) translateY(3px); } 68% { transform: rotate(-4deg) scale(1.32) translateY(5px); } 84% { transform: rotate(12deg) scale(1.36) translateY(3px); } }
+@keyframes fadeUp { 0% { opacity: 0; transform: translateY(4px); } 100% { opacity: 1; transform: translateY(0); } }
 
 /* ------------------------------------------------------------ controls ---- */
 
@@ -161,8 +186,8 @@ button { font-family: inherit; }
   align-items: center;
   justify-content: center;
   gap: 10px;
-  height: 52px;
-  padding: 0 28px;
+  height: 56px;
+  padding: 0 30px;
   border: none;
   border-radius: var(--r-pill);
   cursor: pointer;
@@ -174,27 +199,13 @@ button { font-family: inherit; }
 .btn:not(:disabled):active { transform: translateY(2px); }
 
 .btn--light { background: var(--white); color: var(--ink); }
-.btn--light:not(:disabled):hover { background: #ececec; }
+.btn--light:not(:disabled):hover { background: var(--canvas); }
 
 .btn--violet { background: var(--violet); color: var(--white); }
 .btn--violet:not(:disabled):hover { background: var(--violet-deep); }
 
-.btn--outline {
-  height: 38px;
-  padding: 0 18px;
-  background: transparent;
-  border: 1.5px solid var(--ink);
-  color: var(--ink);
-  font-size: 13.5px;
-}
-.btn--outline:not(:disabled):hover { background: var(--ink); color: var(--white); }
-
-.btn--ghost-light {
-  background: rgba(255, 255, 255, 0.18);
-  border: 1.5px solid rgba(255, 255, 255, 0.55);
-  color: var(--white);
-}
-.btn--ghost-light:not(:disabled):hover { background: rgba(255, 255, 255, 0.28); }
+.btn--green { background: var(--green); color: var(--white); }
+.btn--green:not(:disabled):hover { background: var(--green-deep); }
 
 .btn--quiet {
   height: 40px;
@@ -207,30 +218,23 @@ button { font-family: inherit; }
 .btn--quiet:not(:disabled):hover { border-color: var(--ink); color: var(--ink); }
 
 .btn--replay {
-  height: 38px;
+  height: 40px;
   padding: 0 18px;
   gap: 8px;
   background: var(--white);
   border: 1.5px solid var(--ink-18);
   color: var(--ink-62);
-  font-size: 13.5px;
+  font-size: 14px;
   font-weight: 600;
 }
 .btn--replay:not(:disabled):hover { border-color: var(--violet); color: var(--violet); }
+/* Disabled while she listens, when her looming ears can reach up behind it,
+   so it dims its ink rather than going see-through. */
+.btn--replay:disabled { opacity: 1; border-color: var(--ink-10); color: var(--ink-40); }
 .btn--replay svg { fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 
+.btn--compact { height: 40px; padding: 0 22px; font-size: 14px; }
 .btn--block { width: 100%; }
-
-.btn__mic {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  background: var(--violet);
-  color: var(--white);
-}
 
 .link-button {
   border: none;
@@ -242,7 +246,9 @@ button { font-family: inherit; }
   color: var(--white);
   text-decoration: underline;
 }
-.link-button:hover { color: rgba(255, 255, 255, 0.78); }
+.link-button:hover { color: rgba(255, 255, 255, 0.8); }
+.link-button--muted { font-size: 14px; color: var(--ink-50); }
+.link-button--muted:hover { color: var(--ink); }
 
 .pill {
   display: inline-flex;
@@ -253,10 +259,8 @@ button { font-family: inherit; }
   font-size: 13px;
   font-weight: 700;
 }
-.pill--ghost { background: rgba(255, 255, 255, 0.16); color: var(--white); }
-.pill--green { background: var(--green); color: var(--white); font-size: 11.5px; padding: 3px 10px; }
-.pill--violet { background: var(--violet); color: var(--white); }
 .pill--white {
+  gap: 8px;
   background: var(--white);
   border: 1.5px solid var(--ink-12);
   color: var(--ink-72);
@@ -264,40 +268,24 @@ button { font-family: inherit; }
   font-size: 14px;
   font-weight: 600;
 }
-.pill--white b { color: var(--orange); font-weight: 700; }
-.pill__dot { color: rgba(38, 38, 38, 0.35); }
 .pill--nudge {
   background: var(--orange);
   color: var(--white);
   font-size: 13px;
-  animation: nudgeIn 0.2s ease-out;
+  animation: fadeUp 0.2s ease-out;
 }
-@keyframes nudgeIn { 0% { opacity: 0; transform: translateY(4px); } 100% { opacity: 1; transform: translateY(0); } }
 
-.meter {
-  height: 9px;
-  border-radius: var(--r-pill);
-  background: var(--ink-10);
-  overflow: hidden;
+/* A key cap, for the keyboard shortcut named beside a control. */
+.key {
+  padding: 2px 8px;
+  border: 1.5px solid rgba(255, 255, 255, 0.7);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  text-shadow: none;
 }
-.meter > span {
-  display: block;
-  height: 100%;
-  border-radius: var(--r-pill);
-  background: var(--green);
-  transition: width 0.4s ease;
-}
-.meter--wide { width: 180px; height: 10px; background: rgba(255, 255, 255, 0.85); }
-
-.dot {
-  width: 9px;
-  height: 9px;
-  flex: none;
-  border-radius: 50%;
-  background: var(--ink-18);
-}
-.dot.is-ready { background: var(--green); }
-.dot.is-warning { background: var(--orange); }
 
 .inline-error {
   margin: 0;
@@ -314,7 +302,7 @@ button { font-family: inherit; }
   background: var(--canvas);
 }
 
-/* v6 hides the sidebar during a conversation so the stage fills the window. */
+/* A conversation hides the sidebar so the stage fills the window. */
 .shell--immersive .stage { width: 100%; }
 
 .stage {
@@ -331,6 +319,59 @@ button { font-family: inherit; }
   flex-direction: column;
   overflow: hidden;
 }
+/* Talk partners and the profile run longer than the window. */
+.screen--scroll {
+  display: block;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.page-head { flex: none; }
+.page-head .display,
+.page-title { font-size: 42px; }
+.page-head__sub {
+  margin: 8px 0 0;
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--ink-60);
+}
+
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex: none;
+  margin-top: 28px;
+}
+.section-head h3 {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 22px;
+  font-weight: 700;
+}
+.section-head span,
+.section-head__link { font-size: 13px; font-weight: 600; color: var(--ink-45); }
+.section-head__link {
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+.section-head__link:hover { color: var(--ink); }
+
+/* White card on the canvas: the profile's panels and tiles. */
+.panel {
+  padding: 22px 24px;
+  border: 1.5px solid var(--ink-10);
+  border-radius: var(--r-panel);
+  background: var(--white);
+}
+.panel__title {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 22px;
+  font-weight: 700;
+}
 
 /* ------------------------------------------------------------ sidebar ----- */
 
@@ -339,9 +380,9 @@ button { font-family: inherit; }
   flex-direction: column;
   width: var(--sidebar-w);
   flex: none;
-  padding: 28px 18px 22px;
+  padding: 24px 16px 18px;
   background: var(--white);
-  border-right: 1.5px solid var(--ink-12);
+  border-right: 1.5px solid var(--ink-10);
 }
 
 .wordmark {
@@ -366,15 +407,15 @@ button { font-family: inherit; }
   border: none;
   border-radius: var(--r-nav);
   background: transparent;
-  color: var(--ink-72);
+  color: var(--ink-62);
   cursor: pointer;
   font-size: 15px;
-  font-weight: 600;
+  font-weight: 700;
   text-align: left;
   transition: background 0.15s ease, color 0.15s ease;
 }
-.nav__item:hover { background: var(--ink-07); }
-.nav__item.is-active { background: var(--violet); color: var(--white); }
+.nav__item:hover { background: var(--canvas); }
+.nav__item.is-active { background: var(--lilac); color: var(--violet); }
 .nav__item svg {
   width: 20px;
   height: 20px;
@@ -382,58 +423,102 @@ button { font-family: inherit; }
   fill: currentColor;
 }
 
-.sidebar__foot { margin-top: auto; }
+.sidebar__foot {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: auto;
+}
+
+.streak-pill {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: var(--orange-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+.streak-pill b { font-family: var(--display); font-size: 16px; font-weight: 800; }
 
 .profile {
   display: flex;
   align-items: center;
   gap: 11px;
-  margin-top: 12px;
+  width: 100%;
   padding: 12px 10px 0;
+  border: none;
   border-top: 1.5px solid var(--ink-10);
-}
-.profile__avatar {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 38px;
-  height: 38px;
-  flex: none;
-  border-radius: 50%;
-  background: var(--pink);
-  color: var(--white);
-  font-family: var(--display);
-  font-size: 15px;
-  font-weight: 700;
+  background: none;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
 }
 .profile__text { flex: 1; min-width: 0; }
-.profile__text strong { display: block; font-size: 14px; font-weight: 600; }
-.profile__reset {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
+.profile__text strong { display: block; font-size: 14px; font-weight: 700; }
+.profile__text small { display: block; font-size: 12px; font-weight: 500; color: var(--ink-50); }
+.profile:hover small { color: var(--violet); }
+
+/* A two-drop flame; each place it appears sizes it and picks its colours. */
+.flame { position: relative; flex: none; }
+.flame i { position: absolute; border-radius: 0 50% 50% 50%; transform: rotate(45deg); }
+
+.streak-pill .flame { width: 18px; height: 22px; }
+.streak-pill .flame i:first-child { left: 2px; top: 4px; width: 14px; height: 14px; background: var(--orange); }
+.streak-pill .flame i:last-child { left: 6px; top: 11px; width: 6px; height: 6px; background: var(--orange-soft); }
+
+/* The learner's own blob, in the colour they picked. */
+.learner-avatar {
+  position: relative;
   flex: none;
-  padding: 0;
-  border: none;
   border-radius: 50%;
-  background: transparent;
-  color: var(--ink-48);
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  background: var(--page);
+  overflow: hidden;
 }
-.profile__reset:hover { background: var(--ink-07); color: var(--ink-72); }
+.learner-avatar__blob { position: absolute; left: 50%; }
+.learner-avatar__blob i { position: absolute; display: block; }
+.learner-avatar__body { inset: 0; background: var(--avatar); border-radius: 50% 50% 0 0 / 46% 46% 0 0; }
+.learner-avatar__ear { background: var(--avatar); }
+.learner-avatar__ear--left { transform: rotate(-14deg); }
+.learner-avatar__ear--right { transform: rotate(12deg); }
+.learner-avatar__eye { border-radius: 50%; background: var(--ink); }
+.learner-avatar__mouth {
+  border: 3px solid var(--ink);
+  border-top: none;
+  border-radius: 0 0 10px 10px;
+}
+
+.learner-avatar--sm { width: 38px; height: 38px; }
+.learner-avatar--sm .learner-avatar__blob { bottom: -3px; width: 30px; height: 22px; margin-left: -15px; }
+.learner-avatar--sm .learner-avatar__ear { width: 4px; border-radius: 3px; }
+.learner-avatar--sm .learner-avatar__ear--left { top: -5px; left: 8px; height: 8px; }
+.learner-avatar--sm .learner-avatar__ear--right { top: -4px; left: 18px; height: 7px; }
+.learner-avatar--sm .learner-avatar__eye { top: 6px; width: 3px; height: 3px; }
+.learner-avatar--sm .learner-avatar__eye--left { left: 9px; }
+.learner-avatar--sm .learner-avatar__eye--right { left: 18px; }
+
+.learner-avatar--lg { width: 92px; height: 92px; }
+.learner-avatar--lg .learner-avatar__blob { bottom: -5px; width: 76px; height: 54px; margin-left: -38px; }
+.learner-avatar--lg .learner-avatar__ear { width: 9px; border-radius: 7px; }
+.learner-avatar--lg .learner-avatar__ear--left { top: -11px; left: 22px; height: 19px; }
+.learner-avatar--lg .learner-avatar__ear--right { top: -10px; left: 45px; height: 18px; }
+.learner-avatar--lg .learner-avatar__eye { top: 15px; width: 8px; height: 8px; }
+.learner-avatar--lg .learner-avatar__eye--left { left: 23px; }
+.learner-avatar--lg .learner-avatar__eye--right { left: 45px; }
+.learner-avatar--lg .learner-avatar__mouth { top: 28px; left: 31px; width: 14px; height: 7px; }
 
 /* --------------------------------------------------------------- Ella ----- */
 
+/* The outer box is the variant's size times its scale, so it can be placed by
+   its edges; the stage inside draws her at design size and scales. */
 .ella {
   position: absolute;
   width: calc(var(--ella-w) * var(--ella-scale));
   height: calc(var(--ella-h) * var(--ella-scale));
-  transform: rotate(var(--ella-rotate));
   pointer-events: none;
 }
+.ella__entry { position: absolute; inset: 0; }
 .ella__stage {
   position: absolute;
   top: 0;
@@ -443,43 +528,76 @@ button { font-family: inherit; }
   transform: scale(var(--ella-scale));
   transform-origin: top left;
 }
+/* What moves when she bobs, leans, bounces, sways, peeks or is poked. */
+.ella__inner { position: absolute; inset: 0; transform-origin: 50% 100%; }
+
+/* Only her silhouette takes the poke, not the empty corners of her box. */
+.ella.is-pokeable .ella__body,
+.ella.is-pokeable .ella__ear { pointer-events: auto; cursor: pointer; }
+
 .ella__body {
   position: absolute;
   inset: 0;
   background: var(--violet);
-  border-radius: 50% 50% 0 0 / 36% 36% 0 0;
-  transition: transform 160ms ease;
+  border-radius: 50% 50% 0 0 / var(--body-curve) var(--body-curve) 0 0;
 }
+
+/* An ear is a box that grows from its base, holding a tilted capsule; the
+   tilt lives on the capsule so the box is free to twitch. */
 .ella__ear {
   position: absolute;
-  border-radius: 20px;
-  background: var(--violet);
-  transition: transform 160ms ease;
+  top: var(--ear-l-top);
+  left: var(--ear-l-left);
+  width: var(--ear-w);
+  height: var(--ear-l-h);
+  transform-origin: 50% 100%;
+  transition: width 0.45s ease, height 0.45s ease, top 0.45s ease;
 }
-.ella__ear--left { top: -34px; left: 262px; width: 30px; height: 58px; transform: rotate(-14deg); }
-.ella__ear--right { top: -32px; left: 366px; width: 30px; height: 54px; transform: rotate(12deg); }
+.ella__ear--right { top: var(--ear-r-top); left: var(--ear-r-left); height: var(--ear-r-h); }
+.ella__ear i {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--ear-round);
+  background: var(--violet);
+  transform: rotate(-14deg);
+}
+.ella__ear--right i { transform: rotate(12deg); }
 
 .ella__eye {
   position: absolute;
-  top: 54px;
-  width: 16px;
-  height: 16px;
+  top: var(--eye-top);
+  left: var(--eye-l-left);
+  width: var(--eye);
+  height: var(--eye);
   border-radius: 50%;
   background: var(--ink);
   transition: transform 0.12s ease-out, opacity 0.16s ease;
 }
-.ella__eye--left { left: 284px; }
-.ella__eye--right { left: 358px; }
+.ella__eye--right { left: var(--eye-r-left); }
 .ella__glint {
   position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 5px;
-  height: 5px;
+  top: var(--glint-at);
+  left: var(--glint-at);
+  width: var(--glint);
+  height: var(--glint);
   border-radius: 50%;
   background: var(--white);
 }
 
+.ella__mouth {
+  position: absolute;
+  top: var(--mouth-top);
+  left: var(--mouth-left);
+  width: var(--mouth-w);
+  height: var(--mouth-h);
+  border: var(--mouth-line) solid var(--ink);
+  border-top: none;
+  border-radius: 0 0 var(--mouth-curve) var(--mouth-curve);
+  transition: transform 0.25s ease, opacity 0.16s ease;
+}
+
+/* Thinking lines and the open mouth only ever show on the talk stage, so they
+   sit where the conversation face puts them. */
 .ella__eye-line {
   position: absolute;
   top: 62px;
@@ -488,23 +606,10 @@ button { font-family: inherit; }
   border-radius: 4px;
   background: var(--ink);
   opacity: 0;
-  transition: opacity 0.16s ease, transform 0.16s ease;
+  transition: opacity 0.16s ease;
 }
 .ella__eye-line--left { left: 282px; }
 .ella__eye-line--right { left: 358px; }
-
-.ella__mouth {
-  position: absolute;
-  top: 86px;
-  left: 314px;
-  width: 30px;
-  height: 13px;
-  border: 3px solid var(--ink);
-  border-top: none;
-  border-radius: 0 0 24px 24px;
-  opacity: 1;
-  transition: transform 0.25s ease, opacity 0.16s ease;
-}
 .ella__mouth--open {
   top: 84px;
   left: 317px;
@@ -516,42 +621,13 @@ button { font-family: inherit; }
   opacity: 0;
 }
 
-.ella__mouth--worry,
-.ella__brow,
-.ella__cheek,
-.ella__sparkle { opacity: 0; }
-
-.ella__mouth--worry {
-  border: none;
-  border-top: 3px solid var(--ink);
-  border-radius: 50% 50% 0 0;
-}
-.ella__brow {
-  position: absolute;
-  width: 24px;
-  height: 9px;
-  border-top: 3px solid var(--ink);
-  border-radius: 50%;
-  transition: opacity 0.16s ease;
-}
-.ella__cheek {
-  position: absolute;
-  border-radius: 50%;
-  background: rgba(255, 49, 129, 0.3);
-  transition: opacity 0.16s ease;
-}
-.ella__sparkle {
-  position: absolute;
-  background: var(--white);
-  clip-path: polygon(50% 0, 61% 38%, 100% 50%, 61% 62%, 50% 100%, 39% 62%, 0 50%, 39% 38%);
-}
-
 .ella--thinking .ella__eye,
 .ella--thinking .ella__mouth--smile { opacity: 0; }
 .ella--thinking .ella__eye-line { opacity: 1; }
 .ella--speaking .ella__mouth--smile { opacity: 0; }
 .ella--speaking .ella__mouth--open { opacity: 1; }
 
+/* Controls that sit on her, like the first talk's microphone. */
 .ella__slot {
   position: absolute;
   top: 138px;
@@ -564,162 +640,98 @@ button { font-family: inherit; }
   pointer-events: auto;
 }
 
-/* Expressive avatar: logo grammar with independently animated feedback states. */
-.ella--celebration .ella__body {
-  border: 6px solid var(--white);
-  border-bottom: 0;
-  border-radius: 50% 50% 0 0 / 42% 42% 0 0;
+/* Each placement's face, from the design. */
+.ella--conversation {
+  --body-curve: 36%;
+  --ear-w: 30px; --ear-round: 20px;
+  --ear-l-top: -34px; --ear-l-left: 262px; --ear-l-h: 58px;
+  --ear-r-top: -32px; --ear-r-left: 366px; --ear-r-h: 54px;
+  --eye: 16px; --eye-top: 54px; --eye-l-left: 284px; --eye-r-left: 358px;
+  --glint: 5px; --glint-at: 3px;
+  --mouth-top: 86px; --mouth-left: 314px; --mouth-w: 30px; --mouth-h: 13px; --mouth-line: 3px; --mouth-curve: 24px;
 }
-.ella--celebration .ella__ear {
-  box-sizing: border-box;
-  border: 6px solid var(--white);
-  border-radius: 50%;
+.ella--welcome {
+  --body-curve: 60%;
+  --ear-w: 52px; --ear-round: 36px;
+  --ear-l-top: -64px; --ear-l-left: 468px; --ear-l-h: 120px;
+  --ear-r-top: -58px; --ear-r-left: 578px; --ear-r-h: 112px;
+  --eye: 32px; --eye-top: 132px; --eye-l-left: 460px; --eye-r-left: 606px;
+  --glint: 11px; --glint-at: 6px;
+  --mouth-top: 186px; --mouth-left: 517px; --mouth-w: 64px; --mouth-h: 28px; --mouth-line: 6px; --mouth-curve: 44px;
 }
-.ella--celebration .ella__ear--left {
-  top: -58px;
-  left: 430px;
-  width: 62px;
-  height: 132px;
-  transform: rotate(4deg);
-  transform-origin: 50% 100%;
+.ella--corner {
+  --body-curve: 40%;
+  --ear-w: 26px; --ear-round: 18px;
+  --ear-l-top: -32px; --ear-l-left: 160px; --ear-l-h: 50px;
+  --ear-r-top: -30px; --ear-r-left: 240px; --ear-r-h: 46px;
+  --eye: 17px; --eye-top: 46px; --eye-l-left: 168px; --eye-r-left: 236px;
+  --glint: 6px; --glint-at: 4px;
+  --mouth-top: 78px; --mouth-left: 194px; --mouth-w: 32px; --mouth-h: 14px; --mouth-line: 4px; --mouth-curve: 24px;
 }
-.ella--celebration .ella__ear--right {
-  top: -32px;
-  left: 500px;
-  width: 66px;
-  height: 118px;
-  transform: rotate(38deg);
-  transform-origin: 50% 100%;
+.ella--age {
+  --body-curve: 46%;
+  --ear-w: 40px; --ear-round: 30px;
+  --ear-l-top: -46px; --ear-l-left: 300px; --ear-l-h: 88px;
+  --ear-r-top: -42px; --ear-r-left: 408px; --ear-r-h: 84px;
+  --eye: 24px; --eye-top: 98px; --eye-l-left: 308px; --eye-r-left: 428px;
+  --glint: 8px; --glint-at: 5px;
+  --mouth-top: 138px; --mouth-left: 354px; --mouth-w: 52px; --mouth-h: 23px; --mouth-line: 5px; --mouth-curve: 38px;
 }
-.ella--celebration .ella__eye {
-  top: 48px;
-  width: 50px;
-  height: 64px;
-  border-radius: 50%;
-  transform: rotate(9deg);
+.ella--home {
+  --body-curve: 42%;
+  --ear-w: 18px; --ear-round: 12px;
+  --ear-l-top: -20px; --ear-l-left: 110px; --ear-l-h: 34px;
+  --ear-r-top: -18px; --ear-r-left: 164px; --ear-r-h: 32px;
+  --eye: 13px; --eye-top: 32px; --eye-l-left: 116px; --eye-r-left: 164px;
+  --glint: 5px; --glint-at: 3px;
+  --mouth-top: 56px; --mouth-left: 134px; --mouth-w: 24px; --mouth-h: 11px; --mouth-line: 3px; --mouth-curve: 18px;
 }
-.ella--celebration .ella__eye--left { left: 248px; }
-.ella--celebration .ella__eye--right { top: 62px; left: 356px; }
-.ella--celebration .ella__glint {
-  top: 18px;
-  left: 27px;
-  width: 20px;
-  height: 27px;
-  border-radius: 0;
-  clip-path: polygon(50% 0, 61% 38%, 100% 50%, 61% 62%, 50% 100%, 39% 62%, 0 50%, 39% 38%);
-}
-.ella--celebration .ella__eye-line {
-  top: 78px;
-  width: 48px;
-  height: 13px;
-  border-radius: 50%;
-}
-.ella--celebration .ella__eye-line--left { left: 247px; transform: rotate(7deg); }
-.ella--celebration .ella__eye-line--right { top: 92px; left: 355px; transform: rotate(-7deg); }
-.ella--celebration .ella__mouth { left: 320px; }
-.ella--celebration .ella__mouth--smile {
-  top: 128px;
-  width: 36px;
-  height: 15px;
-  opacity: 0;
-}
-.ella--celebration .ella__mouth--open {
-  top: 126px;
-  left: 324px;
-  width: 28px;
-  height: 22px;
-}
-.ella--celebration .ella__mouth--worry {
-  top: 132px;
-  left: 318px;
-  width: 40px;
-  height: 14px;
-}
-.ella--celebration .ella__brow { top: 34px; width: 46px; height: 14px; border-width: 5px; }
-.ella--celebration .ella__brow--left { left: 245px; transform: rotate(12deg); }
-.ella--celebration .ella__brow--right { top: 48px; left: 358px; transform: rotate(-12deg); }
-.ella--celebration .ella__cheek { top: 119px; width: 34px; height: 18px; }
-.ella--celebration .ella__cheek--left { left: 210px; }
-.ella--celebration .ella__cheek--right { left: 421px; }
-.ella--celebration .ella__sparkle { width: 30px; height: 38px; }
-.ella--celebration .ella__sparkle--left { top: 16px; left: 188px; }
-.ella--celebration .ella__sparkle--right { top: 16px; left: 454px; }
-
-.ella--celebration.ella--resting { animation: ellaBreathe 4.8s ease-in-out infinite; }
-.ella--celebration.ella--listening {
-  transform: rotate(var(--ella-rotate)) translateY(calc(var(--ella-activity) * -5px));
-}
-.ella--celebration.ella--listening .ella__ear--left {
-  transform: rotate(1deg) translateY(calc(var(--ella-activity) * -4px));
-}
-.ella--celebration.ella--listening .ella__ear--right {
-  transform: rotate(34deg) translateY(calc(var(--ella-activity) * -4px));
-}
-.ella--celebration.ella--listening .ella__eye { transform: rotate(9deg) scale(1.08); }
-.ella--celebration.ella--listening .ella__glint { animation: ellaGlint 1.1s ease-in-out infinite; }
-.ella--celebration.ella--thinking { animation: ellaThink 1.3s ease-in-out infinite; }
-.ella--celebration.ella--speaking { animation: ellaSpeakBob 0.72s ease-in-out infinite; }
-.ella--celebration.ella--speaking .ella__mouth--open { animation: ellaMouth 0.36s ease-in-out infinite; }
-.ella--celebration.ella--reaction-success .ella__cheek,
-.ella--celebration.ella--reaction-success .ella__sparkle { opacity: 1; animation: ellaSpark 1.1s ease-out both; }
-.ella--celebration.ella--reaction-error .ella__eye { transform: rotate(9deg) scaleY(0.85); }
-.ella--celebration.ella--reaction-error .ella__brow,
-.ella--celebration.ella--reaction-error .ella__mouth--worry { opacity: 1; }
-.ella--celebration.ella--reaction-error .ella__mouth--smile,
-.ella--celebration.ella--reaction-error .ella__mouth--open { opacity: 0; }
-.ella--celebration.ella--reaction-error { animation: ellaConcern 0.42s ease-in-out 2; }
-
-@keyframes ellaBreathe { 0%, 100% { transform: rotate(var(--ella-rotate)) translateY(0); } 50% { transform: rotate(var(--ella-rotate)) translateY(-3px); } }
-@keyframes ellaThink { 0%, 100% { transform: rotate(var(--ella-rotate)) translateY(0); } 50% { transform: rotate(calc(var(--ella-rotate) - 0.7deg)) translateY(-4px); } }
-@keyframes ellaSpeakBob { 0%, 100% { transform: rotate(var(--ella-rotate)) translateY(0); } 50% { transform: rotate(var(--ella-rotate)) translateY(-3px); } }
-@keyframes ellaMouth { 0%, 100% { transform: scale(1, 0.72); } 50% { transform: scale(0.78, 1.16); } }
-@keyframes ellaGlint { 0%, 100% { opacity: 0.72; transform: scale(0.82); } 50% { opacity: 1; transform: scale(1.08); } }
-@keyframes ellaSpark { 0% { transform: scale(0) rotate(-14deg); } 45% { transform: scale(1.2) rotate(8deg); } 100% { transform: scale(0.82) rotate(0); } }
-@keyframes ellaConcern { 0%, 100% { transform: rotate(var(--ella-rotate)) translateX(0); } 50% { transform: rotate(var(--ella-rotate)) translateX(-4px); } }
-
-.ella--hero .ella__body { border-radius: 50% 50% 0 0 / 52% 52% 0 0; }
-.ella--hero .ella__ear { border-radius: 40px; }
-.ella--hero .ella__ear--left { top: -66px; left: 368px; width: 58px; height: 128px; }
-.ella--hero .ella__ear--right { top: -58px; left: 468px; width: 58px; height: 120px; }
-.ella--hero .ella__eye { top: 165px; width: 30px; height: 30px; }
-.ella--hero .ella__eye--left { left: 345px; }
-.ella--hero .ella__eye--right { left: 545px; }
-.ella--hero .ella__glint { top: 6px; left: 6px; width: 10px; height: 10px; }
-.ella--hero .ella__eye-line { top: 178px; width: 34px; height: 11px; border-radius: 6px; }
-.ella--hero .ella__eye-line--left { left: 343px; }
-.ella--hero .ella__eye-line--right { left: 543px; }
-.ella--hero .ella__mouth {
-  top: 222px;
-  left: 430px;
-  width: 60px;
-  height: 26px;
-  border-width: 5px;
-  border-radius: 0 0 40px 40px;
-}
-.ella--hero .ella__mouth--open {
-  top: 218px;
-  left: 434px;
-  width: 52px;
-  height: 38px;
-  border: none;
-  border-radius: 50%;
+.ella--mentor {
+  --body-curve: 56%;
+  --ear-w: 22px; --ear-round: 14px;
+  --ear-l-top: -26px; --ear-l-left: 146px; --ear-l-h: 44px;
+  --ear-r-top: -24px; --ear-r-left: 212px; --ear-r-h: 40px;
+  --eye: 14px; --eye-top: 40px; --eye-l-left: 156px; --eye-r-left: 210px;
+  --glint: 5px; --glint-at: 3px;
+  --mouth-top: 66px; --mouth-left: 177px; --mouth-w: 26px; --mouth-h: 12px; --mouth-line: 3px; --mouth-curve: 20px;
 }
 
-.ella--corner-home { right: -155px; bottom: -160px; }
-.ella--corner-ob { right: -155px; bottom: -160px; }
-.ella--corner-garden { right: -100px; bottom: -130px; }
-.ella--corner-summary { right: -110px; bottom: -140px; }
-.ella--corner-boot { right: -140px; bottom: -170px; }
-.ella--stage-talk {
+/* Listening, her ears prick up and twitch; after a dive in from above they
+   loom, big and restless. */
+.ella--ears-listen .ella__ear--left { top: -74px; width: 42px; height: 100px; animation: earTwitchL 2.4s ease-in-out 0.2s infinite; }
+.ella--ears-listen .ella__ear--right { top: -70px; width: 42px; height: 96px; animation: earTwitchR 2.9s ease-in-out infinite; }
+.ella--ears-loom .ella__ear--left { top: -122px; width: 60px; height: 150px; animation: earLoomL 0.85s ease-in-out 0.05s infinite; }
+.ella--ears-loom .ella__ear--right { top: -114px; width: 60px; height: 142px; animation: earLoomR 0.72s ease-in-out infinite; }
+
+/* Placements */
+.ella--ob-welcome,
+.ella--stage-talk,
+.ella--ob-age {
   left: 50%;
-  bottom: -130px;
   margin-left: calc(var(--ella-w) * var(--ella-scale) / -2);
 }
-.ella--onboarding {
-  left: 50%;
-  bottom: -80px;
-  margin-left: calc(var(--ella-w) * var(--ella-scale) / -2);
+.ella--ob-welcome { bottom: -70px; }
+.ella--stage-talk { bottom: -130px; }
+.ella--corner-ob,
+.ella--corner-boot { right: -130px; bottom: -150px; }
+.ella--corner-ob.is-peeking .ella__inner {
+  transform-origin: 50% 50%;
+  animation: peekUp 0.5s cubic-bezier(0.22, 1.1, 0.36, 1) forwards;
 }
+.ella--home-peek,
+.ella--summary-peek { top: -104px; right: 70px; }
+.ella--mentor { right: 70px; bottom: -40px; }
+.ella--mentor .ella__inner { animation: bobIdle 4.2s ease-in-out infinite; }
+
+/* The age Ella waits small and tilted off in the corner, and springs up to
+   full size behind the question as soon as there is an age. */
+.ella--ob-age {
+  bottom: -40px;
+  transform-origin: 50% 100%;
+  transform: translate(560px, 260px) rotate(14deg) scale(0.42);
+  transition: transform 0.9s cubic-bezier(0.22, 1.06, 0.32, 1);
+}
+.ella--ob-age.is-up { transform: none; }
 
 /* Static wordmark glyph. The conversational mascot remains independently animated. */
 .ella-glyph {
@@ -741,8 +753,10 @@ button { font-family: inherit; }
 /* --------------------------------------------------------- Ella states ---- */
 
 .wave { display: flex; align-items: flex-end; gap: 5px; height: 26px; }
+/* The resting height is what reduced motion leaves on screen. */
 .wave > span {
   width: 5px;
+  height: 8px;
   border-radius: 3px;
   background: var(--violet);
   animation: waveBar 0.9s ease-in-out infinite;
@@ -769,37 +783,15 @@ button { font-family: inherit; }
 
 /* --------------------------------------------------------------- Home ----- */
 
-.screen--home { padding: 40px 44px; }
+.screen--home { padding: 36px 44px; }
 
-.page-head { flex: none; }
-.page-head .display {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  font-size: 42px;
-}
-.page-head__flourish {
-  width: 40px;
-  height: 20px;
-  flex: none;
-  fill: none;
-  stroke: var(--ink);
-  stroke-width: 2;
-  stroke-linecap: round;
-}
-.page-head__sub {
-  margin: 8px 0 0;
-  font-size: 16px;
-  font-weight: 500;
-  color: var(--ink-62);
-}
-
+/* The gap above the body leaves room for Ella peeking over "Today's talk". */
 .home-body {
   display: flex;
   gap: 24px;
   flex: 1;
   min-height: 0;
-  margin-top: 30px;
+  margin-top: 96px;
 }
 
 .home-main {
@@ -810,88 +802,63 @@ button { font-family: inherit; }
   min-height: 0;
 }
 
-.hero {
-  flex: none;
-  padding: 34px 38px;
-  border-radius: var(--r-hero);
-  background: var(--violet);
-  color: var(--white);
+/* Ella comes first so the card, painted after her, hides her lower half. */
+.today { position: relative; flex: none; }
+.today__card {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 28px;
+  padding: 28px 32px;
+  border: 1.5px solid var(--ink-10);
+  border-radius: var(--r-panel);
+  background: var(--white);
+  box-shadow: 0 18px 40px rgba(38, 38, 38, 0.08);
 }
-.hero__eyebrow {
-  margin: 0;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.78);
-}
-.hero__title {
-  margin: 10px 0 0;
+.today__text { min-width: 0; }
+.today__title {
+  margin: 8px 0 0;
   font-family: var(--display);
   font-size: 36px;
   font-weight: 800;
-  line-height: 1.1;
+  line-height: 1.05;
 }
-.hero__blurb {
+.today__blurb {
   margin: 8px 0 0;
-  max-width: 420px;
+  max-width: 440px;
   font-size: 15px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.85);
+  line-height: 1.45;
+  color: var(--ink-60);
+  text-wrap: pretty;
 }
-.hero__actions {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin-top: 22px;
-}
+.btn--talk { flex: none; }
 
-.section-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  flex: none;
-  margin-top: 30px;
-}
-.section-head h3 {
-  margin: 0;
-  font-family: var(--display);
-  font-size: 22px;
-  font-weight: 700;
-}
-.section-head span { font-size: 13px; font-weight: 600; color: var(--ink-48); }
-
-/* ------------------------------------------------------ bento of topics --- */
-
-.bento {
+/* More topics: one tall card, two small ones and a wide one beneath them. */
+.topics {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-auto-rows: minmax(168px, 1fr);
+  grid-template-columns: 1.1fr 1fr 1fr;
+  grid-template-rows: 1fr 0.7fr;
   gap: 12px;
   flex: 1;
-  min-height: 260px;
-  margin-top: 14px;
+  min-height: 0;
+  margin-top: 12px;
 }
-
-/* The design's exact bento: four columns, two rows, one tall card on the right. */
-@media (min-width: 1280px) {
-  .bento {
-    grid-template-columns: 1.15fr 0.9fr 0.95fr 1.05fr;
-    grid-template-rows: 1fr 1fr;
-    grid-auto-rows: auto;
-  }
-  .topic--wide { grid-column: 1 / 3; grid-row: 1; }
-  .topic--wave { grid-column: 3; grid-row: 1; }
-  .topic--framed { grid-column: 4; grid-row: 1 / 3; }
-  .topic--inset { grid-column: 1; grid-row: 2; }
-  .topic--chat { grid-column: 2; grid-row: 2; }
-  .topic--quote { grid-column: 3; grid-row: 2; }
+.topics--all {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: none;
+  grid-auto-rows: minmax(120px, 1fr);
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .topic {
   position: relative;
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  padding: 18px 20px;
   border: none;
   border-radius: var(--r-tile);
   cursor: pointer;
@@ -908,212 +875,43 @@ button { font-family: inherit; }
 .tone-green { background: var(--green); }
 .tone-orange { background: var(--orange); }
 .tone-ink { background: var(--ink); }
-.tone-lilac { background: var(--lilac); color: var(--violet); }
 
 .topic__title {
   font-family: var(--display);
-  font-size: 20px;
+  font-size: 24px;
   font-weight: 800;
   line-height: 1.05;
 }
-.topic__title--center { font-size: 31px; line-height: 1; text-align: center; }
-.topic__title--foot { margin-top: auto; }
-
-.topic__meta { color: rgba(255, 255, 255, 0.85); }
-.topic__meta--center { text-align: center; color: var(--violet); }
-.topic__meta--top { color: rgba(255, 255, 255, 0.6); }
-
-/* wide — the two-line headline card */
-.topic--wide {
-  justify-content: center;
-  padding: 18px 22px;
-}
-.topic__headline {
-  display: flex;
-  flex-direction: column;
-  font-family: var(--display);
-  font-size: clamp(26px, 3.1vw, 40px);
-  font-weight: 800;
-  line-height: 0.96;
-  letter-spacing: -0.01em;
-}
-.topic__headline--indent { padding-left: 52px; }
-.topic__badge {
-  position: absolute;
-  top: 16px;
-  right: 18px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background: var(--white);
-}
-.topic__badge i {
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  border: 2.5px solid currentColor;
-}
-.topic--wide .topic__badge { color: var(--pink); }
-.topic--wide .topic__meta {
-  position: absolute;
-  left: 22px;
-  bottom: 14px;
+.topic__meta {
+  margin-top: auto;
+  padding-top: 8px;
+  font-size: 11px;
   color: rgba(255, 255, 255, 0.9);
 }
 
-/* wave — small card with a hand-drawn squiggle */
-.topic--wave {
-  justify-content: flex-end;
-  padding: 16px 18px;
-}
-.topic--wave .topic__title { font-size: 27px; }
-.topic--wave .topic__meta { margin-top: 8px; }
-.topic__wave {
-  position: absolute;
-  top: 16px;
-  left: 18px;
-  width: 60px;
-  height: 24px;
-  fill: none;
-  stroke: rgba(255, 255, 255, 0.65);
-  stroke-width: 2.5;
-  stroke-linecap: round;
-}
-
-/* framed — the tall lilac card with a speech bubble and avatars */
-.topic--framed {
-  padding: 20px 18px 24px;
-  align-items: center;
-}
-.topic--framed .topic__meta { margin-top: 10px; }
-.topic__foot {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  margin-top: auto;
-}
-.avatars { display: flex; }
-.avatars i {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 50%;
-  border: 2.5px solid var(--lilac);
-  color: var(--white);
-  font-family: var(--display);
-  font-size: 14px;
-  font-style: normal;
-  font-weight: 700;
-}
-.avatars i + i { margin-left: -9px; }
-
-/* inset — violet frame around a white card */
-.topic--inset {
-  padding: 11px;
-}
-.topic__inset {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  padding: 12px 14px;
-  border-radius: 10px;
-  background: var(--white);
-  color: var(--violet);
-}
-.topic__inset-top {
-  display: flex;
-  justify-content: space-between;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-.topic--inset .topic__title { margin-top: 8px; font-size: 22px; }
-.topic--inset .topic__meta {
-  margin-top: auto;
-  color: rgba(38, 38, 38, 0.55);
-  text-transform: uppercase;
-}
-
-/* chat — a two-turn exchange on ink */
-.topic--chat {
-  padding: 14px 14px 12px;
-}
-.topic--chat .topic__title { margin-top: 6px; font-size: 18px; font-weight: 700; }
-.chat {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  margin-top: auto;
-}
-.chat__ella { display: flex; align-items: center; gap: 6px; align-self: flex-start; }
-.chat__ella i {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  flex: none;
-  border-radius: 50%;
-  background: var(--violet);
-  color: var(--white);
-  font-family: var(--display);
-  font-size: 10px;
-  font-style: normal;
-  font-weight: 700;
-}
-
-/* quote — orange card led by a customer's line */
-.topic--quote {
-  padding: 16px 16px 14px;
-}
-.topic--quote .topic__title { font-size: 20px; }
-.topic--quote .topic__meta { margin-top: 6px; }
-
-.bubble {
-  position: relative;
+.topic--tall { grid-row: 1 / 3; padding: 20px 22px; }
+.topic--tall .topic__title { font-size: 28px; }
+.topic--tall .topic__meta { margin-top: 0; }
+.topic__bubble {
+  margin: auto 0;
   align-self: flex-start;
-  padding: 7px 11px;
-  border-radius: 10px;
-  font-weight: 700;
-}
-.bubble--dark { background: var(--ink); color: var(--white); padding: 8px 12px; font-family: var(--mono); font-size: 11px; }
-.bubble--dark i {
-  position: absolute;
-  left: 50%;
-  bottom: -4px;
-  width: 9px;
-  height: 9px;
-  background: var(--ink);
-  transform: translateX(-50%) rotate(45deg);
-}
-.bubble--white { background: var(--white); color: var(--ink); }
-.bubble--white i {
-  position: absolute;
-  left: 16px;
-  bottom: -4px;
-  width: 9px;
-  height: 9px;
-  background: var(--white);
-  transform: rotate(45deg);
-}
-.bubble--light {
+  padding: 8px 12px;
+  border-radius: 12px 12px 12px 3px;
   background: var(--white);
   color: var(--ink);
-  border-radius: 10px 10px 10px 3px;
-  padding: 6px 10px;
+  font-size: 12px;
+  letter-spacing: 0;
 }
-.bubble--green {
-  align-self: flex-end;
-  background: var(--green);
-  color: var(--white);
-  border-radius: 10px 10px 3px 10px;
-  padding: 6px 10px;
+
+.topic--wide {
+  grid-column: 2 / 4;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 22px;
 }
+.topic--wide .topic__meta { flex: none; margin-top: 0; padding-top: 0; color: rgba(255, 255, 255, 0.6); }
 
 /* ----------------------------------------------------------- right rail --- */
 
@@ -1129,81 +927,63 @@ button { font-family: inherit; }
 
 .card {
   position: relative;
+  flex: none;
   border-radius: var(--r-card);
   overflow: hidden;
 }
-.card__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.card__head h4 {
-  margin: 0;
-  font-family: var(--display);
-  font-size: 18px;
-  font-weight: 700;
-}
 .card__note {
-  margin: 11px 0 0;
+  margin: 8px 0 0;
   font-size: 13px;
   font-weight: 500;
   line-height: 1.45;
   color: var(--ink-62);
 }
-.card__eyebrow {
-  margin: 0;
-  font-size: 11.5px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.9);
-}
 
 .card--streak {
-  padding: 15px 16px 13px;
+  padding: 20px 20px 18px;
   background: var(--orange);
   color: var(--white);
 }
 .card--streak__orb {
   position: absolute;
-  top: -40px;
-  right: -36px;
-  width: 110px;
-  height: 110px;
+  top: -50px;
+  right: -44px;
+  width: 130px;
+  height: 130px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.14);
   pointer-events: none;
 }
-.streak-head { display: flex; align-items: center; gap: 11px; }
-.streak-head small { display: block; margin-top: 1px; font-size: 12px; font-weight: 600; color: rgba(255, 255, 255, 0.88); }
+.streak-head { display: flex; align-items: center; gap: 12px; }
+.streak-head strong { display: block; font-size: 28px; }
+.streak-head small { display: block; margin-top: 2px; font-size: 13px; font-weight: 700; }
 
-.flame { position: relative; width: 32px; height: 38px; flex: none; }
-.flame i { position: absolute; border-radius: 0 50% 50% 50%; transform: rotate(45deg); }
-.flame i:first-child { left: 3px; top: 7px; width: 26px; height: 26px; background: var(--white); }
-.flame i:last-child { left: 10px; top: 19px; width: 12px; height: 12px; background: var(--orange); }
+.card--streak .flame { width: 34px; height: 40px; }
+.card--streak .flame i:first-child { left: 4px; top: 8px; width: 26px; height: 26px; background: var(--white); }
+.card--streak .flame i:last-child { left: 11px; top: 20px; width: 12px; height: 12px; background: var(--orange); }
 
 .week {
   display: flex;
   justify-content: space-between;
-  margin: 11px 0 0;
+  margin: 16px 0 0;
   padding: 0;
   list-style: none;
 }
-.week__day { display: flex; flex-direction: column; align-items: center; gap: 3px; }
-.week__day small { font-size: 9.5px; font-weight: 700; color: rgba(255, 255, 255, 0.72); }
+.week__day { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+.week__day small { font-size: 11px; font-weight: 700; }
 .week__mark {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 21px;
-  height: 21px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.28);
-  background: rgba(255, 255, 255, 0.1);
+  border: 2px solid rgba(255, 255, 255, 0.45);
+  background: rgba(255, 255, 255, 0.18);
 }
 .week__mark svg {
-  width: 11px;
-  height: 11px;
+  width: 13px;
+  height: 13px;
   fill: none;
   stroke: transparent;
   stroke-width: 3.5;
@@ -1212,47 +992,363 @@ button { font-family: inherit; }
 }
 .week__day.is-done .week__mark { background: var(--white); border-color: var(--white); }
 .week__day.is-done .week__mark svg { stroke: var(--orange); }
-.week__day.is-today .week__mark { background: rgba(255, 255, 255, 0.18); border: 2px dashed var(--white); }
-.week__day.is-today small { color: var(--white); }
+.week__day.is-today .week__mark { border: 2px dashed var(--white); }
 
-.streak-foot { margin: 10px 0 0; font-size: 12px; font-weight: 600; color: rgba(255, 255, 255, 0.92); }
+.streak-foot { margin: 14px 0 0; font-size: 13.5px; font-weight: 700; }
 
-.card--garden {
-  padding: 16px 18px;
-  background: var(--white);
-  border: 1.5px solid var(--ink-12);
-}
-.card--garden .meter { margin-top: 11px; }
-.card--garden .btn { margin-top: 12px; }
+.card--week { padding: 20px; background: var(--green); color: var(--white); }
+.card--week .eyebrow { color: var(--white); }
 
-.card--week { padding: 15px 18px 14px; background: var(--green); color: var(--white); }
+.stats { display: flex; gap: 28px; margin: 10px 0 0; }
+.stats dt { margin: 0; font-size: 32px; }
+.stats dd { margin: 2px 0 0; font-size: 13px; font-weight: 700; }
+.stats--ink dd { color: var(--ink-60); }
 
-/* An additive rail card, on the same white-card pattern as `.card--garden`:
-   the unfinished talk waiting to be resumed. Renders only when there is one. */
+/* The unfinished talk waiting to be resumed. Renders only when there is one. */
 .card--resume {
-  padding: 16px 18px;
+  padding: 20px;
+  border: 1.5px solid var(--ink-10);
   background: var(--white);
-  border: 1.5px solid var(--ink-12);
 }
 .card--resume h4 {
-  margin: 7px 0 0;
+  margin: 8px 0 0;
   font-family: var(--display);
-  font-size: 18px;
-  font-weight: 700;
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.1;
 }
-.card--resume .btn { margin-top: 12px; }
-.card__eyebrow--dark { color: var(--ink-62); }
+.card--resume .btn { height: 48px; margin-top: 14px; }
 
-.stats { display: flex; gap: 20px; margin: 9px 0 0; }
-.stats dt { margin: 0; }
-.stats dd { margin: 0; font-size: 12px; font-weight: 600; color: rgba(255, 255, 255, 0.85); }
-.stats--light { margin-top: 22px; }
+/* ------------------------------------------------------- Talk partners ---- */
+
+.screen--cast { padding: 36px 44px 40px; }
+
+.mentor {
+  position: relative;
+  display: flex;
+  min-height: 212px;
+  margin-top: 28px;
+  border-radius: var(--r-panel);
+  background: var(--lilac);
+  overflow: hidden;
+}
+.mentor__text {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  /* Stops short of Ella on a narrow window instead of running across her. */
+  max-width: min(560px, calc(100% - 450px));
+  padding: 26px 32px;
+}
+.mentor__name { margin-top: 6px; font-size: 36px; }
+.mentor__tagline { margin: 4px 0 0; font-size: 14px; font-weight: 600; color: var(--ink-62); }
+.mentor__note {
+  margin: 14px 0 0;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--ink-70);
+  text-wrap: pretty;
+}
+
+.screen--cast .section-head { margin-top: 30px; }
+
+.cast-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+  margin-top: 12px;
+}
+
+.partner {
+  border: 1.5px solid var(--ink-10);
+  border-radius: var(--r-card);
+  background: var(--white);
+  overflow: hidden;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.partner:hover { transform: translateY(-4px); box-shadow: 0 14px 30px rgba(38, 38, 38, 0.1); }
+
+.partner[data-character="stall-owner"] { --tint: #ffe9d4; --tint-hover: #fff6ec; --accent: var(--orange); --shadow-w: 180px; }
+.partner[data-character="landlord"] { --tint: #e4ecfb; --tint-hover: #f1f5fd; --accent: #5b7def; }
+.partner[data-character="doctor"] { --tint: #ffe2da; --tint-hover: #fff0ed; --accent: #ff685b; }
+.partner[data-character="debater"] { --tint: #e7f4d6; --tint-hover: #f2f9e9; --accent: var(--green); }
+
+.partner__stage {
+  position: relative;
+  height: 190px;
+  background: var(--tint);
+  overflow: hidden;
+}
+.partner__shadow {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  width: var(--shadow-w);
+  height: 14px;
+  margin-left: calc(var(--shadow-w) / -2);
+  border-radius: 50%;
+  background: rgba(38, 38, 38, 0.08);
+}
+.partner[data-character="stall-owner"] .partner__shadow,
+.partner[data-character="landlord"] .partner__shadow,
+.partner[data-character="doctor"] .partner__shadow,
+.partner[data-character="debater"] .partner__shadow { display: none; }
+.partner__entry {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  width: 240px;
+  height: 190px;
+  margin-left: -120px;
+}
+/* These silhouettes continue past the card's right and bottom edges. */
+.partner[data-character="landlord"] .partner__entry,
+.partner[data-character="doctor"] .partner__entry,
+.partner[data-character="debater"] .partner__entry { left: auto; right: 0; margin-left: 0; }
+.partner[data-character="stall-owner"] .partner__entry {
+  left: auto;
+  right: 0;
+  width: min(280px, 100%);
+  margin-left: 0;
+}
+
+.partner__about { padding: 16px 18px 6px; }
+.partner__about h4 { font-size: 24px; line-height: 1.05; }
+.partner__about p { margin: 3px 0 0; font-size: 13px; font-weight: 500; line-height: 1.4; color: var(--ink-60); }
+
+.partner__goals { padding: 0 10px 10px; }
+
+.goal {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 8px;
+  border: none;
+  border-top: 1.5px solid var(--ink-07);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+}
+.goal:not(:disabled):hover { background: var(--tint-hover); }
+.goal:disabled { cursor: not-allowed; }
+.goal:disabled .goal__mic { opacity: 0.4; }
+.goal__text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.goal__text strong { font-size: 14.5px; font-weight: 700; }
+.goal__text > span:not(.goal__meta) {
+  margin-top: 2px;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--ink-62);
+}
+.goal__meta { margin-top: 5px; color: var(--ink-45); }
+.goal__mic {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--white);
+}
+
+/* The cast, drawn in CSS and SVG, each bobbing at their own pace. */
+.figure {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 100%;
+  animation: bobIdle var(--bob) ease-in-out var(--bob-delay, 0s) infinite;
+}
+.figure i { position: absolute; display: block; }
+.figure__portrait { display: block; width: 100%; height: 100%; color: var(--accent); }
+
+.figure--stall-owner {
+  --bob: 4.6s;
+  transform-origin: 100% 100%;
+  animation-name: partnerBreathe;
+}
+.figure--stall-owner .figure__body { left: 20%; bottom: -12px; width: 100%; height: 162px; border-radius: 50% 50% 0 0 / 80% 80% 0 0; background: var(--orange); }
+.figure--stall-owner .figure__eye { bottom: 96px; width: 26px; height: 13px; border: 4px solid var(--ink); border-bottom: none; border-radius: 18px 18px 0 0; }
+.figure--stall-owner .figure__eye--left { left: 50%; }
+.figure--stall-owner .figure__eye--right { left: 72%; }
+.figure--stall-owner .figure__cheek { bottom: 72px; width: 20px; height: 20px; border-radius: 50%; background: #ffb48a; }
+.figure--stall-owner .figure__cheek--left { left: 40%; }
+.figure--stall-owner .figure__cheek--right { left: 84%; }
+.figure--stall-owner .figure__mouth { left: calc(61% - 13px); bottom: 58px; width: 52px; height: 23px; border: 4px solid var(--ink); border-top: none; border-radius: 0 0 35px 35px; }
+
+.figure--landlord,
+.figure--doctor,
+.figure--debater {
+  transform-origin: 100% 100%;
+  animation-name: partnerBreathe;
+}
+.figure--landlord { --bob: 5.4s; --bob-delay: 0.6s; }
+.figure--doctor { --bob: 3.8s; --bob-delay: 1.1s; }
+.figure--debater { --bob: 3.2s; --bob-delay: 0.3s; }
+
+/* ------------------------------------------------------------- Profile ---- */
+
+.screen--profile { padding: 36px 44px; }
+
+.profile-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+  margin-top: 28px;
+}
+.profile-col { display: flex; flex-direction: column; gap: 16px; }
+
+.profile-card { padding: 24px; }
+.profile-card__row { display: flex; align-items: center; gap: 18px; }
+.profile-card__who { flex: 1; min-width: 0; }
+.profile-card__who h2 { font-size: 32px; line-height: 1.1; }
+.profile-card__who p { margin: 3px 0 0; font-size: 14px; font-weight: 500; color: var(--ink-55); }
+.profile-card__who + .btn--quiet { flex: none; color: var(--ink); }
+
+.profile-card__fields { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 0; }
+.profile-card__name-field,
+.profile-card__age-field {
+  border: none;
+  border-bottom: 2.5px solid var(--pink);
+  background: transparent;
+  outline: none;
+  font-family: var(--display);
+  font-weight: 700;
+  color: var(--violet);
+}
+.profile-card__name-field { width: 100%; padding: 2px 0 6px; font-size: 26px; }
+.profile-card__age-field { width: 80px; padding: 2px 0 5px; font-size: 19px; }
+.profile-card__name-field::placeholder,
+.profile-card__age-field::placeholder { color: rgba(147, 71, 221, 0.35); }
+
+.profile-card__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 18px;
+}
+.swatches { display: flex; gap: 10px; }
+.swatch {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 2.5px solid rgba(38, 38, 38, 0.12);
+  border-radius: 50%;
+  cursor: pointer;
+}
+.swatch.is-picked { border-color: var(--ink); }
+
+.stat-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+.stat-tile { padding: 18px 10px; border-radius: var(--r-tile); text-align: center; }
+.stat-tile dt { font-size: 30px; }
+.stat-tile dd { margin: 6px 0 0; font-size: 10px; color: var(--ink-50); }
+
+.badges {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.badge { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.badge__disc {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 66px;
+  height: 66px;
+  border: 2px dashed rgba(38, 38, 38, 0.25);
+  border-radius: 50%;
+  font-family: var(--display);
+  font-size: 26px;
+  font-weight: 800;
+  color: rgba(38, 38, 38, 0.3);
+}
+.badge__label { font-size: 12px; font-weight: 600; color: var(--ink-45); text-align: center; }
+.badge.is-earned .badge__disc { border: none; color: var(--white); }
+.badge.is-earned .badge__label { color: rgba(38, 38, 38, 0.65); }
+.badge--streak.is-earned .badge__disc { background: var(--orange); }
+.badge--first-talk.is-earned .badge__disc { background: var(--violet); }
+.badge--bargainer.is-earned .badge__disc { background: var(--green); }
+
+.flame--badge { width: 22px; height: 26px; }
+.flame--badge i:first-child { left: 2px; top: 4px; width: 18px; height: 18px; background: var(--white); }
+.flame--badge i:last-child { left: 7px; top: 12px; width: 8px; height: 8px; background: var(--orange); }
+
+.panel--settings { padding-bottom: 8px; }
+.settings { display: flex; flex-direction: column; margin-top: 6px; }
+.settings__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  height: 56px;
+  padding: 0;
+  border: none;
+  border-bottom: 1.5px solid var(--ink-08);
+  background: transparent;
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 600;
+  text-align: left;
+}
+button.settings__row { cursor: pointer; }
+button.settings__row:not(:disabled):hover { color: var(--violet); }
+.settings__chevron {
+  fill: none;
+  stroke: rgba(38, 38, 38, 0.35);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.settings__value { font-size: 14px; font-weight: 500; color: var(--ink-50); }
+.settings__row--danger { border-bottom: none; color: var(--pink); font-weight: 700; }
+button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
+.settings__row:disabled { opacity: 0.55; cursor: not-allowed; }
 
 /* --------------------------------------------------------------- Talk ----- */
 
-.screen--talk { padding: 30px 44px 36px; }
+.screen--talk { padding: 28px 44px 0; }
+
+/* Ella's layer: the whole stage, so her dive when the mic opens has depth to
+   disappear into and room to come back from any side. */
+.talk-entry-frame {
+  position: absolute;
+  inset: 0;
+  perspective: 1400px;
+  pointer-events: none;
+}
+.talk-entry {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 90%;
+  transform-style: preserve-3d;
+}
+.talk-entry .ella--resting .ella__inner { animation: bobIdle 4.2s ease-in-out infinite; }
+.talk-entry .ella--listening .ella__inner { animation: leanListen 2.6s ease-in-out infinite; }
+.talk-entry .ella--speaking .ella__inner { animation: bounceSpeak 0.85s ease-in-out infinite; }
+.talk-entry .ella--thinking .ella__inner { animation: thinkSway 2.2s ease-in-out infinite; }
 
 .talk-head {
+  position: relative;
+  z-index: 2;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1260,86 +1356,41 @@ button { font-family: inherit; }
 }
 .talk-head .btn--quiet { min-height: 44px; }
 
+/* The reply sits in the space above Ella. The stage lets clicks through to her
+   everywhere its words are not. */
 .talk-stage {
   position: relative;
-  z-index: 1;
+  z-index: 2;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
   flex: 1;
   min-height: 0;
-  padding: 18px 0 76px;
+  padding: 18px 0 330px;
   overflow-y: auto;
-  scroll-padding-bottom: 76px;
+  pointer-events: none;
 }
 
 .talk-copy {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
+  gap: 20px;
   width: 100%;
   max-width: 720px;
   margin: auto 0;
+  pointer-events: auto;
 }
 
-.talk-state-indicator {
+/* Wave while she speaks, dots while she thinks. The slot keeps its height when
+   empty, so the reply does not jump as she moves between them. */
+.talk-cue {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: center;
-  gap: 8px;
-  height: 28px;
+  height: 26px;
   flex: none;
-  color: var(--ink-62);
-  font-size: 12.5px;
-  font-weight: 700;
-  letter-spacing: 0.035em;
-}
-.talk-state-indicator__visual {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 24px;
   color: var(--violet);
-}
-.talk-state-indicator .wave {
-  gap: 4px;
-  height: 18px;
-  transform: scale(0.74);
-}
-.talk-state-indicator .dots { gap: 5px; }
-.talk-state-indicator .dots > span { width: 7px; height: 7px; }
-.talk-listen-dot,
-.talk-ready-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--pink);
-}
-.talk-listen-dot {
-  box-shadow: 0 0 0 5px rgba(255, 49, 129, 0.14);
-  animation: dotBlink 1.1s ease-in-out infinite;
-}
-.talk-ready-dot { width: 8px; height: 8px; background: var(--violet); }
-.talk-status-sparkle {
-  width: 18px;
-  height: 22px;
-  background: var(--violet);
-  clip-path: polygon(50% 0, 61% 38%, 100% 50%, 61% 62%, 50% 100%, 39% 62%, 0 50%, 39% 38%);
-  animation: ellaSpark 1.1s ease-out both;
-}
-.talk-status-concern {
-  display: grid;
-  width: 20px;
-  height: 20px;
-  place-items: center;
-  border-radius: 50%;
-  background: #8b1644;
-  color: var(--white);
-  font-size: 13px;
-  line-height: 1;
 }
 
 /* Centred and balanced, as one whole reply.
@@ -1350,12 +1401,12 @@ button { font-family: inherit; }
    re-breaks every line in the paragraph, so both were impossible while text
    arrived a sentence at a time. */
 .talk-prompt {
-  max-width: 640px;
+  max-width: 700px;
   margin: 0;
   text-align: center;
-  font-size: clamp(23px, 2.25vw, 29px);
+  font-size: clamp(24px, 2.3vw, 30px);
   font-weight: 400;
-  line-height: 1.42;
+  line-height: 1.45;
   text-wrap: balance;
 }
 
@@ -1413,13 +1464,12 @@ button { font-family: inherit; }
   color: var(--violet-deep);
 }
 .talk-feedback__label {
-  color: var(--ink-62);
+  color: var(--violet-deep);
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.09em;
   text-transform: uppercase;
 }
-.talk-feedback__item--coach .talk-feedback__label { color: var(--violet-deep); }
 .talk-feedback p {
   margin: 0;
   font-size: 14px;
@@ -1438,19 +1488,13 @@ button { font-family: inherit; }
   line-height: 1.4;
 }
 
-.talk-dock {
-  position: relative;
-  height: 320px;
-  flex: none;
-  isolation: isolate;
-}
-.talk-dock .ella--stage-talk { z-index: 0; }
+/* The mic, what it is doing, and the way out to typing, standing on Ella. */
 .talk-controls {
   position: absolute;
-  top: 138px;
   left: 0;
   right: 0;
-  z-index: 2;
+  bottom: 44px;
+  z-index: 15;
   display: flex;
   justify-content: center;
   pointer-events: none;
@@ -1462,24 +1506,28 @@ button { font-family: inherit; }
   outline-color: var(--white);
   box-shadow: 0 0 0 2px rgba(38, 38, 38, 0.72);
 }
+/* A bigger target than the words, without moving them from where the design
+   puts them. */
 .talk-controls .link-button {
-  min-height: 44px;
-  padding: 10px 12px;
+  margin: -6px -10px;
+  padding: 6px 10px;
+  text-shadow: 0 1px 6px rgba(38, 38, 38, 0.35);
 }
 .talk-controls .link-button:hover {
-  color: var(--white);
+  color: rgba(255, 255, 255, 0.8);
   text-decoration-thickness: 2px;
 }
+.talk-controls .link-button:disabled { opacity: 0.58; cursor: not-allowed; }
 
 .mic-stack {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 7px;
+  gap: 10px;
   min-width: 320px;
 }
 
-.mic-wrap { position: relative; width: 84px; height: 84px; }
+.mic-wrap { position: relative; width: 92px; height: 92px; }
 .mic {
   position: absolute;
   inset: 0;
@@ -1492,11 +1540,21 @@ button { font-family: inherit; }
   color: var(--white);
   cursor: pointer;
   box-shadow: 0 12px 28px rgba(38, 38, 38, 0.35);
-  transition: transform 0.1s ease, background 0.15s ease;
+  transition: transform 0.1s ease, background 0.2s ease;
 }
 .mic:not(:disabled):active { transform: scale(0.95); }
 .mic:disabled { opacity: 0.65; cursor: not-allowed; }
-.mic.is-live { background: var(--pink); }
+.mic.is-done { background: var(--green); }
+.mic.is-done:disabled { opacity: 1; cursor: default; }
+.mic__check {
+  width: 36px;
+  height: 36px;
+  fill: none;
+  stroke: var(--white);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 .mic-pulse {
   position: absolute;
   inset: 0;
@@ -1506,6 +1564,18 @@ button { font-family: inherit; }
   pointer-events: none;
 }
 .mic-pulse--delayed { animation-delay: 0.8s; }
+
+.mic-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--white);
+  text-shadow: 0 1px 6px rgba(38, 38, 38, 0.35);
+}
+.mic-hint--soft { color: rgba(255, 255, 255, 0.88); text-shadow: none; }
 
 .composer {
   display: flex;
@@ -1544,219 +1614,6 @@ button { font-family: inherit; }
 }
 .composer__send:disabled { opacity: 0.5; cursor: not-allowed; }
 .composer .link-button { width: 100%; text-align: center; }
-.talk-controls .link-button:disabled { opacity: 0.58; cursor: not-allowed; }
-
-/* ------------------------------------------------------------- Garden ----- */
-
-.screen--garden {
-  padding: 36px 44px;
-  background: var(--sand);
-}
-
-.garden-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex: none;
-}
-.garden-head__title { display: flex; align-items: center; gap: 16px; }
-.garden-head__progress { display: flex; align-items: center; gap: 12px; }
-.garden-head__progress strong { font-size: 13px; font-weight: 700; color: var(--green-deep); }
-
-.reveal {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex: none;
-  margin: 18px 0 0;
-  padding: 14px 20px;
-  border-radius: var(--r-tile);
-  background: var(--green);
-  color: var(--white);
-  font-size: 15px;
-  font-weight: 600;
-}
-.reveal__dot { width: 12px; height: 12px; flex: none; border-radius: 50%; background: var(--white); }
-
-.garden-frame {
-  position: relative;
-  flex: 1;
-  min-height: 0;
-  margin-top: 4px;
-}
-.garden-stage {
-  position: absolute;
-  top: 0;
-  left: 50%;
-  transform-origin: top center;
-  margin-left: -555px;
-}
-
-.garden-path { position: absolute; left: 0; top: 0; }
-.garden-path path {
-  fill: none;
-  stroke: var(--green-path);
-  stroke-width: 30;
-  stroke-linecap: round;
-}
-.garden-path__dashed { stroke-dasharray: 0.1 46; opacity: 0.55; }
-
-.unit {
-  position: absolute;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  width: 150px;
-}
-.unit__node {
-  position: relative;
-  width: 100px;
-  height: 100px;
-  border: none;
-  padding: 0;
-  background: transparent;
-  cursor: pointer;
-  transition: transform 0.15s ease;
-}
-.unit__node:not(:disabled):hover { transform: translateY(-3px); }
-.unit__node:disabled { cursor: not-allowed; }
-.unit__ring {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  background: var(--white);
-  box-shadow: 0 5px 16px rgba(122, 86, 52, 0.2);
-}
-.unit__tint {
-  position: absolute;
-  inset: 7px;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  padding-bottom: 9px;
-  border-radius: 50%;
-}
-.unit__arc { position: absolute; top: -8px; left: -8px; }
-.unit__arc circle { fill: none; stroke: var(--green); stroke-width: 7; stroke-linecap: round; }
-.unit__check {
-  position: absolute;
-  top: -3px;
-  right: -3px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  background: var(--green);
-  border: 3px solid var(--white);
-}
-.unit__check svg {
-  width: 14px;
-  height: 14px;
-  fill: none;
-  stroke: var(--white);
-  stroke-width: 3.5;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.unit__num { margin-top: 10px; font-size: 11.5px; color: var(--ink-45); }
-.unit__name {
-  font-size: 13.5px;
-  font-weight: 600;
-  line-height: 1.25;
-  text-align: center;
-  color: var(--ink);
-}
-
-/* plants — grown in CSS, one shape per growth stage */
-.plant { position: relative; display: block; width: 40px; }
-.plant > i { position: absolute; display: block; }
-.plant__soil { bottom: 2px; left: 4px; width: 32px; height: 10px; border-radius: 50%; background: var(--soil); }
-.plant__stem { bottom: 10px; left: 18px; border-radius: 3px; background: var(--green-deep); }
-
-.plant--bloom { height: 58px; }
-.plant--bloom .plant__stem { width: 4px; height: 26px; }
-.plant__petal { width: 12px; height: 12px; border-radius: 50%; background: var(--pink); }
-.plant__petal--w { top: 12px; left: 6px; }
-.plant__petal--e { top: 12px; left: 22px; }
-.plant__petal--n { top: 2px; left: 14px; }
-.plant__petal--s { top: 20px; left: 14px; }
-.plant__heart { top: 11px; left: 14px; width: 12px; height: 12px; border-radius: 50%; background: var(--orange); }
-
-.plant--young { height: 48px; }
-.plant--young .plant__stem { width: 4px; height: 22px; }
-.plant__leaf { background: var(--green); }
-.plant--young .plant__leaf--left {
-  bottom: 24px;
-  left: 4px;
-  width: 16px;
-  height: 9px;
-  border-radius: 50% 50% 50% 0;
-  transform: rotate(-18deg);
-}
-.plant--young .plant__leaf--right {
-  bottom: 28px;
-  left: 21px;
-  width: 16px;
-  height: 9px;
-  border-radius: 50% 50% 0 50%;
-  transform: rotate(18deg);
-}
-
-.plant--seedling { height: 38px; }
-.plant--seedling .plant__stem { width: 3px; height: 12px; background: var(--green); }
-.plant--seedling .plant__leaf--left {
-  bottom: 20px;
-  left: 9px;
-  width: 12px;
-  height: 7px;
-  border-radius: 50% 50% 50% 0;
-  background: var(--green-soft);
-  transform: rotate(-16deg);
-}
-
-.plant--bare { height: 26px; }
-.plant--bare .plant__soil { left: 2px; width: 36px; height: 12px; }
-
-.plant--locked { width: 22px; height: 40px; }
-.plant__shackle {
-  top: 0;
-  left: 3px;
-  width: 16px;
-  height: 14px;
-  border: 3px solid var(--ink-45);
-  border-bottom: none;
-  border-radius: 10px 10px 0 0;
-}
-.plant__lock { top: 12px; left: 0; width: 22px; height: 16px; border-radius: 5px; background: var(--ink-45); }
-
-/* scenery — faded props that make the plot feel lived in */
-.scenery { position: absolute; inset: 0; pointer-events: none; }
-.scenery__twigs { position: absolute; display: flex; gap: 4px; align-items: flex-end; }
-.scenery__twigs i { display: block; border-radius: 4px; background: var(--bark); }
-.scenery__twigs i:nth-child(1) { width: 7px; height: 22px; transform: rotate(-18deg); }
-.scenery__twigs i:nth-child(2) { width: 7px; height: 28px; }
-.scenery__twigs i:nth-child(3) { width: 7px; height: 20px; transform: rotate(16deg); }
-.scenery__twigs--left { left: 44px; top: 330px; }
-.scenery__twigs--bottom { right: 150px; bottom: 40px; }
-
-.scenery__shed {
-  position: absolute;
-  top: 30px;
-  right: 46px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-.scenery__shed .scenery__twigs { position: static; }
-.scenery__shed-roof { width: 56px; height: 13px; margin-top: -2px; border-radius: 4px; background: rgba(154, 106, 68, 0.14); }
-.scenery__shed-body { width: 40px; height: 30px; border-radius: 0 0 14px 14px; background: rgba(154, 106, 68, 0.11); }
-
-.scenery__pebble { position: absolute; border-radius: 50%; background: var(--bark); }
-.scenery__pebble--a { left: 300px; top: 330px; width: 26px; height: 10px; }
-.scenery__pebble--b { left: 334px; top: 338px; width: 15px; height: 7px; background: rgba(154, 106, 68, 0.1); }
-.scenery__pebble--c { right: 250px; top: 70px; width: 22px; height: 9px; background: rgba(154, 106, 68, 0.1); }
 
 /* --------------------------------------------------------- Onboarding ----- */
 
@@ -1771,64 +1628,57 @@ button { font-family: inherit; }
 .ob-welcome { position: absolute; inset: 0; overflow: hidden; }
 .ob-welcome__title {
   position: absolute;
-  top: 148px;
+  top: 110px;
   left: 0;
   right: 0;
   text-align: center;
-  font-size: 68px;
-}
-.ella--ob-hero {
-  left: 50%;
-  bottom: -70px;
-  margin-left: calc(var(--ella-w) * var(--ella-scale) / -2);
+  font-size: 76px;
 }
 .ob-welcome__foot {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: 60px;
+  bottom: 64px;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 16px;
 }
-.ob-welcome__cta { width: 340px; height: 58px; font-size: 17px; }
+.ob-welcome__cta {
+  width: 360px;
+  height: 58px;
+  font-size: 17px;
+  box-shadow: 0 10px 26px rgba(38, 38, 38, 0.18);
+}
 .ob-welcome__login {
   margin: 0;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.82);
+  color: rgba(255, 255, 255, 0.85);
 }
-.ob-welcome__login .link-button { font-size: 14px; }
+.ob-welcome__login .link-button { font-size: 15px; }
+.ob-welcome__login .link-button:hover { color: var(--white); }
 
-/* Short laptop screens: at full size the close-up rises past the title and
-   swallows it, so she shrinks and sits lower to keep the copy readable. */
-@media (max-height: 820px) {
-  .ob-welcome__title { top: 96px; font-size: 54px; }
-  .ella--ob-hero { bottom: -56px; --ella-scale: 0.8 !important; }
+/* Short laptop screens: at full size the close-up crowds the title, so she
+   shrinks and sits lower to keep the copy readable. */
+@media (max-height: 780px) {
+  .ob-welcome__title { top: 78px; font-size: 62px; }
+  .ella--ob-welcome { bottom: -60px; --ella-scale: 0.86 !important; }
   .ob-welcome__foot { bottom: 44px; gap: 12px; }
-  .ob-welcome__cta { width: 300px; height: 54px; font-size: 16px; }
-}
-
-@media (max-height: 680px) {
-  .ob-welcome__title { top: 54px; font-size: 42px; }
-  .ella--ob-hero { bottom: -44px; --ella-scale: 0.62 !important; }
-  .ob-welcome__foot { bottom: 26px; }
-  .ob-welcome__cta { width: 268px; height: 50px; }
 }
 
 /* the three form steps share a chrome: back button, progress dots, corner Ella */
 .ob__back {
   position: absolute;
-  top: 30px;
+  top: 28px;
   left: 36px;
-  z-index: 5;
+  z-index: 20;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
-  border: 1.5px solid rgba(38, 38, 38, 0.16);
+  width: 46px;
+  height: 46px;
+  border: 1.5px solid var(--ink-16);
   border-radius: 50%;
   background: var(--white);
   color: var(--ink);
@@ -1847,11 +1697,11 @@ button { font-family: inherit; }
 
 .ob__dots {
   position: absolute;
-  top: 48px;
+  top: 47px;
   left: 50%;
-  z-index: 5;
+  z-index: 20;
   display: flex;
-  gap: 7px;
+  gap: 8px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -1865,37 +1715,68 @@ button { font-family: inherit; }
   transition: width 0.25s ease, background 0.25s ease;
 }
 .ob__dots li.is-done { background: var(--violet); }
-.ob__dots li.is-current { width: 30px; background: var(--violet); }
+.ob__dots li.is-current { width: 32px; background: var(--violet); }
 
+/* What the corner Ella says once she has a name to say. */
+.ob-bubble {
+  position: absolute;
+  right: 120px;
+  bottom: 240px;
+  z-index: 12;
+  max-width: 280px;
+  margin: 0;
+  padding: 15px 20px;
+  border-radius: 20px 20px 4px 20px;
+  background: var(--white);
+  box-shadow: 0 10px 26px rgba(38, 38, 38, 0.16);
+  font-family: var(--display);
+  font-size: 23px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--violet);
+  animation: fadeUp 0.3s ease-out;
+}
+
+/* A step covers the window to centre its column, but lets clicks through
+   everywhere else so Ella can still be poked. */
 .ob-step {
   position: absolute;
   inset: 0;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 0 44px 30px;
+  padding: 0 44px 60px;
   text-align: center;
+  pointer-events: none;
 }
-.ob-step__title { font-size: 46px; max-width: 820px; }
+.ob-step--top { align-items: flex-start; padding: 130px 44px 0; }
+.ob-step__column {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 460px;
+  max-width: 100%;
+  pointer-events: auto;
+}
+.ob-step__column--wide { width: 480px; }
+.ob-step__title { font-size: 48px; line-height: 1.05; }
 .ob-step__title label { cursor: text; }
 .ob-step__sub {
   margin: 10px 0 0;
-  max-width: 620px;
   font-size: 15px;
   font-weight: 500;
-  color: rgba(38, 38, 38, 0.55);
+  color: var(--ink-55);
+  text-wrap: pretty;
 }
 .ob-step__hint {
   margin: 14px 0 0;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 500;
-  color: rgba(38, 38, 38, 0.5);
+  color: var(--ink-55);
 }
 .ob-step__field {
-  width: 400px;
-  max-width: 100%;
-  margin-top: 30px;
+  width: 100%;
+  margin-top: 32px;
   padding: 4px 0 10px;
   border: none;
   border-bottom: 3px solid var(--pink);
@@ -1903,82 +1784,47 @@ button { font-family: inherit; }
   outline: none;
   text-align: center;
   font-family: var(--display);
-  font-size: 38px;
+  font-size: 36px;
   font-weight: 700;
   color: var(--violet);
 }
-.ob-step__field--short { width: 160px; }
 .ob-step__field::placeholder { color: rgba(147, 71, 221, 0.35); }
-.ob-step__cta { margin-top: 36px; height: 56px; padding: 0 40px; }
-.ob-step__skip { margin-top: 26px; }
+.ob-step__cta { margin-top: 34px; }
+.ob-step__enter { margin: 12px 0 0; font-size: 12.5px; font-weight: 600; color: var(--ink-40); }
+.ob-step__skip { margin-top: 24px; }
 
-.link-button--muted { color: var(--ink-48); }
-.link-button--muted:hover { color: var(--ink); }
+.ob-step__inline { display: flex; align-items: flex-end; gap: 18px; margin-top: 26px; }
+.ob-step__inline .ob-step__field--short { width: 150px; margin-top: 0; padding-bottom: 8px; }
+.ob-step__inline .ob-step__cta { flex: none; margin-top: 0; }
 
-.btn--green { background: var(--green); color: var(--white); }
-.btn--green:not(:disabled):hover { background: #5a9c05; }
+/* Log in's welcome back: the learner's own blob over the greeting. */
+.ob-step__title--greeting { margin-top: 22px; }
 
 /* mic check */
-.ob-mic-stage {
-  position: relative;
-  width: min(390px, 100%);
-  height: 276px;
-  margin-top: 22px;
-  overflow: hidden;
-  border: 1.5px solid rgba(147, 71, 221, 0.12);
-  border-radius: 38px;
-  background:
-    radial-gradient(circle at 50% 105%, rgba(147, 71, 221, 0.14), transparent 46%),
-    rgba(237, 226, 250, 0.58);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.76);
-  transition: background 0.25s ease, border-color 0.25s ease;
-}
-.ob-mic-stage.is-listening { border-color: rgba(255, 49, 129, 0.34); }
-.ob-mic-stage.is-done {
-  border-color: rgba(104, 181, 6, 0.3);
-  background:
-    radial-gradient(circle at 50% 105%, rgba(104, 181, 6, 0.16), transparent 48%),
-    rgba(243, 249, 235, 0.86);
-}
-.ob-mic-stage.is-error { border-color: rgba(255, 49, 129, 0.26); }
-.ella--mic-check {
-  top: 40px;
-  left: 50%;
-  margin-left: calc(var(--ella-w) * var(--ella-scale) / -2);
-}
-.ob-mic-wrap {
-  position: absolute;
-  left: 50%;
-  bottom: 17px;
-  z-index: 2;
-  width: 88px;
-  height: 88px;
-  transform: translateX(-50%);
-}
+.ob-mic-wrap { position: relative; width: 116px; height: 116px; margin-top: 38px; }
 .ob-mic {
   position: absolute;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 4px solid rgba(255, 255, 255, 0.82);
+  border: none;
   border-radius: 50%;
-  background: var(--white);
-  color: var(--violet);
+  background: var(--violet);
+  color: var(--white);
   cursor: pointer;
-  box-shadow: 0 12px 28px rgba(38, 38, 38, 0.2);
-  transition: background 0.2s ease, color 0.2s ease, transform 0.1s ease;
+  box-shadow: 0 14px 30px rgba(38, 38, 38, 0.22);
+  transition: background 0.2s ease, transform 0.1s ease;
 }
-.ob-mic:active { transform: scale(0.95); }
+.ob-mic:not(:disabled):active { transform: scale(0.95); }
 .ob-mic:disabled { opacity: 1; }
 .ob-mic.is-requesting { cursor: wait; }
-.ob-mic.is-listening { background: var(--pink); color: var(--white); }
-.ob-mic.is-done { background: var(--green); color: var(--white); cursor: default; }
-.ob-mic.is-error { color: var(--pink); }
-.ob-mic__loader { width: 34px; height: 34px; }
+.ob-mic.is-listening { background: var(--violet-deep); }
+.ob-mic.is-done { background: var(--green); cursor: default; }
+.ob-mic__loader { width: 40px; height: 40px; }
 .ob-mic__check {
-  width: 44px;
-  height: 44px;
+  width: 46px;
+  height: 46px;
   fill: none;
   stroke: var(--white);
   stroke-width: 3.5;
@@ -1989,48 +1835,41 @@ button { font-family: inherit; }
   position: absolute;
   inset: 0;
   border-radius: 50%;
-  background: rgba(255, 49, 129, 0.28);
+  background: rgba(147, 71, 221, 0.3);
   animation: micPulse 1.6s ease-out infinite;
 }
 .ob-mic-pulse--delayed { animation-delay: 0.8s; }
 .ob-mic-hint {
-  display: flex;
-  align-items: center;
-  gap: 8px;
   margin: 18px 0 0;
   font-size: 15px;
   font-weight: 600;
-  color: var(--ink-62);
+  color: var(--ink-60);
 }
-.ob-mic-hint__dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--violet);
-  box-shadow: 0 0 0 4px rgba(147, 71, 221, 0.1);
-}
-.ob-mic-stage.is-listening + .ob-mic-hint .ob-mic-hint__dot { background: var(--pink); }
-.ob-mic-stage.is-done + .ob-mic-hint .ob-mic-hint__dot { background: var(--green); }
-.ob-mic-stage.is-error + .ob-mic-hint .ob-mic-hint__dot { background: var(--pink); }
-.ob-mic-hint + .voice-meter > span { background: var(--pink); }
+.ob-mic-hint + .voice-meter { margin-top: 10px; }
+.ob-mic-hint + .voice-meter > span { background: var(--violet); }
 .ob-mic-error {
-  max-width: 560px;
+  max-width: 480px;
   margin: 12px 0 0;
   font-size: 13px;
   line-height: 1.45;
 }
+.ob-mic-cta { width: 320px; margin-top: 22px; }
 
-@media (max-height: 760px) {
-  .ob-mic-stage { height: 232px; margin-top: 14px; }
-  .ella--mic-check { top: 28px; --ella-scale: 0.44 !important; }
-  .ob-mic-wrap { bottom: 12px; width: 78px; height: 78px; }
-  .ob-mic-hint { margin-top: 12px; }
-  .ob-step[data-screen="onboarding-miccheck"] .ob-step__cta { margin-top: 22px; }
-  .ob-step[data-screen="onboarding-miccheck"] .ob-step__skip { margin-top: 18px; }
+/* placement talk reuses the conversation stage, with Ella in a dock below */
+.ob-placement { background: var(--canvas); }
+.ob-placement .talk-stage {
+  justify-content: center;
+  gap: 20px;
+  padding: 0;
+  pointer-events: auto;
+}
+.ob-placement__go { height: 54px; padding: 0 40px; }
+.talk-dock {
+  position: relative;
+  height: 330px;
+  flex: none;
 }
 
-/* placement talk reuses the conversation stage */
-.ob-placement { background: var(--canvas); }
 .ob__error {
   position: absolute;
   left: 0;
@@ -2047,24 +1886,26 @@ button { font-family: inherit; }
   justify-content: center;
 }
 
-.summary__panel {
-  width: 100%;
-  max-width: 720px;
-  padding: 40px 46px 44px;
-  border-radius: var(--r-hero);
-  background: var(--violet);
-  color: var(--white);
+/* Room above the card for Ella to peek over it. */
+.summary { position: relative; width: 100%; max-width: 680px; margin-top: 104px; }
+.summary__card {
+  position: relative;
+  padding: 32px 36px 34px;
+  border: 1.5px solid var(--ink-10);
+  border-radius: var(--r-panel);
+  background: var(--white);
+  box-shadow: 0 18px 40px rgba(38, 38, 38, 0.08);
 }
+.summary__headline { margin-top: 10px; font-size: 42px; line-height: 1.05; }
 .summary__lede {
-  margin: 14px 0 0;
+  margin: 12px 0 0;
   font-size: 16px;
   font-weight: 500;
   line-height: 1.55;
-  color: rgba(255, 255, 255, 0.85);
+  color: var(--ink-60);
 }
-.summary__panel .stats { gap: 34px; }
-
-.summary__actions { display: flex; gap: 12px; margin-top: 28px; }
+.summary__card .stats { margin-top: 22px; }
+.summary__home { margin-top: 26px; }
 
 /* --------------------------------------------------- boot / veil / toast -- */
 
@@ -2136,48 +1977,32 @@ button { font-family: inherit; }
 
 /* ----------------------------------------------------------- narrower ----- */
 
-@media (max-width: 1279px) {
-  .home-main { overflow-y: auto; padding-right: 4px; }
-  .topic__headline { font-size: clamp(22px, 2.6vw, 32px); }
-  .topic__headline--indent { padding-left: 24px; }
-  /* The tall lilac card loses its second row here, so its stack has to shrink. */
-  .topic--framed { padding: 16px 14px 18px; }
-  .topic__title--center { font-size: 24px; }
-  .topic--framed .topic__meta { margin-top: 6px; }
-  .topic__foot { gap: 8px; }
-  .ella--corner-home { display: none; }
-}
-
 @media (max-width: 1320px) {
-  :root { --rail-w: 246px; }
-  .screen--home { padding: 32px 30px; }
-  .screen--talk { padding: 24px 30px 30px; }
-  .screen--garden { padding: 28px 30px; }
-  .hero { padding: 26px 28px; }
-  .hero__title { font-size: 30px; }
-  .page-head .display { font-size: 34px; }
+  :root { --rail-w: 260px; }
+  .screen--home,
+  .screen--profile { padding: 32px 30px; }
+  .screen--cast { padding: 32px 30px 36px; }
+  .screen--talk { padding: 24px 30px 0; }
+  .today__card { padding: 24px 26px; gap: 20px; }
+  .today__title { font-size: 30px; }
+  .page-head .display,
+  .page-title { font-size: 36px; }
+  .topic__title { font-size: 21px; }
+  .topic--tall .topic__title { font-size: 24px; }
 }
 
 @media (max-height: 820px) {
-  .talk-dock { height: 250px; }
-  .talk-stage { padding: 8px 0 84px; scroll-padding-bottom: 84px; }
-  .talk-copy { gap: 10px; }
-  .talk-state-indicator { height: 24px; }
-  .talk-prompt { font-size: 22px; line-height: 1.34; }
-  .talk-feedback__item { padding: 9px 13px 10px; }
-  .talk-copy .btn--replay { min-height: 44px; height: 44px; }
-  .ella--stage-talk {
-    bottom: -115px;
-    --ella-scale: 0.88 !important;
-  }
-  .talk-controls { top: 90px; }
-  .mic-stack { gap: 6px; }
-  .mic-wrap { width: 76px; height: 76px; }
-  .ella--celebration .ella__mouth--open { top: 121px; }
-  .hero { padding: 22px 28px; }
-  .hero__blurb { display: none; }
+  .home-body { margin-top: 90px; }
+  .today__blurb { display: none; }
   .section-head { margin-top: 20px; }
-  .home-body { margin-top: 20px; }
+  .talk-stage { padding-bottom: 290px; }
+  .ella--stage-talk { bottom: -120px; --ella-scale: 0.9 !important; }
+  .talk-controls { bottom: 28px; }
+  .talk-copy { gap: 14px; }
+  .talk-prompt { font-size: 24px; line-height: 1.38; }
+  .talk-dock { height: 290px; }
+  .ob-step--top { padding-top: 104px; }
+  .ella--ob-age { --ella-scale: 0.8 !important; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -75,19 +75,29 @@ fn prepare_engine(
                 });
             };
             if let Err(reason) = models::ensure(&models_root, &mut report) {
-                // An interrupted download resumes on the next launch, so this
-                // is a setback rather than a dead install.
-                slot.waiting_on(format!("Ella could not finish downloading her models: {reason}"));
-                announce(SetupProgress {
-                    stage: "failed".into(),
-                    message: reason.to_string(),
-                    downloaded_bytes: 0,
-                    total_bytes: 0,
-                    index: 0,
-                    of: 0,
-                    attempt: 1,
-                });
-                return;
+                if models::all_on_disk(&models_root).unwrap_or(false) {
+                    // Only the download failed, and every model is already on
+                    // disk: its record was lost, or an update named a newer
+                    // file while the laptop is offline. Ella loads what she ran
+                    // on last time and tries the download again next launch.
+                    eprintln!(
+                        "[setup] could not refresh the models ({reason}); loading the ones already on disk"
+                    );
+                } else {
+                    // An interrupted download resumes on the next launch, so
+                    // this is a setback rather than a dead install.
+                    slot.waiting_on(format!("Ella could not finish downloading her models: {reason}"));
+                    announce(SetupProgress {
+                        stage: "failed".into(),
+                        message: reason.to_string(),
+                        downloaded_bytes: 0,
+                        total_bytes: 0,
+                        index: 0,
+                        of: 0,
+                        attempt: 1,
+                    });
+                    return;
+                }
             }
         }
         Ok(_) => {}
@@ -133,7 +143,8 @@ impl SpeechBroadcast for WindowSpeech {
     }
 }
 
-/// Shuts the engine down when Tauri clears the app's resource table.
+/// Shuts the engine down, and folds the database's log into `ella.sqlite3`,
+/// when Tauri clears the app's resource table.
 ///
 /// On Windows the updater runs the installer and then calls `process::exit`
 /// itself, which skips `RunEvent::Exit`; the only thing it does first is
@@ -210,6 +221,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ipc::bootstrap,
             ipc::save_learner,
+            ipc::log_in,
+            ipc::log_out,
+            ipc::save_avatar_color,
             ipc::start_session,
             ipc::start_chore,
             ipc::speak_opening,
@@ -222,14 +236,15 @@ pub fn run() {
             ipc::cancel_voice_stream,
             ipc::finish_voice_stream_turn,
             ipc::complete_session,
-            ipc::reset_demo_data,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Ella")
         .run(|app, event| {
             // Tauri exits the process without dropping managed state, so this
-            // is the last chance to stop llama-server and free Canary's Metal
-            // buffers. See `DeferredEngine::shutdown`.
+            // is the last chance to stop llama-server, free Canary's Metal
+            // buffers and fold the database's write-ahead log into
+            // ella.sqlite3. See `DeferredEngine::shutdown` and
+            // `Database::checkpoint`.
             if let tauri::RunEvent::Exit = event {
                 if let Some(state) = app.try_state::<AppState>() {
                     state.0.shutdown();

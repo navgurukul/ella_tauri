@@ -360,11 +360,27 @@ fn record(models_root: &Path, spec: &ModelSpec) -> EllaResult<()> {
         },
     );
     fs::create_dir_all(models_root)?;
-    fs::write(
-        models_root.join(STATE_FILE),
-        serde_json::to_string_pretty(&state)?,
-    )?;
+    // Written beside the real file and renamed over it, so a quit or a power
+    // cut mid-write leaves the old record rather than half a new one. A
+    // record that does not parse reads as empty, and an empty record sends an
+    // offline laptop off to download weights it already has.
+    let temporary = models_root.join(format!("{STATE_FILE}.part"));
+    let mut file = fs::File::create(&temporary)?;
+    file.write_all(serde_json::to_string_pretty(&state)?.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&temporary, models_root.join(STATE_FILE))?;
     Ok(())
+}
+
+/// Whether every model the app needs has a file at its place on disk, whatever
+/// the record says about where it came from. When a download cannot happen —
+/// no internet — weights that are already there are worth loading: they are
+/// what Ella ran on last time, and a laptop that is offline should still talk.
+pub fn all_on_disk(models_root: &Path) -> EllaResult<bool> {
+    Ok(required_models()?
+        .iter()
+        .all(|spec| models_root.join(&spec.target).is_file()))
 }
 
 #[cfg(test)]
@@ -429,5 +445,36 @@ mod tests {
             .unwrap()
             .iter()
             .any(|outstanding| outstanding.key == "stt"));
+    }
+
+    #[test]
+    fn weights_on_disk_are_usable_offline_whatever_the_record_says() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(!all_on_disk(root.path()).unwrap());
+        for spec in required_models().unwrap() {
+            let target = root.path().join(&spec.target);
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            fs::write(&target, b"weights").unwrap();
+        }
+        // No record at all, as after a lost or corrupt `.ella-models.json`:
+        // both are "outstanding", but a laptop without internet can still
+        // load them.
+        assert_eq!(outstanding(root.path()).unwrap().len(), 2);
+        assert!(all_on_disk(root.path()).unwrap());
+
+        let stt = required_models().unwrap().into_iter().find(|spec| spec.key == "stt").unwrap();
+        fs::remove_file(root.path().join(&stt.target)).unwrap();
+        assert!(!all_on_disk(root.path()).unwrap());
+    }
+
+    #[test]
+    fn the_record_is_replaced_whole_and_leaves_nothing_half_written() {
+        let root = tempfile::tempdir().unwrap();
+        let specs = required_models().unwrap();
+        for spec in &specs {
+            record(root.path(), spec).unwrap();
+        }
+        assert_eq!(read_state(root.path()).files.len(), 2);
+        assert!(!root.path().join(format!("{STATE_FILE}.part")).exists());
     }
 }

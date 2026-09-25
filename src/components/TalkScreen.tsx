@@ -1,10 +1,11 @@
 import { FormEvent, Fragment, useEffect, useRef, useState } from "react";
+import type { RefObject } from "react";
 import { LoaderCircle, Send } from "lucide-react";
 import {
   EllaMascot,
   SpeakingWave,
   ThinkingDots,
-  type EllaReaction,
+  prefersReducedMotion,
   type EllaState,
 } from "./EllaMascot";
 import { MicGlyph } from "./HomeScreen";
@@ -29,11 +30,16 @@ import type {
 /** Anything that can be played with its word timings: a turn, or the opening. */
 type Playback = { audio?: AudioPayload | null; speech_words: WordSpan[] };
 
+/** How the last turn went, for the screen reader's status line. */
+type Reaction = "success" | "error" | null;
+
+/** The line under the mic. While Ella is resting or listening, Space works the
+ * mic too, and a key cap follows the line to say so. */
 const MIC_HINT: Record<EllaState, string> = {
-  resting: "Tap to speak",
-  listening: "Listening… tap when you finish",
+  resting: "Click or press",
+  listening: "Listening… press again when you finish",
   thinking: "Ella is thinking…",
-  speaking: "Tap to interrupt and speak",
+  speaking: "Ella is speaking",
 };
 
 // Below this, `voiceLevel` (0-1, from the same RMS meter that drives the mic's
@@ -72,7 +78,7 @@ export function TalkScreen({
   /** Held from the moment the last turn arrives until Ella has finished saying
    * it, so the summary does not replace the screen mid-sentence. */
   const [pendingSummary, setPendingSummary] = useState<SessionSummary | null>(null);
-  const [reaction, setReaction] = useState<EllaReaction>(null);
+  const [reaction, setReaction] = useState<Reaction>(null);
   // Ella's words in speaking order, and which one she is on. Both arrive with
   // the audio, sentence by sentence, so the reply appears as it is spoken
   // instead of all at once when the turn returns.
@@ -108,6 +114,11 @@ export function TalkScreen({
   const micButton = useRef<HTMLButtonElement>(null);
   const focusMicAfterModeSwitch = useRef(false);
   const mounted = useRef(true);
+  const entryFrame = useRef<HTMLDivElement>(null);
+  /** What Space does right now; refreshed every render so the one key listener
+   * never acts on a stale state. */
+  const spaceAction = useRef<() => void>(() => undefined);
+  const loom = useListenEntrance(entryFrame, state === "listening");
 
   const latestElla = [...session.messages].reverse().find((message) => message.speaker === "ella");
 
@@ -168,6 +179,21 @@ export function TalkScreen({
       micButton.current?.focus();
     }
   }, [typing]);
+
+  // Space works the mic from anywhere on the stage, as the hint under it says,
+  // except where Space already means something: in a text field, or on a
+  // focused button (which is already the mic, or should do its own thing).
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.code !== "Space" || event.repeat) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("input, textarea, button, [contenteditable='true']")) return;
+      event.preventDefault();
+      spaceAction.current();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   // Arms a "speak up" nudge for the whole time the mic is open, and disarms it
   // the moment listening ends - by finishing, cancelling, or unmounting.
@@ -316,7 +342,7 @@ export function TalkScreen({
     };
   }
 
-  function flashReaction(next: Exclude<EllaReaction, null>, duration = 1300) {
+  function flashReaction(next: Exclude<Reaction, null>, duration = 1300) {
     if (reactionTimer.current !== null) window.clearTimeout(reactionTimer.current);
     setReaction(next);
     reactionTimer.current = window.setTimeout(() => {
@@ -647,23 +673,35 @@ export function TalkScreen({
     : state === "speaking" && sending
       ? "Ella is answering…"
       : MIC_HINT[state];
-  const stateStatus = micStarting
-    ? "Opening the microphone…"
-    : state === "resting"
-      ? reaction === "success"
-        ? "Nice work"
-        : reaction === "error"
-          ? "Let’s try that again"
-          : "Your turn"
-      : state === "listening"
-        ? "Listening"
-        : state === "thinking"
-          ? "Ella is thinking"
-          : "Ella is speaking";
-  const announcedStatus = `${micHint}${reaction === "success" ? " Nice work." : ""}`;
+  const spaceWorks = !micStarting && !sending && (state === "resting" || state === "listening");
+  const announcedStatus = `${micHint}${spaceWorks && state === "resting" ? " Space" : ""}${
+    reaction === "success" ? " Nice work." : ""
+  }`;
+
+  useEffect(() => {
+    spaceAction.current = () => {
+      if (typing || interactionLocked) return;
+      void (state === "listening" ? finishListening() : beginListening());
+    };
+  });
 
   return (
     <div className="screen screen--talk" data-screen="talk">
+      {/* Ella stands behind the whole stage rather than in a dock, so that when
+          the mic opens she can dive away into it and come back from any side. */}
+      <div className="talk-entry-frame" aria-hidden="true">
+        <div ref={entryFrame} className="talk-entry">
+          <EllaMascot
+            variant="conversation"
+            className="ella--stage-talk"
+            state={state}
+            ears={state === "listening" ? (loom ? "loom" : "listen") : "rest"}
+            pokeable
+            decorative
+          />
+        </div>
+      </div>
+
       <header className="talk-head">
         <span className="pill pill--white">{session.topic_label}</span>
         <button
@@ -678,25 +716,14 @@ export function TalkScreen({
 
       <div className="talk-stage">
         <div className="talk-copy">
-          <div className="talk-state-indicator" aria-hidden="true">
-            <span className="talk-state-indicator__visual">
-              {micStarting ? (
-                <LoaderCircle className="spin" size={18} />
-              ) : state === "speaking" ? (
-                <SpeakingWave />
-              ) : state === "thinking" ? (
-                <ThinkingDots />
-              ) : state === "listening" ? (
-                <span className="talk-listen-dot" />
-              ) : reaction === "success" ? (
-                <span className="talk-status-sparkle" />
-              ) : reaction === "error" ? (
-                <span className="talk-status-concern">!</span>
-              ) : (
-                <span className="talk-ready-dot" />
-              )}
-            </span>
-            <span>{stateStatus}</span>
+          <div className="talk-cue" aria-hidden="true">
+            {micStarting ? (
+              <LoaderCircle className="spin" size={20} />
+            ) : state === "speaking" ? (
+              <SpeakingWave />
+            ) : state === "thinking" ? (
+              <ThinkingDots />
+            ) : null}
           </div>
 
           <p className="talk-prompt">
@@ -735,8 +762,8 @@ export function TalkScreen({
               }}
             >
               <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
-                <path d="M3.51 15a9 9 0 102.13-9.36L1 10" />
-                <polyline points="1 4 1 10 7 10" />
+                <path d="M3 12a9 9 0 109-9" />
+                <path d="M3 4v5h5" />
               </svg>
               Hear it again
             </button>
@@ -752,95 +779,88 @@ export function TalkScreen({
         <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
           {announcedStatus}
         </p>
-
       </div>
 
-      <div className="talk-dock">
-        <EllaMascot
-          variant="conversation"
-          className="ella--stage-talk"
-          state={state}
-          reaction={reaction}
-          activity={voiceLevel}
-          decorative
-        />
-        <div className="talk-controls">
-          {typing ? (
-            <form className="composer" onSubmit={submitText}>
-              <label className="sr-only" htmlFor="talk-text-input">
-                Your answer
-              </label>
-              <input
-                id="talk-text-input"
-                autoFocus
-                value={input}
-                maxLength={800}
-                disabled={sending}
-                placeholder="Type what you want to say…"
-                onChange={(event) => setInput(event.target.value)}
-              />
-              <button
-                type="submit"
-                className="composer__send"
-                disabled={!input.trim() || sending}
-                aria-label="Send answer"
-              >
-                {sending ? <LoaderCircle className="spin" size={20} /> : <Send size={20} />}
-              </button>
-              <button
-                type="button"
-                className="link-button"
-                disabled={sending}
-                onClick={switchToMicrophone}
-              >
-                Use the microphone
-              </button>
-            </form>
-          ) : (
-            <div className="mic-stack">
-              {showSpeakUpHint && (
-                <span className="pill pill--nudge" role="status" aria-live="polite">
-                  Speak up to continue the conversation
-                </span>
+      <div className="talk-controls">
+        {typing ? (
+          <form className="composer" onSubmit={submitText}>
+            <label className="sr-only" htmlFor="talk-text-input">
+              Your answer
+            </label>
+            <input
+              id="talk-text-input"
+              autoFocus
+              value={input}
+              maxLength={800}
+              disabled={sending}
+              placeholder="Type what you want to say…"
+              onChange={(event) => setInput(event.target.value)}
+            />
+            <button
+              type="submit"
+              className="composer__send"
+              disabled={!input.trim() || sending}
+              aria-label="Send answer"
+            >
+              {sending ? <LoaderCircle className="spin" size={20} /> : <Send size={20} />}
+            </button>
+            <button
+              type="button"
+              className="link-button"
+              disabled={sending}
+              onClick={switchToMicrophone}
+            >
+              Use the microphone
+            </button>
+          </form>
+        ) : (
+          <div className="mic-stack">
+            {showSpeakUpHint && (
+              <span className="pill pill--nudge" role="status" aria-live="polite">
+                Speak up to continue the conversation
+              </span>
+            )}
+            <div className="mic-wrap">
+              {state === "listening" && (
+                <>
+                  <span className="mic-pulse" />
+                  <span className="mic-pulse mic-pulse--delayed" />
+                </>
               )}
-              <div className="mic-wrap">
-                {state === "listening" && (
-                  <>
-                    <span className="mic-pulse" />
-                    <span className="mic-pulse mic-pulse--delayed" />
-                  </>
-                )}
-                <button
-                  ref={micButton}
-                  className={`mic ${state === "listening" ? "is-live" : ""}`}
-                  type="button"
-                  disabled={interactionLocked}
-                  aria-pressed={state === "listening"}
-                  aria-label={
-                    micStarting
-                      ? "Opening the microphone"
-                      : state === "listening"
-                        ? "Stop and send"
-                        : state === "speaking"
-                          ? "Interrupt Ella and start speaking"
-                          : "Start speaking"
-                  }
-                  onClick={() => (state === "listening" ? void finishListening() : void beginListening())}
-                >
-                  {micStarting ? <LoaderCircle className="spin" size={26} /> : <MicGlyph />}
-                </button>
-              </div>
               <button
+                ref={micButton}
+                className="mic"
                 type="button"
-                className="link-button"
-                disabled={sending || state === "thinking"}
-                onClick={() => void switchToTyping()}
+                disabled={interactionLocked}
+                aria-pressed={state === "listening"}
+                aria-label={
+                  micStarting
+                    ? "Opening the microphone"
+                    : state === "listening"
+                      ? "Stop and send"
+                      : state === "speaking"
+                        ? "Interrupt Ella and start speaking"
+                        : "Start speaking"
+                }
+                onClick={() => (state === "listening" ? void finishListening() : void beginListening())}
               >
-                Type instead
+                {micStarting ? <LoaderCircle className="spin" size={30} /> : <MicGlyph />}
               </button>
             </div>
-          )}
-        </div>
+            <p className="mic-hint" aria-hidden="true">
+              {micHint}
+              {spaceWorks && <kbd className="key">Space</kbd>}
+            </p>
+            <button
+              type="button"
+              className="link-button"
+              disabled={sending || state === "thinking"}
+              onClick={() => void switchToTyping()}
+            >
+              Type instead
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -866,4 +886,101 @@ function errorMessage(reason: unknown): string {
   if (typeof reason === "string") return reason;
   if (reason instanceof Error) return reason.message;
   return "Something unexpected happened. Please try again.";
+}
+
+/** Where Ella can come back from after diving away: either side, below, above
+ * (ears looming), or tumbling in upside down from high above. */
+const LISTEN_ENTRANCES: Array<{ x: number; y: number; rot: number; top?: boolean }> = [
+  { x: -820, y: 80, rot: -22 },
+  { x: 820, y: 80, rot: 22 },
+  { x: -640, y: -420, rot: -34, top: true },
+  { x: 640, y: -420, rot: 34, top: true },
+  { x: 0, y: 560, rot: 8 },
+  { x: -240, y: -640, rot: 180, top: true },
+  { x: 260, y: -640, rot: 180, top: true },
+];
+
+/**
+ * The cue that the microphone is open: Ella dives away into the stage and comes
+ * back from a random side, and now and then lands upside down and flips herself
+ * upright. When listening ends she eases back from wherever the dive had got
+ * to. Returns whether she came back from above, which is what makes her ears
+ * loom instead of just pricking up.
+ */
+function useListenEntrance(frame: RefObject<HTMLDivElement | null>, listening: boolean): boolean {
+  const [loom, setLoom] = useState(false);
+  const wasListening = useRef(false);
+
+  useEffect(() => {
+    const began = listening && !wasListening.current;
+    const ended = !listening && wasListening.current;
+    wasListening.current = listening;
+    if (!began && !ended) return;
+    if (ended) setLoom(false);
+
+    const element = frame.current;
+    if (!element || typeof element.animate !== "function" || prefersReducedMotion()) return;
+
+    if (ended) {
+      const from = getComputedStyle(element).transform;
+      element.getAnimations().forEach((animation) => animation.cancel());
+      element.animate(
+        [{ transform: from === "none" ? "none" : from }, { transform: "translate3d(0, 0, 0) rotate(0deg) scale(1)" }],
+        { duration: 500, easing: "ease-out" },
+      );
+      return;
+    }
+
+    const side = LISTEN_ENTRANCES[Math.floor(Math.random() * LISTEN_ENTRANCES.length)];
+    const upsideDown = Math.abs(side.rot) === 180;
+    setLoom(Boolean(side.top));
+    element.getAnimations().forEach((animation) => animation.cancel());
+    element.animate(
+      [
+        { transform: "translate3d(0, 0, 0) rotate(0deg) scale(1)", opacity: 1, offset: 0 },
+        { transform: "translate3d(0, 30px, -700px) rotate(-3deg) scale(0.94)", opacity: 0.55, offset: 0.3 },
+        {
+          transform: `translate3d(${side.x * 0.5}px, ${side.y * 0.5}px, -760px) rotate(${side.rot * 0.5}deg) scale(0.6)`,
+          opacity: 0.25,
+          offset: 0.45,
+        },
+        {
+          transform: `translate3d(${side.x}px, ${side.y}px, -360px) rotate(${side.rot}deg) scale(0.7)`,
+          opacity: 0,
+          offset: 0.52,
+        },
+        {
+          transform: `translate3d(${side.x * 0.55}px, ${side.y * 0.55}px, -140px) rotate(${side.rot * 0.7}deg) scale(0.86)`,
+          opacity: 1,
+          offset: 0.62,
+        },
+        {
+          transform: `translate3d(${side.x * 0.12}px, ${side.y * 0.1}px, 70px) rotate(${upsideDown ? 172 : side.rot * 0.2}deg) scale(1.05)`,
+          opacity: 1,
+          offset: 0.82,
+        },
+        {
+          transform: `translate3d(0, ${upsideDown ? -8 : 0}px, 0) rotate(${upsideDown ? 180 : 0}deg) scale(1)`,
+          opacity: 1,
+          offset: 1,
+        },
+      ],
+      { duration: 1500, easing: "cubic-bezier(0.32, 0.9, 0.28, 1)", fill: "forwards" },
+    );
+    if (!upsideDown) return;
+    const flip = window.setTimeout(() => {
+      element.animate(
+        [
+          { transform: "translate3d(0, -8px, 0) rotate(180deg) scale(1)" },
+          { transform: "translate3d(0, -6px, 0) rotate(96deg) scale(1.03)", offset: 0.55 },
+          { transform: "translate3d(0, 0, 0) rotate(-6deg) scale(1.01)", offset: 0.85 },
+          { transform: "translate3d(0, 0, 0) rotate(0deg) scale(1)" },
+        ],
+        { duration: 780, easing: "cubic-bezier(0.3, 1.05, 0.35, 1)", fill: "forwards" },
+      );
+    }, 1750);
+    return () => window.clearTimeout(flip);
+  }, [frame, listening]);
+
+  return loom;
 }

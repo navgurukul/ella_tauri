@@ -1,9 +1,7 @@
 import type { ReactElement } from "react";
-import { RotateCcw } from "lucide-react";
-import { EllaGlyph } from "./EllaMascot";
-import { initials } from "../lib/presentation";
+import { EllaGlyph, LearnerAvatar } from "./EllaMascot";
 
-export type NavKey = "home" | "talk";
+export type NavKey = "home" | "cast";
 
 const NAV: Array<{ key: NavKey; label: string; icon: ReactElement }> = [
   {
@@ -20,14 +18,16 @@ const NAV: Array<{ key: NavKey; label: string; icon: ReactElement }> = [
     ),
   },
   {
-    key: "talk",
-    label: "Talk",
+    key: "cast",
+    label: "Talk partners",
     icon: (
       <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="8.7" y="2.6" width="2.6" height="7" rx="1.3" transform="rotate(-14 10 6.1)" />
+        <rect x="12.9" y="2.8" width="2.6" height="6.6" rx="1.3" transform="rotate(12 14.2 6.1)" />
         <path
           fillRule="evenodd"
           clipRule="evenodd"
-          d="M12 2.9c5.3 0 9.6 3.5 9.6 7.8 0 4.3-4.3 7.8-9.6 7.8-.86 0-1.7-.09-2.5-.26l-3.9 1.86c-.9.43-1.86-.46-1.5-1.4l.94-2.5C3.4 14.9 2.4 13 2.4 10.7c0-4.3 4.3-7.8 9.6-7.8zM8.5 8.7a1 1 0 011 1v1.6a1 1 0 11-2 0V9.7a1 1 0 011-1zm3.5-1.8a1 1 0 011 1v5.2a1 1 0 11-2 0V7.9a1 1 0 011-1zm3.5 1.8a1 1 0 011 1v1.6a1 1 0 11-2 0V9.7a1 1 0 011-1z"
+          d="M3 21v-5.2C3 11.5 7 8.2 12 8.2s9 3.3 9 7.6V21H3zm6.6-7.9a1.3 1.3 0 100 2.6 1.3 1.3 0 000-2.6zm4.8 0a1.3 1.3 0 100 2.6 1.3 1.3 0 000-2.6z"
         />
       </svg>
     ),
@@ -37,13 +37,18 @@ const NAV: Array<{ key: NavKey; label: string; icon: ReactElement }> = [
 export function Sidebar({
   active,
   learnerName,
+  streakDays,
+  avatarColor,
   onNavigate,
-  onReset,
+  onProfile,
 }: {
-  active: NavKey;
+  /** Null on screens that are not in the nav, like the profile. */
+  active: NavKey | null;
   learnerName: string;
+  streakDays: number;
+  avatarColor: string;
   onNavigate: (key: NavKey) => void;
-  onReset: () => void;
+  onProfile: () => void;
 }) {
   return (
     <aside className="sidebar">
@@ -67,21 +72,30 @@ export function Sidebar({
       </nav>
 
       <div className="sidebar__foot">
-        <div className="profile">
-          <span className="profile__avatar">{initials(learnerName)}</span>
+        <div className="streak-pill">
+          <FlameGlyph />
+          <span>
+            <b>{streakDays}</b> day streak
+          </span>
+        </div>
+        <button className="profile" onClick={onProfile}>
+          <LearnerAvatar color={avatarColor} />
           <span className="profile__text">
             <strong>{learnerName}</strong>
+            <small>View profile</small>
           </span>
-          <button
-            className="profile__reset"
-            onClick={onReset}
-            title="Reset demo data"
-            aria-label="Reset demo data"
-          >
-            <RotateCcw size={16} aria-hidden="true" />
-          </button>
-        </div>
+        </button>
       </div>
     </aside>
+  );
+}
+
+/** A two-drop flame, drawn in CSS so it can take any card's colours. */
+export function FlameGlyph() {
+  return (
+    <span className="flame" aria-hidden="true">
+      <i />
+      <i />
+    </span>
   );
 }

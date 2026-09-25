@@ -1,12 +1,44 @@
 export type Speaker = "learner" | "ella";
 export type SkillStrand = "vocabulary" | "grammar" | "fluency";
 
+/** The one learner a laptop keeps. */
 export interface Learner {
   name: string;
   /** Collected during onboarding so Ella can pick age-appropriate topics. */
   age?: number | null;
   level_name: string;
   created_at: string;
+  /** `#RRGGBB`, or null until the learner picks one on their profile. */
+  avatar_color?: string | null;
+}
+
+/** Whoever is saved on this laptop, as the welcome-back step greets them. */
+export interface LearnerProfile {
+  name: string;
+  avatar_color?: string | null;
+}
+
+/** One local calendar day on which the learner gave at least one answer. */
+export interface DayActivity {
+  /** `YYYY-MM-DD` on the learner's own clock. */
+  day: string;
+  /** Talks whose first answer fell on this day, so a talk that ran past
+   * midnight is counted once, not on both days. */
+  talks: number;
+  /** Answers given this day, in any talk. */
+  answers: number;
+}
+
+/** What the signed-in learner has done, over their whole history. */
+export interface LearnerProgress {
+  /** Every day they talked on, newest first. Not capped. */
+  days: DayActivity[];
+  /** Talks that were finished with at least one answer in them. */
+  talks_finished: number;
+  /** Every answer given, in finished talks or not. */
+  answers: number;
+  /** Topic and chore ids of the finished talks, each once. */
+  finished_topics: string[];
 }
 
 export interface Topic {
@@ -59,9 +91,17 @@ export interface EngineStatus {
 }
 
 export interface AppSnapshot {
+  /** The learner while signed in; null when signed out or nobody is saved. */
   learner?: Learner | null;
+  /** Whoever is saved on this laptop, signed in or not; null on a laptop
+   * nobody has used yet. */
+  saved_learner?: LearnerProfile | null;
   topics: Topic[];
+  /** The signed-in learner's five newest talks, newest first. Empty when
+   * signed out. */
   recent_sessions: SessionListItem[];
+  /** All zero and empty when nobody is signed in. */
+  progress: LearnerProgress;
   engine_status: EngineStatus;
 }
 
@@ -181,8 +221,19 @@ export interface VoiceStreamFinishInput {
 
 export interface EllaBridge {
   bootstrap(): Promise<AppSnapshot>;
+  /** Saves the laptop's learner and signs them in. After a log out this is
+   * the same learner onboarding again, so their talks stay theirs. */
   saveLearner(name: string, age?: number | null): Promise<Learner>;
+  /** Signs the saved learner back in. Refused when nobody is saved yet. */
+  logIn(): Promise<Learner>;
+  /** Signs out. Deletes nothing: logging back in finds every talk again. */
+  logOut(): Promise<AppSnapshot>;
+  /** Stores a `#RRGGBB` avatar colour on the signed-in learner. */
+  saveAvatarColor(color: string): Promise<Learner>;
   startSession(topicId: string): Promise<Session>;
+  /** Start a talk partner's goal: a chore from the Rust catalog, played by its
+   * character and scored by the backend. The session reads like any other. */
+  startChore(choreId: string): Promise<Session>;
   /** Say Ella's opening aloud, streaming it like a reply. Tauri bridge only;
    * in the browser the opening falls back to system speech. */
   speakOpening?(sessionId: string): Promise<SpokenLine>;
@@ -202,35 +253,29 @@ export interface EllaBridge {
   cancelVoiceStream?(streamId: string): Promise<void>;
   finishVoiceStreamTurn?(input: VoiceStreamFinishInput): Promise<TurnResult>;
   completeSession(sessionId: string): Promise<SessionSummary>;
-  resetDemoData(): Promise<AppSnapshot>;
 }
 
 /* ------------------------------------------------------------------ *
  * Presentation layer
  *
- * The Ella v5 design shows curriculum framing the Rust backend does not
- * model yet: a talking streak, named garden units on a path, per-topic
- * category + duration, and a weekly digest. Everything below is
- * derived from `AppSnapshot` where the data exists and filled from the
- * placeholders in `lib/presentation.ts` where it does not.
+ * The Ella Desktop design shows framing the Rust backend does not model
+ * yet: per-topic category and duration, badges, and a cast of talk
+ * partners. Everything below is derived from `AppSnapshot` where the data
+ * exists (the streak and badges from the learner's `progress`) and filled
+ * from the editorial tables in `lib/presentation.ts` where it does not.
  * ------------------------------------------------------------------ */
 
 export type TopicCategory = "role-play" | "vocabulary" | "grammar" | "fluency";
 
-/** How a topic renders in the home bento grid. */
-export type TopicSlot = "wide" | "wave" | "framed" | "inset" | "chat" | "quote";
-
-export type Tone = "violet" | "pink" | "green" | "orange" | "lilac" | "ink";
+export type Tone = "violet" | "pink" | "green" | "orange" | "ink";
 
 export interface TopicPresentation {
   category: TopicCategory;
   minutes: number;
-  tone: Tone;
-  /** Longer line used by the "Ella recommends" hero. */
+  /** Longer line used by the "Today's talk" card. */
   blurb: string;
-  /** Sample exchange printed on the framed/chat/quote cards. */
+  /** Something the other side of the scene might say, printed on the tall topic card. */
   sample: string;
-  reply: string;
 }
 
 export type StreakDayState = "done" | "today" | "future";
@@ -245,8 +290,43 @@ export interface Streak {
   week: StreakDay[];
 }
 
-
-export interface WeeklyDigest {
+/** Talks and the answers spoken in them, over whatever window was asked for. */
+export interface TalkTally {
   talks: number;
+  answers: number;
+}
+
+export interface Badge {
+  id: string;
+  label: string;
+  earned: boolean;
+}
+
+export type CastId = "stall-owner" | "landlord" | "doctor" | "debater";
+
+/** What pressing a goal starts: a scored chore, a free topic, or nothing yet. */
+export type CastGoalStart =
+  | { kind: "chore"; choreId: string }
+  | { kind: "topic"; topicId: string }
+  | { kind: "soon" };
+
+export interface CastGoal {
+  id: string;
+  title: string;
+  /** Shown to the learner: what counts as walking away happy. */
+  goal: string;
+  /** The mono label's first half, e.g. `NEGOTIATION`. */
+  track: string;
+  minutes: number;
+  /** Mirrors the chore's `min_age`; younger learners are not offered it. */
+  minAge: number;
+  start: CastGoalStart;
+}
+
+export interface CastMember {
+  id: CastId;
+  name: string;
+  blurb: string;
+  goals: CastGoal[];
 }
 

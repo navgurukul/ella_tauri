@@ -1,7 +1,7 @@
+import { useState } from "react";
 import { EllaMascot } from "./EllaMascot";
+import { FlameGlyph } from "./Sidebar";
 import {
-  BENTO_SLOTS,
-  CATEGORY_LABEL,
   recommendedTopicId,
   streak,
   topicMeta,
@@ -9,12 +9,19 @@ import {
   unfinishedSession,
   weeklyDigest,
 } from "../lib/presentation";
-import type {
-  AppSnapshot,
-  Topic,
-  TopicPresentation,
-  TopicSlot,
-} from "../types";
+import type { AppSnapshot, Tone, Topic } from "../types";
+
+/** The four cards under "More topics": one tall, two small, one wide, each in
+ * its own colour. Topics fill them in the order the backend offers them. */
+const SLOTS: Array<{ slot: "tall" | "small" | "wide"; tone: Tone }> = [
+  { slot: "tall", tone: "green" },
+  { slot: "small", tone: "pink" },
+  { slot: "small", tone: "orange" },
+  { slot: "wide", tone: "ink" },
+];
+
+/** "View all" lays every other topic out evenly, cycling these colours. */
+const ALL_TONES: Tone[] = ["green", "pink", "orange", "ink", "violet"];
 
 export function HomeScreen({
   snapshot,
@@ -27,68 +34,64 @@ export function HomeScreen({
   onStart: (topic: Topic) => void;
   onResume: (sessionId: string) => void;
 }) {
+  const [showAll, setShowAll] = useState(false);
   const name = snapshot.learner?.name ?? "friend";
-  const digest = weeklyDigest(snapshot);
-  const run = streak(snapshot.recent_sessions);
-  // `streak` marks today "done" the moment there is a session for it, so a
-  // remaining "today" cell means the learner has not talked yet.
+  const digest = weeklyDigest(snapshot.progress);
+  const run = streak(snapshot.progress);
+  // `streak` marks today "done" once the learner has given an answer today, so
+  // a remaining "today" cell means they have not said anything to Ella yet.
   const talkedToday = !run.week.some((day) => day.state === "today");
 
-  // Ella leads with the least-practised strand; everything else fills the
-  // bento in backend order, taking its shape from the slot it lands in.
   const recommended = recommendedTopicId(snapshot);
   const featured =
     snapshot.topics.find((topic) => topic.id === recommended) ?? snapshot.topics[0];
-  const grid = snapshot.topics.filter((topic) => topic.id !== featured?.id).slice(0, 6);
+  const others = snapshot.topics.filter((topic) => topic.id !== featured?.id);
+  const shown = showAll ? others : others.slice(0, SLOTS.length);
 
   const unfinished = unfinishedSession(snapshot);
 
   return (
     <div className="screen screen--home" data-screen="home">
       <header className="page-head">
-        <h1 className="display">
-          Namaste, {name}!
-          <svg className="page-head__flourish" viewBox="0 0 40 20" aria-hidden="true">
-            <path d="M2 16 Q 12 2 22 12 T 38 8" />
-          </svg>
-        </h1>
-        <p className="page-head__sub">Ella is ready when you are.</p>
+        <h1 className="display">Namaste, {name}!</h1>
+        <p className="page-head__sub">Ready for today&rsquo;s talk?</p>
       </header>
 
       <div className="home-body">
         <div className="home-main">
           {featured && (
-            <section className="hero">
-              <p className="hero__eyebrow">Ella recommends</p>
-              <h2 className="hero__title">{featured.label}</h2>
-              <p className="hero__blurb">{topicPresentation(featured.id).blurb}</p>
-              <div className="hero__actions">
-                <button className="btn btn--light" disabled={busy} onClick={() => onStart(featured)}>
-                  <span className="btn__mic">
-                    <MicGlyph size={13} />
-                  </span>
+            <section className="today">
+              <EllaMascot variant="home" className="ella--home-peek" pokeable decorative />
+              <div className="today__card">
+                <div className="today__text">
+                  <p className="eyebrow">Today&rsquo;s talk</p>
+                  <h2 className="today__title">{featured.label}</h2>
+                  <p className="today__blurb">{topicPresentation(featured.id).blurb}</p>
+                </div>
+                <button className="btn btn--violet btn--talk" disabled={busy} onClick={() => onStart(featured)}>
+                  <MicGlyph size={17} />
                   Start talking
                 </button>
-                <span className="pill pill--ghost">
-                  ~{topicPresentation(featured.id).minutes} min ·{" "}
-                  {CATEGORY_LABEL[topicPresentation(featured.id).category].toLowerCase()}
-                </span>
               </div>
             </section>
           )}
 
           <div className="section-head">
-            <h3>Or pick another topic</h3>
-            <span>picked for you</span>
+            <h3>More topics</h3>
+            {others.length > SLOTS.length && (
+              <button className="section-head__link" onClick={() => setShowAll((all) => !all)}>
+                {showAll ? "Show fewer" : "View all"}
+              </button>
+            )}
           </div>
 
-          <div className="bento">
-            {grid.map((topic, index) => (
+          <div className={`topics ${showAll ? "topics--all" : ""}`.trim()}>
+            {shown.map((topic, index) => (
               <TopicCard
                 key={topic.id}
                 topic={topic}
-                slot={BENTO_SLOTS[index]}
-                presentation={topicPresentation(topic.id)}
+                slot={showAll ? "even" : SLOTS[index].slot}
+                tone={showAll ? ALL_TONES[index % ALL_TONES.length] : SLOTS[index].tone}
                 disabled={busy}
                 onStart={onStart}
               />
@@ -99,7 +102,7 @@ export function HomeScreen({
         <aside className="rail">
           {unfinished && (
             <section className="card card--resume">
-              <p className="card__eyebrow card__eyebrow--dark">Unfinished talk</p>
+              <p className="eyebrow">Unfinished talk</p>
               <h4>{unfinished.topic_label}</h4>
               <p className="card__note">
                 You left this conversation open. Ella still remembers where you were.
@@ -119,7 +122,7 @@ export function HomeScreen({
             <div className="streak-head">
               <FlameGlyph />
               <div>
-                <strong className="display display--sm">
+                <strong className="display">
                   {run.days} {run.days === 1 ? "day" : "days"}
                 </strong>
                 <small>talking streak</small>
@@ -145,18 +148,20 @@ export function HomeScreen({
           </section>
 
           <section className="card card--week">
-            <p className="card__eyebrow">This week</p>
+            <p className="eyebrow">This week</p>
             <dl className="stats">
               <div>
-                <dt className="display display--sm">{digest.talks}</dt>
-                <dd>talks</dd>
+                <dt className="display">{digest.talks}</dt>
+                <dd>{digest.talks === 1 ? "talk" : "talks"}</dd>
+              </div>
+              <div>
+                <dt className="display">{digest.answers}</dt>
+                <dd>{digest.answers === 1 ? "answer spoken" : "answers spoken"}</dd>
               </div>
             </dl>
           </section>
         </aside>
       </div>
-
-      <EllaMascot className="ella--corner-home" scale={0.7} rotate={-5} />
     </div>
   );
 }
@@ -164,102 +169,27 @@ export function HomeScreen({
 function TopicCard({
   topic,
   slot,
-  presentation,
+  tone,
   disabled,
   onStart,
 }: {
   topic: Topic;
-  slot: TopicSlot;
-  presentation: TopicPresentation;
+  slot: "tall" | "small" | "wide" | "even";
+  tone: Tone;
   disabled: boolean;
   onStart: (topic: Topic) => void;
 }) {
-  const meta = topicMeta(topic.id);
-  const words = topic.label.split(" ");
-  const split = Math.ceil(words.length / 2);
-
   return (
     <button
-      className={`topic topic--${slot} tone-${presentation.tone}`}
+      className={`topic topic--${slot} tone-${tone}`}
       disabled={disabled}
       onClick={() => onStart(topic)}
     >
-      {slot === "wide" && (
-        <>
-          <span className="topic__headline">
-            <span>{words.slice(0, split).join(" ")}</span>
-            <span className="topic__headline--indent">{words.slice(split).join(" ")}</span>
-          </span>
-          <span className="topic__badge" aria-hidden="true">
-            <i />
-          </span>
-          <span className="mono topic__meta">{meta}</span>
-        </>
+      <span className="topic__title">{topic.label}</span>
+      {slot === "tall" && (
+        <span className="mono topic__bubble">{topicPresentation(topic.id).sample}</span>
       )}
-
-      {slot === "wave" && (
-        <>
-          <svg className="topic__wave" viewBox="0 0 60 24" aria-hidden="true">
-            <path d="M2 21q9-15 18-7t18-7t18-7" />
-          </svg>
-          <span className="topic__title">{topic.label}</span>
-          <span className="mono topic__meta">{meta}</span>
-        </>
-      )}
-
-      {slot === "framed" && (
-        <>
-          <span className="topic__title topic__title--center">{topic.label}</span>
-          <span className="mono topic__meta topic__meta--center">[ {meta} ]</span>
-          <span className="topic__foot">
-            <span className="bubble bubble--dark">
-              {presentation.sample}
-              <i aria-hidden="true" />
-            </span>
-            <span className="avatars" aria-hidden="true">
-              <i className="tone-violet">E</i>
-              <i className="tone-orange">AA</i>
-              <i className="tone-green">+</i>
-            </span>
-          </span>
-        </>
-      )}
-
-      {slot === "inset" && (
-        <span className="topic__inset">
-          <span className="mono topic__inset-top">
-            <span>This week</span>
-            <span>~{presentation.minutes} min</span>
-          </span>
-          <span className="topic__title">{topic.label}</span>
-          <span className="mono topic__meta">{CATEGORY_LABEL[presentation.category]}</span>
-        </span>
-      )}
-
-      {slot === "chat" && (
-        <>
-          <span className="mono topic__meta topic__meta--top">{meta}</span>
-          <span className="topic__title">{topic.label}</span>
-          <span className="chat">
-            <span className="chat__ella">
-              <i aria-hidden="true">E</i>
-              <span className="mono bubble bubble--light">{presentation.sample}</span>
-            </span>
-            <span className="mono bubble bubble--green">{presentation.reply}</span>
-          </span>
-        </>
-      )}
-
-      {slot === "quote" && (
-        <>
-          <span className="mono bubble bubble--white">
-            {presentation.sample}
-            <i aria-hidden="true" />
-          </span>
-          <span className="topic__title topic__title--foot">{topic.label}</span>
-          <span className="mono topic__meta">{meta}</span>
-        </>
-      )}
+      <span className="mono topic__meta">{topicMeta(topic.id)}</span>
     </button>
   );
 }
@@ -270,14 +200,5 @@ export function MicGlyph({ size = 36 }: { size?: number }) {
       <path d="M12 3a3 3 0 013 3v5a3 3 0 01-6 0V6a3 3 0 013-3z" />
       <path d="M6 11a6 6 0 0012 0h2a8 8 0 01-7 7.94V21h-2v-2.06A8 8 0 014 11z" />
     </svg>
-  );
-}
-
-function FlameGlyph() {
-  return (
-    <span className="flame" aria-hidden="true">
-      <i />
-      <i />
-    </span>
   );
 }

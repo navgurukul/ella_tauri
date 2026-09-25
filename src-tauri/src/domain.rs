@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+/// The one learner on this laptop. There is only ever one, so there is no id
+/// to carry: every session on the laptop is theirs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Learner {
     pub name: String,
@@ -7,6 +9,61 @@ pub struct Learner {
     pub age: Option<u8>,
     pub level_name: String,
     pub created_at: String,
+    /// `#RRGGBB`, or `None` until the learner picks one on the profile screen.
+    /// Stored with the learner rather than in the window, so it follows them
+    /// through a log out and back in.
+    pub avatar_color: Option<String>,
+}
+
+/// Just enough of the saved learner for the welcome-back step to greet them
+/// by name, with their own avatar, while they are logged out.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LearnerProfile {
+    pub name: String,
+    pub avatar_color: Option<String>,
+}
+
+impl From<&Learner> for LearnerProfile {
+    fn from(learner: &Learner) -> Self {
+        Self {
+            name: learner.name.clone(),
+            avatar_color: learner.avatar_color.clone(),
+        }
+    }
+}
+
+/// One local calendar day on which the learner said something.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DayActivity {
+    /// `YYYY-MM-DD` in the laptop's own timezone, which is also the calendar
+    /// the window draws the week in.
+    pub day: String,
+    /// Talks whose first answer was given on this day. A talk that runs past
+    /// midnight is counted once, on the day it began, so adding up `talks`
+    /// over any run of days never counts one twice.
+    pub talks: u32,
+    /// Answers given on this day, whichever talk they belong to.
+    pub answers: u32,
+}
+
+/// Lifetime figures for the learner, worked out from every session they have
+/// ever had. The streak, the week strip, the badges and the totals on the
+/// profile are all drawn from this; `recent_sessions` is only the short list
+/// on the home screen and stops at five.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LearnerProgress {
+    /// Every day with at least one answer, newest first. Not capped: a long
+    /// streak needs all of it.
+    pub days: Vec<DayActivity>,
+    /// Completed talks with at least one answer. A talk that ended before the
+    /// learner said anything — a placement talk that heard nothing, say — is
+    /// not a talk they did.
+    pub talks_finished: u32,
+    /// Every answer the learner has given, in finished talks or not.
+    pub answers: u32,
+    /// Topic and chore ids of the finished talks, each once. The two share the
+    /// field because a chore session stores its chore id as its topic.
+    pub finished_topics: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,9 +145,17 @@ pub struct EngineStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppSnapshot {
+    /// The learner while they are signed in; `None` after a log out, or on a
+    /// laptop where nobody has told Ella their name yet.
     pub learner: Option<Learner>,
+    /// Whoever is saved on this laptop, signed in or not, so "Log in" can
+    /// welcome them back by name. `None` only on a fresh laptop.
+    pub saved_learner: Option<LearnerProfile>,
     pub topics: Vec<Topic>,
+    /// The five newest sessions; empty when signed out.
     pub recent_sessions: Vec<SessionListItem>,
+    /// The learner's lifetime figures; all zero when signed out.
+    pub progress: LearnerProgress,
     pub engine_status: EngineStatus,
 }
 
