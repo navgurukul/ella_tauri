@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { cuesFromPhonemes } from "./alignment";
 import { createSpeechQueue, downsampleToPcm16, speakText } from "./speech";
+import { VISEMES, VisemeTrack } from "./visemes";
 
 describe("audio conversion", () => {
   it("downsamples float microphone frames to bounded PCM16", () => {
@@ -245,5 +247,93 @@ describe("streamed sentence playback", () => {
 
     expect(FakeAudioContext.started).toHaveLength(1);
     expect(onEnd).not.toHaveBeenCalled();
+  });
+
+  /** Two seconds each: "ah" then "m", each between a sentence's start and end. */
+  const ah = [
+    { phoneme: "^", start_ms: 0, end_ms: 100 },
+    { phoneme: "a", start_ms: 100, end_ms: 900 },
+    { phoneme: "$", start_ms: 900, end_ms: 2000 },
+  ];
+  const mm = [
+    { phoneme: "^", start_ms: 0, end_ms: 100 },
+    { phoneme: "m", start_ms: 100, end_ms: 500 },
+    { phoneme: "$", start_ms: 500, end_ms: 2000 },
+  ];
+
+  it("moves her mouth with the audio clock through each sentence and closes it between them", async () => {
+    install();
+    const queue = createSpeechQueue();
+    expect(queue.mouth.timed).toBeNull();
+    queue.push(audio(2), [], ah);
+    queue.push(audio(2), [], mm);
+    await settle();
+    const [first, second] = FakeAudioContext.started;
+    expect(queue.mouth.timed).toBe(true);
+
+    context.currentTime = first.at - 0.01;
+    expect(queue.mouth.started).toBe(false);
+    expect(queue.mouth.shape()).toEqual(VISEMES.rest);
+
+    context.currentTime = first.at + 0.5;
+    expect(queue.mouth.started).toBe(true);
+    expect(queue.mouth.shape().height).toBeGreaterThan(0.6);
+
+    // The sentence's end is a pause, so the mouth closes before the next one.
+    context.currentTime = first.at + 1.5;
+    expect(queue.mouth.shape().height).toBe(0);
+    expect(queue.mouth.started).toBe(true);
+
+    context.currentTime = second.at + 0.3;
+    expect(queue.mouth.shape().height).toBe(0);
+    expect(queue.mouth.shape().width).toBeCloseTo(VISEMES.pbm.width, 5);
+
+    queue.finish(2);
+    context.drain();
+    await settle();
+    expect(queue.mouth.started).toBe(false);
+    expect(queue.mouth.shape()).toEqual(VISEMES.rest);
+  });
+
+  it("samples her mouth 20 ms ahead of the sound", async () => {
+    install();
+    const queue = createSpeechQueue();
+    queue.push(audio(2), [], ah);
+    await settle();
+    const at = FakeAudioContext.started[0].at * 1000;
+    const heard = new VisemeTrack(cuesFromPhonemes(ah).map((cue) => ({ ...cue, start: cue.start + at, end: cue.end + at })));
+    for (const offset of [95, 880, 910]) {
+      context.currentTime = (at + offset) / 1000;
+      expect(queue.mouth.shape()).toEqual(heard.sample(at + offset + 20));
+      expect(queue.mouth.shape()).not.toEqual(heard.sample(at + offset));
+    }
+  });
+
+  it("plays audio it cannot time with her mouth left to the static o", async () => {
+    install();
+    const queue = createSpeechQueue();
+    queue.push(audio(1));
+    // Spans that overlap are refused, and the sentence still plays.
+    queue.push(audio(1), [], [
+      { phoneme: "a", start_ms: 0, end_ms: 600 },
+      { phoneme: "m", start_ms: 500, end_ms: 1000 },
+    ]);
+    await settle();
+    expect(FakeAudioContext.started).toHaveLength(2);
+    expect(queue.mouth.timed).toBe(false);
+    context.currentTime = FakeAudioContext.started[1].at + 0.2;
+    expect(queue.mouth.started).toBe(false);
+  });
+
+  it("hands her mouth back the moment playback is cancelled", async () => {
+    install();
+    const queue = createSpeechQueue();
+    queue.push(audio(2), [], ah);
+    await settle();
+    context.currentTime = FakeAudioContext.started[0].at + 0.5;
+    expect(queue.mouth.started).toBe(true);
+    queue.cancel();
+    expect(queue.mouth.started).toBe(false);
+    expect(queue.mouth.shape()).toEqual(VISEMES.rest);
   });
 });

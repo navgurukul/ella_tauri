@@ -12,10 +12,10 @@ use crate::{
     domain::{
         find_character, find_chore, topics, topics_for_age, Advance, AppSnapshot, Assessment,
         ChoreContext, ChoreRecap, Focus, LedgerTurn, AudioPayload, LedgerView, Learner, LearnerProfile,
-        LearnerProgress, LevelSkillView, LevelState, LevelView, Message, Pitch, PlacementBrief,
-        PlacementReading, Readiness, Scorable, Session, SessionSummary, SpeechStreamEvent,
-        SpokenLine, Standing, StepView, TalkNotes, TurnSignal, WinCondition, Speaker, Topic,
-        TurnResult, TutorRequest, WordSpan,
+        LearnerProgress, LevelSkillView, LevelState, LevelView, Message, PhonemeSpan, Pitch,
+        PlacementBrief, PlacementReading, Readiness, Scorable, Session, SessionSummary,
+        SpeechStreamEvent, SpokenLine, Standing, StepView, TalkNotes, TurnSignal, WinCondition,
+        Speaker, Topic, TurnResult, TutorRequest, WordSpan,
     },
     error::{EllaError, EllaResult},
     infrastructure::{
@@ -60,6 +60,7 @@ impl SpeechSink for TurnSpeech {
             audio: segment.audio,
             ready_ms: segment.ready_ms,
             words: segment.words,
+            phonemes: segment.phonemes,
         });
     }
 }
@@ -293,6 +294,7 @@ impl AppService {
             streamed_segments: synthesized.segments,
             audio: synthesized.audio,
             speech_words: synthesized.words,
+            speech_phonemes: synthesized.phonemes,
         })
     }
 
@@ -317,6 +319,7 @@ impl AppService {
             streamed_segments: synthesized.segments,
             audio: synthesized.audio,
             speech_words: synthesized.words,
+            speech_phonemes: synthesized.phonemes,
         })
     }
 
@@ -338,6 +341,7 @@ impl AppService {
             streamed_segments: synthesized.segments,
             audio: synthesized.audio,
             speech_words: synthesized.words,
+            speech_phonemes: synthesized.phonemes,
         })
     }
 
@@ -1028,7 +1032,7 @@ impl AppService {
         // A reply whose sentences were synthesized during generation is already
         // recorded — and, when it streamed, already playing. Only turns that
         // produced no usable pipeline audio pay for Piper on the clock here.
-        let (audio, speech_words) = match generated.speech.take() {
+        let (audio, speech_words, speech_phonemes) = match generated.speech.take() {
             Some(synthesized) => {
                 trace.record_tts(synthesized.first_audio_ms, synthesized.completion_ms);
                 trace.stage(
@@ -1045,7 +1049,7 @@ impl AppService {
                             .unwrap_or_else(|| "-".into()),
                     ),
                 );
-                (synthesized.audio, synthesized.words)
+                (synthesized.audio, synthesized.words, synthesized.phonemes)
             }
             None => self.synthesize_on_clock(&reply, trace),
         };
@@ -1132,6 +1136,7 @@ impl AppService {
             ledger: ledger_view,
             signal: generated.signal,
             speech_words,
+            speech_phonemes,
         })
     }
 
@@ -1144,7 +1149,7 @@ impl AppService {
         &self,
         reply: &str,
         trace: &mut LatencyTrace,
-    ) -> (Option<AudioPayload>, Vec<WordSpan>) {
+    ) -> (Option<AudioPayload>, Vec<WordSpan>, Vec<PhonemeSpan>) {
         trace.stage("tts:start", "sending reply text to speech synthesis");
         match self.engine.synthesize(reply) {
             Ok(synthesized) => {
@@ -1168,7 +1173,7 @@ impl AppService {
                             .unwrap_or_else(|| "none".into())
                     ),
                 );
-                (synthesized.audio, synthesized.words)
+                (synthesized.audio, synthesized.words, synthesized.phonemes)
             }
             Err(error) => {
                 trace.stage("tts:failed", &error.to_string());
@@ -1180,7 +1185,7 @@ impl AppService {
                     })
                 );
                 trace.record_tts(None, None);
-                (None, Vec::new())
+                (None, Vec::new(), Vec::new())
             }
         }
     }

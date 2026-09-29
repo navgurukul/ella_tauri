@@ -1,26 +1,31 @@
-//! Word timings for a synthesized sentence, so the screen can highlight the
-//! word Ella is saying.
+//! Timings for a synthesized sentence: when each word is said, so the screen
+//! can highlight the word Ella is saying, and when each of Piper's tokens is,
+//! so her mouth can follow the sounds.
 //!
-//! Piper hands back audio, not timings. Two things make an estimate work
-//! anyway: the sentence's duration is known exactly, and it is short — five to
-//! eight words — so error cannot accumulate across a reply the way it would if
-//! the whole turn were tiled at once. Each sentence is anchored on both ends
-//! and only the split inside it is estimated.
+//! The tokens are exact. The resident daemon loads the voice with its sampled
+//! durations exposed as a second output and hands back each token's sample
+//! count from the same inference as the audio; `phoneme_spans` only turns
+//! those counts into milliseconds. The one-shot `piper` binary reports
+//! nothing, so there a sentence has no tokens, and her mouth only opens.
 //!
-//! The weights below were fitted against real Piper phoneme alignments (its
-//! ONNX graph can expose them, patched in memory, with the `onnx` package
-//! installed) over 60 sentences in Ella's own register. Measured onset error
-//! for the shipped algorithm: mean ~70 ms, median ~70 ms, p90 ~160 ms, with
-//! roughly three quarters of words inside 100 ms — under a quarter of an
-//! average word, so the highlight sits on the right word.
+//! The words are an estimate. Two things make one work: the sentence's
+//! duration is known exactly, and it is short — five to eight words — so error
+//! cannot accumulate across a reply the way it would if the whole turn were
+//! tiled at once. Each sentence is anchored on both ends and only the split
+//! inside it is estimated.
 //!
-//! Swapping in exact alignments later is a change to this module alone: the
-//! shape it returns is what the window already draws. It would cost a 68 MB
-//! `onnx` dependency and ~30 ms per sentence, and would still need a fallback,
-//! because espeak merges words ("in the" becomes one phoneme group) in about
-//! 8% of sentences, which leaves no safe positional mapping back to the text.
+//! The weights below were fitted against real Piper phoneme alignments over 60
+//! sentences in Ella's own register. Measured onset error for the shipped
+//! algorithm: mean ~70 ms, median ~70 ms, p90 ~160 ms, with roughly three
+//! quarters of words inside 100 ms — under a quarter of an average word, so the
+//! highlight sits on the right word.
+//!
+//! Reading the words off the tokens instead would still need this fallback,
+//! for the one-shot binary, and because espeak merges words ("in the" becomes
+//! one phoneme group) in about 8% of sentences, which leaves no safe
+//! positional mapping back to the text.
 
-use crate::domain::WordSpan;
+use crate::domain::{PhonemeSpan, WordSpan};
 
 /// Milliseconds a syllable is worth.
 const MS_PER_SYLLABLE: f64 = 36.0;
@@ -92,6 +97,36 @@ pub fn shifted(spans: &[WordSpan], offset_ms: f64) -> Vec<WordSpan> {
             text: span.text.clone(),
             start_ms: round_ms(span.start_ms + offset_ms),
             end_ms: round_ms(span.end_ms + offset_ms),
+        })
+        .collect()
+}
+
+/// Piper's `[symbol, samples]` tokens as spans of a clip that starts `offset`
+/// samples into the audio they are timed against.
+///
+/// Every boundary comes from the running sample count, never from adding up
+/// milliseconds, so a token ends exactly where the next one starts, and a
+/// reply stitched from several clips stays exact across the joins.
+pub fn phoneme_spans(
+    tokens: &[(String, u32)],
+    sample_rate: u32,
+    offset: usize,
+) -> Vec<PhonemeSpan> {
+    if sample_rate == 0 {
+        return Vec::new();
+    }
+    let to_ms = |sample: usize| round_ms(sample as f64 * 1_000.0 / sample_rate as f64);
+    let mut at = offset;
+    tokens
+        .iter()
+        .map(|(phoneme, samples)| {
+            let start = at;
+            at += *samples as usize;
+            PhonemeSpan {
+                phoneme: phoneme.clone(),
+                start_ms: to_ms(start),
+                end_ms: to_ms(at),
+            }
         })
         .collect()
 }
@@ -289,6 +324,50 @@ mod tests {
             assert!((after.start_ms - before.start_ms - 1_000.0).abs() < 0.2);
             assert_eq!(after.text, before.text);
         }
+    }
+
+    fn tokens(pairs: &[(&str, u32)]) -> Vec<(String, u32)> {
+        pairs
+            .iter()
+            .map(|(symbol, samples)| (symbol.to_string(), *samples))
+            .collect()
+    }
+
+    /// Piper's tokens tile their clip: each one starts where the one before
+    /// ended, the first at the clip's start and the last at its end.
+    #[test]
+    fn phoneme_spans_tile_the_clip_from_its_sample_counts() {
+        // "Hello!" as the NavGurukul voice timed it, at 22.05 kHz.
+        let hello = tokens(&[
+            ("^", 3328), ("_", 1280), ("h", 256), ("_", 768), ("ə", 512), ("_", 1024),
+            ("l", 256), ("_", 256), ("ˈ", 2048), ("_", 512), ("o", 512), ("_", 768),
+            ("ʊ", 256), ("_", 2048), ("!", 512), ("_", 512), ("$", 1792),
+        ]);
+        let spans = phoneme_spans(&hello, RATE, 0);
+        assert_eq!(spans.len(), hello.len());
+        assert_eq!(spans[0].start_ms, 0.0);
+        assert_eq!(spans[2].phoneme, "h");
+        // 4,608 samples in: 208.98 ms, to a tenth.
+        assert_eq!(spans[2].start_ms, 209.0);
+        for pair in spans.windows(2) {
+            assert_eq!(pair[0].end_ms, pair[1].start_ms, "{pair:?}");
+        }
+        // 16,640 samples, the clip's whole length.
+        assert_eq!(spans.last().unwrap().end_ms, 754.6);
+    }
+
+    /// A reply is its sentences back to back, so the second sentence's tokens
+    /// start where the first sentence's audio ends, and the join is exact.
+    #[test]
+    fn phoneme_spans_carry_on_across_stitched_clips() {
+        let first = tokens(&[("^", 441), ("a", 882), ("$", 441)]);
+        let second = tokens(&[("^", 441), ("m", 441)]);
+        let mut reply = phoneme_spans(&first, RATE, 0);
+        reply.extend(phoneme_spans(&second, RATE, 1_764));
+        assert_eq!(reply[2].end_ms, 80.0);
+        assert_eq!(reply[3].start_ms, reply[2].end_ms);
+        assert_eq!(reply[4].end_ms, 120.0);
+        assert!(phoneme_spans(&first, 0, 0).is_empty());
     }
 
     /// Syllable counting is what separates "I" from "extraordinarily"; vowel

@@ -627,6 +627,27 @@ button { font-family: inherit; }
 .ella--speaking .ella__mouth--smile { opacity: 0; }
 .ella--speaking .ella__mouth--open { opacity: 1; }
 
+/* Lip sync draws her mouth as one path over the face: the smile at rest, and
+   the shape of each sound while she talks (`SpeechMouthDrawing`). Audio that
+   Piper could not time — the one-shot binary, or the system voice — keeps the
+   design's static "o". */
+.ella__speech {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+  transition: opacity 0.16s ease;
+}
+.ella__lips { fill: var(--ink); stroke: var(--ink); stroke-linecap: round; stroke-linejoin: round; }
+.ella__teeth { fill: var(--white); }
+.ella__tongue { fill: var(--pink); }
+.ella--lipsync .ella__mouth--smile { display: none; }
+.ella--thinking .ella__speech,
+.ella--cheer .ella__speech,
+.ella--lipsync.ella--speaking.is-untimed .ella__speech { opacity: 0; }
+.ella--lipsync.ella--speaking .ella__mouth--open { opacity: 0; }
+.ella--lipsync.ella--speaking.is-untimed .ella__mouth--open { opacity: 1; }
+
 /* Controls that sit on her, like the first talk's microphone. */
 .ella__slot {
   position: absolute;

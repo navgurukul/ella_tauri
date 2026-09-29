@@ -231,6 +231,16 @@ export interface WordSpan {
   end_ms: number;
 }
 
+/** How long one token Piper spoke lasted, relative to the start of its clip:
+ * a sound, a stress mark, a word space, the blank after every token, or a
+ * sentence's start (`^`) or end (`$`). From the same inference as the audio,
+ * so Ella's mouth can follow what she really says. */
+export interface PhonemeSpan {
+  phoneme: string;
+  start_ms: number;
+  end_ms: number;
+}
+
 /** One sentence of a reply, synthesized and pushed while the rest of the turn
  * is still being written. Playback starts on the first of these. */
 export interface SpeechSegment {
@@ -244,6 +254,9 @@ export interface SpeechSegment {
   ready_ms: number;
   /** When each word of `text` is spoken, from the start of `audio`. */
   words: WordSpan[];
+  /** Every token of `audio`, in order. Empty or missing when the voice cannot
+   * time them, and then her mouth only opens while she talks. */
+  phonemes?: PhonemeSpan[];
 }
 
 /** The result of speaking a line the app already had — Ella's opening. Carries
@@ -252,6 +265,8 @@ export interface SpeechSegment {
 export interface SpokenLine {
   audio?: AudioPayload | null;
   speech_words: WordSpan[];
+  /** Every token of `audio`, for her mouth on a replay. */
+  speech_phonemes?: PhonemeSpan[];
   streamed_segments: number;
 }
 
@@ -273,6 +288,8 @@ export interface TurnResult {
   streamed_segments: number;
   /** When each word of the whole reply is spoken, from the start of `audio`. */
   speech_words: WordSpan[];
+  /** Every token of the whole reply, from the start of `audio`. */
+  speech_phonemes?: PhonemeSpan[];
 }
 
 export interface TurnTimings {

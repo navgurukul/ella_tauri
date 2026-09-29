@@ -1,5 +1,8 @@
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent, ReactNode, RefObject } from "react";
+import { mouthGeometry, type Box } from "../lib/mouth";
+import type { SpeechMouth } from "../lib/speech";
+import { lerpMouth, SMILE, SMILE_LIFT, VISEMES, type MouthShape } from "../lib/visemes";
 
 export type EllaState = "resting" | "listening" | "thinking" | "speaking";
 
@@ -33,6 +36,17 @@ const BLOB: Record<EllaVariant, { width: number; height: number }> = {
 
 /** The placements whose smile widens into a grin now and then while resting. */
 const GRINS = new Set<EllaVariant>(["welcome", "corner", "age", "home"]);
+
+/** Where lip sync draws her mouth: the box `.ella--conversation` gives her
+ * smile in the stylesheet, and its line. Only the talk stage speaks. */
+const SPEECH_MOUTH: Partial<Record<EllaVariant, Box & { line: number }>> = {
+  conversation: { x: 314, y: 86, width: 30, height: 13, line: 3 },
+};
+
+/** Speech takes her mouth over from the smile fast, since Piper can sound a
+ * line's first phoneme 12 ms in, and gives it back over the face's fade. */
+const HANDOFF_IN_MS = 60;
+const HANDOFF_OUT_MS = 160;
 
 /** Where a mascot flies in from when its screen opens, as a direction off-screen. */
 const ENTRANCE_FROM: Array<[number, number]> = [
@@ -98,6 +112,9 @@ interface EllaMascotProps {
   pokeable?: boolean;
   /** Decorative instances defer announcements to a dedicated status region. */
   decorative?: boolean;
+  /** What she is saying, for her mouth to follow. Only the talk stage has a
+   * mouth that moves with her voice; elsewhere this is ignored. */
+  speech?: SpeechMouth;
   className?: string;
   style?: CSSProperties;
   /** Controls that sit on her, like the first talk's microphone. They stay in
@@ -107,7 +124,8 @@ interface EllaMascotProps {
 
 /**
  * Ella is drawn, not illustrated: a purple blob with two capsule ears, two eyes
- * that follow the cursor and blink, and a mouth that opens while she talks.
+ * that follow the cursor and blink, and a mouth that opens while she talks —
+ * on the talk stage, into the shape of each sound she makes.
  */
 export function EllaMascot({
   state = "resting",
@@ -118,6 +136,7 @@ export function EllaMascot({
   entrance = true,
   pokeable = false,
   decorative = false,
+  speech,
   className = "",
   style,
   children,
@@ -128,6 +147,9 @@ export function EllaMascot({
   const rightEye = useRef<HTMLDivElement>(null);
   const mouth = useRef<HTMLSpanElement>(null);
   const pokeTimer = useRef(0);
+  const speechBox = speech ? SPEECH_MOUTH[variant] : undefined;
+  // Audio without Piper's timings, which her drawn mouth cannot follow.
+  const [untimed, setUntimed] = useState(false);
 
   useEntrance(entry, entrance);
 
@@ -237,6 +259,8 @@ export function EllaMascot({
     `ella--${state}`,
     ears !== "rest" ? `ella--ears-${ears}` : "",
     mood === "cheer" ? "ella--cheer" : "",
+    speechBox ? "ella--lipsync" : "",
+    speechBox && untimed ? "is-untimed" : "",
     pokeable ? "is-pokeable" : "",
     className,
   ]
@@ -291,6 +315,15 @@ export function EllaMascot({
                 </span>
               </>
             )}
+            {speech && speechBox && (
+              <SpeechMouthDrawing
+                speech={speech}
+                box={speechBox}
+                stage={BLOB[variant]}
+                state={state}
+                onUntimed={setUntimed}
+              />
+            )}
           </div>
           {children && <div className="ella__slot">{children}</div>}
         </div>
@@ -298,6 +331,194 @@ export function EllaMascot({
     </div>
   );
 }
+
+/**
+ * Her mouth as one path, drawn the way Ella Mobile draws it: her U smile at
+ * rest and, while a timed reply plays, the shape of each sound she is making,
+ * read off the audio clock every frame. Speech grows out of the smile and
+ * hands back to it, so the two never cut.
+ */
+function SpeechMouthDrawing({
+  speech,
+  box,
+  stage,
+  state,
+  onUntimed,
+}: {
+  speech: SpeechMouth;
+  box: Box & { line: number };
+  /** The variant's own box, which the drawing covers at design size. */
+  stage: { width: number; height: number };
+  state: EllaState;
+  onUntimed: (untimed: boolean) => void;
+}) {
+  const clip = useId().replace(/[^\w-]/g, "");
+  const group = useRef<SVGGElement>(null);
+  const lips = useRef<SVGPathElement>(null);
+  const lipsClip = useRef<SVGPathElement>(null);
+  const lowerTeeth = useRef<SVGRectElement>(null);
+  const tongue = useRef<SVGEllipseElement>(null);
+  const teethClip = useRef<SVGRectElement>(null);
+  const teeth = useRef<SVGRectElement>(null);
+  const speaking = useRef(state === "speaking");
+  speaking.current = state === "speaking";
+  const wake = useRef<() => void>(() => undefined);
+
+  useLayoutEffect(() => {
+    const reduce = prefersReducedMotion();
+    let frame = 0;
+    let last = 0;
+    // How far the handoff has got, linearly in time, and which curve it runs
+    // on. A curve keeps its direction until it settles, so a line cut off
+    // while the mouth comes in turns back without a jump.
+    let progress = 0;
+    let rising = true;
+    let held: MouthShape | null = null;
+    let untimed = false;
+
+    const draw = (shape: MouthShape, weight: number) => {
+      const geometry = mouthGeometry(shape, box.width, box.line);
+      const x = box.x + box.width / 2;
+      // The smile sits a little higher, to reach the U's arms.
+      const y = box.y + box.height / 2 - SMILE_LIFT * box.width * (1 - weight);
+      const turn = (geometry.skew * 180) / Math.PI;
+      group.current?.setAttribute("transform", `translate(${x} ${y.toFixed(3)}) rotate(${turn.toFixed(3)})`);
+      lips.current?.setAttribute("d", geometry.path);
+      lips.current?.setAttribute("stroke-width", `${geometry.outline}`);
+      lipsClip.current?.setAttribute("d", geometry.path);
+      place(lowerTeeth.current, geometry.lowerTeeth);
+      place(teethClip.current, geometry.teeth?.clip ?? null);
+      place(teeth.current, geometry.teeth);
+      teeth.current?.setAttribute("rx", `${geometry.teeth?.radius ?? 0}`);
+      const tip = tongue.current;
+      if (!tip) return;
+      if (!geometry.tongue) {
+        tip.setAttribute("display", "none");
+        return;
+      }
+      tip.removeAttribute("display");
+      tip.setAttribute("cx", `${geometry.tongue.cx}`);
+      tip.setAttribute("cy", `${geometry.tongue.cy}`);
+      tip.setAttribute("rx", `${geometry.tongue.rx}`);
+      tip.setAttribute("ry", `${geometry.tongue.ry}`);
+    };
+
+    const tick = (now: number) => {
+      frame = 0;
+      const elapsed = last ? now - last : 0;
+      last = now;
+      const talking = speaking.current;
+      const speaks = talking && speech.started;
+      const target = speaks ? 1 : 0;
+      if (reduce) {
+        progress = target;
+      } else if (progress !== target) {
+        if (progress === 0 || progress === 1) rising = target === 1;
+        progress =
+          target === 1
+            ? Math.min(1, progress + elapsed / HANDOFF_IN_MS)
+            : Math.max(0, progress - elapsed / HANDOFF_OUT_MS);
+      }
+      const weight = rising ? easeOut(progress) : easeInOut(progress);
+      if (speech.started) held = speech.shape();
+      if (weight > 0 || speaks) {
+        // Back into her smile as the weight falls, so a line cut off mid-vowel
+        // closes rather than ghosting over it.
+        draw(lerpMouth(SMILE, held ?? VISEMES.rest, weight), weight);
+      } else {
+        held = null;
+        draw(SMILE, 0);
+      }
+      const nowUntimed = talking && speech.timed === false;
+      if (nowUntimed !== untimed) {
+        untimed = nowUntimed;
+        onUntimed(untimed);
+      }
+      if (talking || progress > 0) frame = requestAnimationFrame(tick);
+      else last = 0;
+    };
+
+    wake.current = () => {
+      if (!frame) frame = requestAnimationFrame(tick);
+    };
+    draw(SMILE, 0);
+    wake.current();
+    return () => {
+      cancelAnimationFrame(frame);
+      wake.current = () => undefined;
+    };
+  }, [speech, box, onUntimed]);
+
+  // Talking starts the frames; they stop by themselves once she is back to
+  // her smile.
+  useEffect(() => wake.current(), [state]);
+
+  return (
+    <svg
+      className="ella__speech"
+      width={stage.width}
+      height={stage.height}
+      viewBox={`0 0 ${stage.width} ${stage.height}`}
+      aria-hidden="true"
+      focusable="false"
+    >
+      <defs>
+        <clipPath id={`${clip}-lips`}>
+          <path ref={lipsClip} />
+        </clipPath>
+        <clipPath id={`${clip}-teeth`}>
+          <rect ref={teethClip} />
+        </clipPath>
+      </defs>
+      <g ref={group}>
+        <path ref={lips} className="ella__lips" />
+        {/* Upper teeth go last: the tongue sits behind them. */}
+        <g clipPath={`url(#${clip}-lips)`}>
+          <rect ref={lowerTeeth} className="ella__teeth" />
+          <ellipse ref={tongue} className="ella__tongue" />
+          <g clipPath={`url(#${clip}-teeth)`}>
+            <rect ref={teeth} className="ella__teeth" />
+          </g>
+        </g>
+      </g>
+    </svg>
+  );
+}
+
+function place(element: SVGRectElement | null, box: Box | null) {
+  if (!element) return;
+  if (!box) {
+    element.setAttribute("display", "none");
+    return;
+  }
+  element.removeAttribute("display");
+  element.setAttribute("x", `${box.x}`);
+  element.setAttribute("y", `${box.y}`);
+  element.setAttribute("width", `${box.width}`);
+  element.setAttribute("height", `${box.height}`);
+}
+
+/** A CSS `cubic-bezier` timing function, solved for its progress. */
+function cubicBezier(x1: number, y1: number, x2: number, y2: number): (t: number) => number {
+  const at = (a: number, b: number, s: number) => 3 * a * s * (1 - s) ** 2 + 3 * b * s * s * (1 - s) + s ** 3;
+  const slope = (a: number, b: number, s: number) =>
+    3 * a * (1 - s) ** 2 + 6 * (b - a) * s * (1 - s) + 3 * (1 - b) * s * s;
+  return (t) => {
+    if (t <= 0) return 0;
+    if (t >= 1) return 1;
+    let s = t;
+    for (let step = 0; step < 8; step += 1) {
+      const d = slope(x1, x2, s);
+      if (Math.abs(d) < 1e-6) break;
+      s = Math.min(1, Math.max(0, s - (at(x1, x2, s) - t) / d));
+    }
+    return at(y1, y2, s);
+  };
+}
+
+/** Flutter's `Curves.easeOut` and `Curves.easeInOut`, as Ella Mobile hands over. */
+const easeOut = cubicBezier(0, 0, 0.58, 1);
+const easeInOut = cubicBezier(0.42, 0, 0.58, 1);
 
 /** The learner's own little blob, in the colour they picked on their profile. */
 export function LearnerAvatar({ color, size = "sm" }: { color: string; size?: "sm" | "lg" }) {

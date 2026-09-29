@@ -402,6 +402,17 @@ pub struct WordSpan {
     pub end_ms: f64,
 }
 
+/// How long one token Piper spoke lasted, relative to the start of the clip it
+/// belongs to: a sound, a stress mark, a word space, the blank Piper puts
+/// after every token, or a sentence's start (`^`) or end (`$`). Read off the
+/// same inference as the audio, so Ella's mouth follows what she really says.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PhonemeSpan {
+    pub phoneme: String,
+    pub start_ms: f64,
+    pub end_ms: f64,
+}
+
 /// One sentence of a reply, synthesized and pushed to the window while the
 /// rest of the turn is still being written. Playback starts on the first of
 /// these instead of waiting for the whole reply, which is most of the turn.
@@ -417,6 +428,10 @@ pub struct SpeechStreamEvent {
     pub ready_ms: f64,
     /// When each word of `text` is spoken, from the start of `audio`.
     pub words: Vec<WordSpan>,
+    /// Every token of `audio`, in order. Empty when the voice cannot time
+    /// them, and then her mouth only opens while she talks.
+    #[serde(default)]
+    pub phonemes: Vec<PhonemeSpan>,
 }
 
 /// The result of speaking a line the app already had — Ella's opening. Carries
@@ -426,6 +441,9 @@ pub struct SpeechStreamEvent {
 pub struct SpokenLine {
     pub audio: Option<AudioPayload>,
     pub speech_words: Vec<WordSpan>,
+    /// Every token of `audio`, from its start, for her mouth on a replay.
+    #[serde(default)]
+    pub speech_phonemes: Vec<PhonemeSpan>,
     pub streamed_segments: u32,
 }
 
@@ -464,6 +482,10 @@ pub struct TurnResult {
     /// When each word of the whole reply is spoken, from the start of `audio`.
     /// Empty when there are no timings, which is also how "no audio" reads.
     pub speech_words: Vec<WordSpan>,
+    /// Every token of the whole reply, from the start of `audio`. Empty when
+    /// the voice cannot time them.
+    #[serde(default)]
+    pub speech_phonemes: Vec<PhonemeSpan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
