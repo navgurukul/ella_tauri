@@ -36,6 +36,7 @@ const NAV: Array<{ key: NavKey; label: string; icon: ReactElement }> = [
 
 export function Sidebar({
   active,
+  profileActive = false,
   learnerName,
   streakDays,
   avatarColor,
@@ -44,6 +45,8 @@ export function Sidebar({
 }: {
   /** Null on screens that are not in the nav, like the profile. */
   active: NavKey | null;
+  /** The profile, and the level map behind it, light up the learner's row. */
+  profileActive?: boolean;
   learnerName: string;
   streakDays: number;
   avatarColor: string;
@@ -78,13 +81,19 @@ export function Sidebar({
             <b>{streakDays}</b> day streak
           </span>
         </div>
-        <button className="profile" onClick={onProfile}>
-          <LearnerAvatar color={avatarColor} />
-          <span className="profile__text">
-            <strong>{learnerName}</strong>
-            <small>View profile</small>
-          </span>
-        </button>
+        <div className="sidebar__me">
+          <button
+            className={`profile ${profileActive ? "is-active" : ""}`.trim()}
+            aria-current={profileActive ? "page" : undefined}
+            onClick={onProfile}
+          >
+            <LearnerAvatar color={avatarColor} />
+            <span className="profile__text">
+              <strong>{learnerName}</strong>
+              <small>View profile</small>
+            </span>
+          </button>
+        </div>
       </div>
     </aside>
   );

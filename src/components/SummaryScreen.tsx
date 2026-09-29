@@ -10,6 +10,7 @@ import {
   castName,
   goalFigure,
   reachedGoal,
+  sceneBadge,
   streakRecap,
   type StreakRecap,
 } from "../lib/presentation";
@@ -246,6 +247,7 @@ function RoleBand({
   onLevels: () => void;
 }) {
   const told = CHORE_RECAP[chore.chore_id] ?? { track: "GOAL", agrees: "They agree" };
+  const badge = sceneBadge(chore.chore_id);
   const name = castName(chore.character_id);
   return (
     <section
@@ -268,7 +270,7 @@ function RoleBand({
         </ul>
         <MovedOn assessment={assessment} onLevels={onLevels} />
       </div>
-      {told.badge && <RecapBadge name={told.badge} chore={chore} />}
+      {badge && <RecapBadge name={badge} chore={chore} />}
       <div className="recap-band__partner" aria-hidden="true">
         <div className="recap-band__partner-box">
           <PartnerFigure id={chore.character_id as CastId} entrance={false} />

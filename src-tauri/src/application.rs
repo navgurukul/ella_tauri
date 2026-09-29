@@ -1018,7 +1018,8 @@ impl AppService {
         };
 
         let db_persist_started = Instant::now();
-        self.database.persist_turn(session_id, &learner_message, &ella_message)?;
+        self.database
+            .persist_turn(session_id, &learner_message, &ella_message, trace.spoken_ms())?;
         trace.stage(
             "db:turn-persisted",
             &format!(
@@ -2272,6 +2273,9 @@ mod tests {
                 "answers": 0,
                 "finished_topics": [],
                 "chores_met": [],
+                "talks": [],
+                "spoken_ms": 0,
+                "spoken_answers": 0,
             })
         );
 
@@ -2296,7 +2300,18 @@ mod tests {
         assert_eq!(day["day"].as_str().unwrap().len(), "YYYY-MM-DD".len());
         assert_eq!(day["talks"], 1);
         assert_eq!(day["answers"], 1);
+        assert_eq!(day["spoken_ms"], 0, "a typed answer adds no spoken time");
         assert_eq!(snapshot["progress"]["talks_finished"], 1);
+        let talk = &snapshot["progress"]["talks"][0];
+        assert_eq!(
+            keys(talk),
+            vec!["day", "goal_met", "topic_id"],
+            "each finished talk as the badges read it"
+        );
+        assert_eq!(talk["topic_id"], "street-food");
+        assert_eq!(talk["day"], day["day"]);
+        assert_eq!(talk["goal_met"], false);
+        assert_eq!(snapshot["progress"]["spoken_answers"], 0);
         assert_eq!(snapshot["progress"]["answers"], 1);
         assert_eq!(snapshot["progress"]["finished_topics"], serde_json::json!(["street-food"]));
         assert!(snapshot["recent_sessions"].is_array());
@@ -2336,6 +2351,23 @@ mod tests {
         service.shutdown();
         service.shutdown();
         assert_eq!(service.bootstrap().unwrap().learner.unwrap().name, "Asha");
+    }
+
+    #[test]
+    fn a_spoken_answer_keeps_how_long_it_lasted_and_a_typed_one_does_not() {
+        let service = service();
+        service.save_learner("Asha", Some(14)).unwrap();
+        let session = service.start_session("street-food").unwrap();
+        // A second and a half of audio, which the browser has already heard.
+        service
+            .send_voice_turn(&session.id, vec![0; 24_000], 16_000, Some("I ate poha today".into()))
+            .unwrap();
+        service.send_text_turn(&session.id, "It was a little spicy").unwrap();
+
+        let progress = service.bootstrap().unwrap().progress;
+        assert_eq!(progress.answers, 2);
+        assert_eq!((progress.spoken_answers, progress.spoken_ms), (1, 1_500));
+        assert_eq!((progress.days[0].answers, progress.days[0].spoken_ms), (2, 1_500));
     }
 
     #[test]
@@ -2721,6 +2753,22 @@ mod curriculum_flow_tests {
         let pen = service.start_chore("sell-me-a-pen").unwrap();
         service.send_text_turn(&pen.id, "This pen never runs out of ink").unwrap();
         assert_eq!(service.complete_session(&pen.id).unwrap().chore, None);
+
+        // The badges read every finished talk, in the order they ended, and
+        // only a ledger that ended agreed at or past its target met a goal.
+        let talks = service.bootstrap().unwrap().progress.talks;
+        let stall = talks
+            .iter()
+            .filter(|talk| talk.topic_id == "market-cloth-price")
+            .map(|talk| talk.goal_met)
+            .collect::<Vec<_>>();
+        assert_eq!(stall, vec![true, false, false, true]);
+        assert!(
+            talks.iter().filter(|talk| talk.topic_id != "market-cloth-price").all(|talk| !talk.goal_met),
+            "no ledger, no goal: {talks:?}"
+        );
+        assert_eq!(talks.last().unwrap().topic_id, "sell-me-a-pen");
+        assert!(talks.iter().all(|talk| talk.day.len() == "YYYY-MM-DD".len()), "{talks:?}");
     }
 
     #[test]

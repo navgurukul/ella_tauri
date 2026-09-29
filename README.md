@@ -74,16 +74,40 @@ design's window chrome — title bar and traffic lights — is left to the OS.
   the mic check again. The placement chat finds the learner's level: see
   [Levels](#levels-the-placement-chat-and-moving-on).
 - Then the sidebar screens: **Home**, **Talk partners** and the **Profile**
-  (from the name at the foot of the sidebar), plus the conversation, its
-  summary and the level map. A conversation hides the sidebar and fills the
-  window; Space works its microphone. The summary and the level map are not in
-  the Ella Desktop design: the summary is built from Home's parts, and the level
-  map follows Ella Mobile v7's Levels and level pages, laid side by side.
+  (from the name at the foot of the sidebar, which stays lit on the profile and
+  the level map behind it), plus the conversation, its recap, and **Levels and
+  badges**. A conversation and its recap hide the sidebar and fill the window;
+  Space works the microphone.
 - Talk partners are real where the backend is: Bippo's and Grumble's goals start
   the chores in `chores()` through `start_chore`, which plays the character and
   keeps the score. Dr Wobble's goal opens the doctor topic, and Zig's debate has
   no chore yet, so it shows as coming soon. Goals a learner is too young for are
-  left out, mirroring `catalog_for`.
+  left out, mirroring `catalog_for`. The four partners are drawn in CSS, as the
+  design draws them, and the recap and a badge's sheet reuse the same drawings.
+- The **profile** is the design's: the learner in the colour they gave their
+  Ella, with her rising out of the card's corner, their age and the day they
+  joined; the day streak, talks done and time spoken; the settings; MY LEVEL
+  with a track of all six levels; and the badges, those earned latest first and
+  three to earn next. "Where to earn more" and MY LEVEL open **Levels and
+  badges**: the path of levels with the anytime badges beneath it, and the
+  picked one's page — its goal, its five steps as bars with a segment per
+  skill, and the badges filed under it. Where the design writes a CEFR code
+  ("A2", "to B1"), the window writes the level's number, as Ella Mobile does.
+- **Badges** are read off the learner's history, in
+  [`src/lib/presentation.ts`](src/lib/presentation.ts) (`learnerBadges`): Hello,
+  Ella (a placement chat finished), First talk, Bargainer (the stall price talked
+  down, or the free bargaining talk finished), Deposit back (Grumble's refund
+  goal met), the 3-, 7- and 30-day streaks, and 50 talks. Each is dated by the
+  talk that first earned it, and a scene's badge counts the goes at it. A badge
+  opens a sheet saying how it is going, what earns it and where; its mic opens
+  that partner's scenes on Talk partners, or starts the talk that earns it.
+  Only what can be counted is shown, as on Ella Mobile. The design's "Sold!",
+  "Clear patient" and "Take a stand" are left out until something judges the
+  pen's rubric, Dr Wobble has a scene with a goal, and Zig has a scene at all;
+  its level-4 and mystery badges stand for scenes nobody has made yet. A scene
+  can be played at any level, so nothing is locked: a badge sits at the level
+  the design files it under, and a scene the learner is too young for leaves its
+  badge out.
 - A laptop keeps one learner, with their talks, progress and avatar colour, all
   in the local SQLite database. The profile edits them through `save_learner`
   and saves the avatar colour through `save_avatar_color`. "Log out"
@@ -94,19 +118,23 @@ design's window chrome — title bar and traffic lights — is left to the OS.
   is the same learner onboarding again: `save_learner` signs them in and their
   history stays theirs.
 - The design shows framing the Rust backend does not model yet — per-topic
-  category and duration, a mentor lesson, badges, minutes spoken, the cast's
-  names. All of it is resolved in
+  category and duration, a mentor lesson, the badges' names and colours, the
+  cast's names. All of it is resolved in
   [`src/lib/presentation.ts`](src/lib/presentation.ts), which derives what it can
   from `AppSnapshot` and marks the rest `PLACEHOLDER`. The streak, the week
-  strip, talks and answers, and the earned badges all come from
+  strip, talks, answers and time spoken, and every badge all come from
   `AppSnapshot.progress`, which the backend sums over the learner's whole
-  history. A day counts once the learner has answered on it. The home screen's
-  weekly talk count includes every talk with an answer, on the day of its first
-  answer; the profile's talks done and the First talk badge count only talks
-  finished with at least one answer. Where the design shows a
-  number nothing can back — "minutes spoken" — the screen shows answers spoken
-  instead of a made-up figure. When the backend grows a field, delete the
-  constant and read the snapshot instead.
+  history: its days, and every finished talk in the order they ended with the
+  day each ended and whether it met a ledger goal. A day counts once the
+  learner has answered on it. The home screen's weekly talk count includes
+  every talk with an answer, on the day of its first answer; the profile's
+  talks done and the badges count only talks finished with at least one
+  answer. Time spoken is the length of each spoken answer, kept with it
+  (`messages.spoken_ms`): the speech the VAD kept, or the whole recording of a
+  streamed turn. Typed answers, and every answer from before Ella kept the
+  length, have none, so until one is measured the profile shows "—" and Home
+  shows answers spoken rather than a time nobody measured. When the backend
+  grows a field, delete the constant and read the snapshot instead.
 
 The intended window is 1440x900; the layout holds down to the 1240x740 minimum,
 with the tallest mascots scaling down on short windows.
@@ -160,6 +188,8 @@ number on the ladder, 1 to 6.
   question, so leaving early loses nothing: Home catches up, and a step or
   level finished meanwhile is celebrated in a toast. Home and the profile carry
   a MY LEVEL card, and both open the level map, as the recap's footer does.
+  Meeting a ledger chore's goal earns its badge: Bargainer for the stall price,
+  Deposit back for the refund.
 - **Ella's notes** ([`notes.rs`](src-tauri/src/notes.rs)) need three answers
   and twelve words; a shorter talk says so at once. What went well is read off
   the learner's own words by rules (reasons given, the past told, questions
@@ -170,7 +200,8 @@ number on the ladder, 1 to 6.
   fix rather than failing the talk, and "Nothing to fix" is only said when a
   model looked. A ledger chore's recap is read off its ledger (`ChoreRecap`),
   which is also what earns the Bargainer badge now: the stall price talked
-  down, or the free bargaining talk finished.
+  down, or the free bargaining talk finished. Deposit back is earned the same
+  way, by Grumble's refund goal met.
 
 Assessments are worked out once and kept on the talk (`sessions.assessment`),
 in one transaction with the skills and the level they change, so asking again
@@ -517,8 +548,9 @@ and one table, so v0.1.6 can still open it afterwards. The learner gains the
 avatar colour, whether they are signed out, their level and step, and whether a
 placement has read a level for them. Each session gains whether it was the
 placement chat, the skill it aimed at, the level it was pitched at and its kept
-assessment. The new table is `skill_mastery`, one row per skill a talk has
-been scored on. It is a new name on purpose, because the first releases' garden
+assessment. Each answer gains how long it lasted when it was spoken
+(`spoken_ms`), empty for a typed one. The new table is `skill_mastery`, one row
+per skill a talk has been scored on. It is a new name on purpose, because the first releases' garden
 left a `skill_progress` table of its own on some laptops. `level_name` keeps
 the learner's real level name, which is what v0.1.6 shows. A database from an unreleased development
 build that briefly kept several learners on one laptop is converted back once:

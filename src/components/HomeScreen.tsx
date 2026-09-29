@@ -4,6 +4,8 @@ import { LevelCard } from "./LevelCard";
 import { FlameGlyph } from "./Sidebar";
 import {
   recommendedTopicId,
+  spokenAmount,
+  spokenTimeKnown,
   streak,
   topicMeta,
   topicPresentation,
@@ -159,14 +161,34 @@ export function HomeScreen({
                 <dt className="display">{digest.talks}</dt>
                 <dd>{digest.talks === 1 ? "talk" : "talks"}</dd>
               </div>
-              <div>
-                <dt className="display">{digest.answers}</dt>
-                <dd>{digest.answers === 1 ? "answer spoken" : "answers spoken"}</dd>
-              </div>
+              <WeekSpoken spokenMs={digest.spokenMs} answers={digest.answers} known={spokenTimeKnown(snapshot.progress)} />
             </dl>
           </section>
         </aside>
       </div>
+    </div>
+  );
+}
+
+/**
+ * This week's time spoken, as the design has it. Until Ella has kept the
+ * length of a spoken answer there is no time to add up — answers from before
+ * she kept it, and typed ones, have none — so the answers stand in for it.
+ */
+function WeekSpoken({ spokenMs, answers, known }: { spokenMs: number; answers: number; known: boolean }) {
+  if (!known) {
+    return (
+      <div>
+        <dt className="display">{answers}</dt>
+        <dd>{answers === 1 ? "answer spoken" : "answers spoken"}</dd>
+      </div>
+    );
+  }
+  const { value, unit } = spokenAmount(spokenMs);
+  return (
+    <div>
+      <dt className="display">{value}</dt>
+      <dd>{unit} spoken</dd>
     </div>
   );
 }

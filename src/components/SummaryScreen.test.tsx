@@ -15,7 +15,16 @@ const standing: Standing = {
   placed: true,
 };
 
-const nothingYet: LearnerProgress = { days: [], talks_finished: 0, answers: 0, finished_topics: [], chores_met: [] };
+const nothingYet: LearnerProgress = {
+  days: [],
+  talks_finished: 0,
+  answers: 0,
+  finished_topics: [],
+  chores_met: [],
+  talks: [],
+  spoken_ms: 0,
+  spoken_answers: 0,
+};
 
 function summaryOf(overrides: Partial<SessionSummary> = {}): SessionSummary {
   return {
@@ -191,7 +200,7 @@ describe("the recap", () => {
     expect(onTryAgain).toHaveBeenCalledWith("market-cloth-price");
   });
 
-  it("gives a chore with no badge the band without one", () => {
+  it("gives the deposit its own badge, by the name the profile lists it under", () => {
     renderRecap({
       summary: summaryOf({
         chore: { ...stall, chore_id: "deposit-refund", character_id: "landlord", direction: "up", target: 3500, figure: 3600 },
@@ -199,7 +208,8 @@ describe("the recap", () => {
     });
     expect(screen.getByText("Grumble · DEPOSIT")).toBeInTheDocument();
     expect(screen.getByRole("list", { name: "Your goal" })).toHaveTextContent("Rs 3500 or more (done)");
-    expect(screen.queryByText("New badge")).not.toBeInTheDocument();
+    expect(screen.getByText("New badge")).toBeInTheDocument();
+    expect(screen.getByText("Deposit back")).toBeInTheDocument();
   });
 
   it("thanks nobody for a talk with nothing said in it", () => {

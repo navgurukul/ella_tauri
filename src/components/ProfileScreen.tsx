@@ -1,12 +1,35 @@
 import { useState } from "react";
-import type { FormEvent } from "react";
-import { LearnerAvatar } from "./EllaMascot";
-import { MicGlyph } from "./HomeScreen";
-import { LevelCard } from "./LevelCard";
-import { AVATAR_COLORS } from "../lib/avatar";
-import { badges, streak, talkTotals } from "../lib/presentation";
-import type { AppSnapshot, Badge } from "../types";
+import type { FormEvent, KeyboardEvent, ReactNode } from "react";
+import { BadgeDisc, BadgeRow, BadgeSheet } from "./Badges";
+import { EllaMascot } from "./EllaMascot";
+import { Glyph } from "./Glyphs";
+import { LevelTrackCard } from "./LevelCard";
+import { AVATAR_COLORS, avatarTint } from "../lib/avatar";
+import { dayKey } from "../lib/days";
+import {
+  earnedBadges,
+  learnerBadges,
+  openBadges,
+  shortDate,
+  spokenTime,
+  spokenTimeKnown,
+  streak,
+  talkTotals,
+} from "../lib/presentation";
+import type { AppSnapshot, BadgeStart, LearnerBadge } from "../types";
 
+/** How many earned badges the profile's row has room for, latest first. */
+const BADGE_ROW = 5;
+/** And how many of the rest it offers next. */
+const NEXT_UP = 3;
+
+/**
+ * My profile, as the Ella Desktop design lays it out. On the left, the learner
+ * in the colour they gave their Ella, with her rising out of the corner; their
+ * counts; and the settings. On the right, MY LEVEL with a track of every
+ * level, and the badges: those earned, latest first, and the ones to earn
+ * next. A badge opens its sheet, and "Where to earn more" the level map.
+ */
 export function ProfileScreen({
   snapshot,
   avatarColor,
@@ -16,6 +39,7 @@ export function ProfileScreen({
   onMicCheck,
   onLevels,
   onLogOut,
+  onBadgeStart,
 }: {
   snapshot: AppSnapshot;
   avatarColor: string;
@@ -26,15 +50,22 @@ export function ProfileScreen({
   onMicCheck: () => void;
   onLevels: () => void;
   onLogOut: () => void;
+  /** A badge sheet's mic: the scenes, talk or placement that earn it. */
+  onBadgeStart: (start: BadgeStart) => void;
 }) {
   const learner = snapshot.learner;
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState("");
   const [age, setAge] = useState("");
+  const [sheet, setSheet] = useState<string | null>(null);
 
-  const run = streak(snapshot.progress);
+  const today = new Date();
+  const run = streak(snapshot.progress, today);
   const totals = talkTotals(snapshot.progress);
-  const earned = badges(snapshot.progress, run);
+  const badges = learnerBadges(snapshot, today);
+  const earned = earnedBadges(badges);
+  const next = openBadges(badges).slice(0, NEXT_UP);
+  const shown = badges.find((badge) => badge.id === sheet) ?? null;
 
   // The same checks as onboarding. An age cannot be taken away once given —
   // sent without one, the backend keeps the old — so an emptied field is not
@@ -57,19 +88,32 @@ export function ProfileScreen({
     if (await onSave(name, age ? parsedAge : null)) setEditing(false);
   }
 
+  /** Escape puts the name and age back as they are saved. The colour is
+   * saved the moment it is picked, so it stays. */
+  function cancelOnEscape(event: KeyboardEvent) {
+    if (event.key === "Escape") setEditing(false);
+  }
+
+  function open(badge: LearnerBadge) {
+    setSheet(badge.id);
+  }
+
   return (
     <div className="screen screen--scroll screen--profile" data-screen="profile">
       <h1 className="display page-title">My profile</h1>
 
       <div className="profile-grid">
         <div className="profile-col">
-          <form className="panel profile-card" onSubmit={(event) => void save(event)}>
-            <div className="profile-card__row">
-              <LearnerAvatar color={avatarColor} size="lg" />
+          <section
+            className="profile-hero"
+            style={{ background: avatarTint(avatarColor) }}
+            aria-label="About you"
+          >
+            <div className="profile-hero__text">
               {editing ? (
-                <div className="profile-card__fields">
+                <form className="profile-hero__form" onSubmit={(event) => void save(event)} onKeyDown={cancelOnEscape}>
                   <input
-                    className="profile-card__name-field"
+                    className="profile-hero__name-field"
                     aria-label="Your name"
                     value={name}
                     maxLength={40}
@@ -77,88 +121,74 @@ export function ProfileScreen({
                     placeholder="Your name"
                     onChange={(event) => setName(event.target.value)}
                   />
-                  <input
-                    className="profile-card__age-field"
-                    aria-label="Your age"
-                    value={age}
-                    inputMode="numeric"
-                    maxLength={3}
-                    placeholder="Age"
-                    onChange={(event) => setAge(event.target.value.replace(/[^0-9]/g, ""))}
-                  />
-                </div>
+                  <div className="profile-hero__age-row">
+                    <input
+                      className="profile-hero__age-field"
+                      aria-label="Your age"
+                      value={age}
+                      inputMode="numeric"
+                      maxLength={3}
+                      placeholder="Age"
+                      onChange={(event) => setAge(event.target.value.replace(/[^0-9]/g, ""))}
+                    />
+                    <span>years old</span>
+                  </div>
+                  <div className="swatches" role="group" aria-label="Avatar colour">
+                    {AVATAR_COLORS.map((color) => (
+                      <button
+                        key={color.value}
+                        type="button"
+                        className={`swatch ${color.value === avatarColor ? "is-picked" : ""}`.trim()}
+                        style={{ background: color.value }}
+                        aria-label={color.name}
+                        aria-pressed={color.value === avatarColor}
+                        onClick={() => onAvatarColor(color.value)}
+                      />
+                    ))}
+                  </div>
+                  <button type="submit" className="profile-hero__done" disabled={!canSave}>
+                    Done
+                  </button>
+                </form>
               ) : (
                 <>
-                  <div className="profile-card__who">
-                    <h2 className="display">{learner?.name ?? "friend"}</h2>
-                    {learner?.age != null && <p>{learner.age} years old</p>}
-                  </div>
-                  <button type="button" className="btn btn--quiet" onClick={startEditing}>
-                    Edit
+                  <h2 className="display profile-hero__name">{learner?.name ?? "friend"}</h2>
+                  <p className="profile-hero__about">
+                    {learner?.age != null && <span>{learner.age} years old</span>}
+                    {learner?.created_at && <span>Talking since {joined(learner.created_at, today)}</span>}
+                  </p>
+                  <button type="button" className="profile-hero__edit" onClick={startEditing}>
+                    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+                      <path d="M15.2 4.3a2.2 2.2 0 013.1 0l1.4 1.4a2.2 2.2 0 010 3.1L9.1 19.4l-4.8 1.2c-.6.1-1-.3-.9-.9l1.2-4.8z" />
+                    </svg>
+                    Edit profile
                   </button>
                 </>
               )}
             </div>
-            {editing && (
-              <div className="profile-card__foot">
-                <div className="swatches" role="group" aria-label="Avatar colour">
-                  {AVATAR_COLORS.map((color) => (
-                    <button
-                      key={color.value}
-                      type="button"
-                      className={`swatch ${color.value === avatarColor ? "is-picked" : ""}`.trim()}
-                      style={{ background: color.value }}
-                      aria-label={color.name}
-                      aria-pressed={color.value === avatarColor}
-                      onClick={() => onAvatarColor(color.value)}
-                    />
-                  ))}
-                </div>
-                <button type="submit" className="btn btn--violet btn--compact" disabled={!canSave}>
-                  Done
-                </button>
-              </div>
-            )}
-          </form>
-
-          <dl className="stat-tiles">
-            <div className="panel stat-tile">
-              <dt className="display">{run.days}</dt>
-              <dd className="mono">DAY STREAK</dd>
-            </div>
-            <div className="panel stat-tile">
-              <dt className="display">{totals.talks}</dt>
-              <dd className="mono">TALKS DONE</dd>
-            </div>
-            <div className="panel stat-tile">
-              <dt className="display">{totals.answers}</dt>
-              <dd className="mono">ANSWERS</dd>
-            </div>
-          </dl>
-
-          {snapshot.standing && <LevelCard standing={snapshot.standing} onOpen={onLevels} />}
-        </div>
-
-        <div className="profile-col">
-          <section className="panel">
-            <h3 className="panel__title">Badges</h3>
-            <ul className="badges">
-              {earned.map((badge) => (
-                <li key={badge.id} className={`badge badge--${badge.id} ${badge.earned ? "is-earned" : ""}`.trim()}>
-                  <span className="badge__disc">{badge.earned ? <BadgeIcon badge={badge} /> : "?"}</span>
-                  <span className="badge__label">{badge.label}</span>
-                </li>
-              ))}
-              {/* A teaser for whatever comes next. */}
-              <li className="badge">
-                <span className="badge__disc">?</span>
-                <span className="badge__label">Locked</span>
-              </li>
-            </ul>
+            <EllaMascot
+              variant="profile"
+              color={avatarColor}
+              className="ella--profile-peek"
+              entrance={false}
+              decorative
+            />
           </section>
 
-          <section className="panel panel--settings">
-            <h3 className="panel__title">Settings</h3>
+          <div className="profile-stats">
+            <Stat icon={<Glyph glyph="flame" size={20} color="#FF7A00" />} value={String(run.days)} label="DAY STREAK" />
+            <Stat icon={<Glyph glyph="mic" size={20} color="#9347DD" />} value={String(totals.talks)} label="TALKS DONE" />
+            <Stat
+              icon={<ClockIcon />}
+              // Answers from before Ella kept their length leave nothing to
+              // add up, which is not the same as having said nothing.
+              value={spokenTimeKnown(snapshot.progress) ? spokenTime(totals.spokenMs) : "—"}
+              label="SPOKEN"
+            />
+          </div>
+
+          <section className="panel profile-settings">
+            <h3 className="profile-panel__title">Settings</h3>
             <div className="settings">
               <button className="settings__row" onClick={onMicCheck}>
                 Mic check
@@ -178,28 +208,97 @@ export function ProfileScreen({
             </div>
           </section>
         </div>
+
+        <div className="profile-col">
+          {snapshot.standing && <LevelTrackCard standing={snapshot.standing} onOpen={onLevels} />}
+
+          <section className="panel profile-badges" aria-labelledby="profile-badges-title">
+            <div className="profile-badges__head">
+              <h3 id="profile-badges-title" className="profile-panel__title">
+                Badges
+              </h3>
+              <span className="profile-badges__count">
+                {earned.length} of {badges.length}
+              </span>
+              <button className="profile-badges__more" onClick={onLevels}>
+                Where to earn more
+              </button>
+            </div>
+            {earned.length > 0 ? (
+              <ul className="profile-badges__row">
+                {earned.slice(0, BADGE_ROW).map((badge) => (
+                  <li key={badge.id}>
+                    <button className="profile-badge" onClick={() => open(badge)}>
+                      <BadgeDisc badge={badge} size={64} glyph={28} ring={0} />
+                      <span>{badge.name}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="profile-badges__none">Finish a talk with Ella to earn your first badge.</p>
+            )}
+            {next.length > 0 && (
+              <div className="profile-badges__next">
+                <p className="mono profile-badges__label">NEXT UP</p>
+                <ul className="badge-list">
+                  {next.map((badge) => (
+                    <BadgeRow key={badge.id} badge={badge} today={today} onOpen={open} />
+                  ))}
+                </ul>
+              </div>
+            )}
+          </section>
+        </div>
       </div>
+
+      {shown && (
+        <BadgeSheet
+          badge={shown}
+          today={today}
+          busy={busy}
+          onStart={(start) => {
+            setSheet(null);
+            onBadgeStart(start);
+          }}
+          onClose={() => setSheet(null)}
+        />
+      )}
     </div>
   );
 }
 
-function BadgeIcon({ badge }: { badge: Badge }) {
-  if (badge.id === "streak") {
-    return (
-      <span className="flame flame--badge" aria-hidden="true">
-        <i />
-        <i />
-      </span>
-    );
-  }
-  if (badge.id === "first-talk") return <MicGlyph size={28} />;
+/** "21 Aug", the day the learner first told Ella their name. */
+function joined(createdAt: string, today: Date): string {
+  const at = new Date(createdAt);
+  return Number.isNaN(at.getTime()) ? "" : shortDate(dayKey(at), today);
+}
+
+function Stat({ icon, value, label }: { icon: ReactNode; value: string; label: string }) {
   return (
-    <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor" aria-hidden="true">
-      <path
-        fillRule="evenodd"
-        clipRule="evenodd"
-        d="M12 2.9c5.3 0 9.6 3.5 9.6 7.8 0 4.3-4.3 7.8-9.6 7.8-.86 0-1.7-.09-2.5-.26l-3.9 1.86c-.9.43-1.86-.46-1.5-1.4l.94-2.5C3.4 14.9 2.4 13 2.4 10.7c0-4.3 4.3-7.8 9.6-7.8z"
-      />
+    <div className="profile-stat">
+      {icon}
+      <strong className="display">{value}</strong>
+      <span className="mono">{label}</span>
+    </div>
+  );
+}
+
+function ClockIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="20"
+      height="20"
+      fill="none"
+      stroke="#68B506"
+      strokeWidth="2.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
     </svg>
   );
 }

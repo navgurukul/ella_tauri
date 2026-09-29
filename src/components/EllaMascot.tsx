@@ -18,8 +18,10 @@ export type EllaState = "resting" | "listening" | "thinking" | "speaking";
  *   conversation  the talk stage, where she listens, thinks and speaks
  *   home          peeking over the top of the "Today's talk" card
  *   mentor        bobbing in the corner of the mentor card on Talk partners
+ *   profile       the learner's own Ella, in their colour, rising out of the
+ *                 profile card and their level's page
  */
-export type EllaVariant = "welcome" | "corner" | "age" | "conversation" | "home" | "mentor";
+export type EllaVariant = "welcome" | "corner" | "age" | "conversation" | "home" | "mentor" | "profile";
 
 /** How her ears stand: at rest, pricked up while she listens, or looming
  * after she has dived back in from above. */
@@ -32,6 +34,7 @@ const BLOB: Record<EllaVariant, { width: number; height: number }> = {
   conversation: { width: 660, height: 450 },
   home: { width: 300, height: 210 },
   mentor: { width: 380, height: 200 },
+  profile: { width: 190, height: 135 },
 };
 
 /** The placements whose smile widens into a grin now and then while resting. */
@@ -103,6 +106,8 @@ interface EllaMascotProps {
   state?: EllaState;
   mood?: EllaMood;
   variant?: EllaVariant;
+  /** Her body's colour, when she is the learner's own; purple otherwise. */
+  color?: string;
   /** 1 renders the variant at its designed size. */
   scale?: number;
   ears?: EllaEars;
@@ -131,6 +136,7 @@ export function EllaMascot({
   state = "resting",
   mood = "calm",
   variant = "corner",
+  color,
   scale = 1,
   ears = "rest",
   entrance = true,
@@ -275,6 +281,7 @@ export function EllaMascot({
           "--ella-w": `${BLOB[variant].width}px`,
           "--ella-h": `${BLOB[variant].height}px`,
           "--ella-scale": scale,
+          ...(color ? { "--ella-color": color } : {}),
           ...style,
         } as CSSProperties
       }

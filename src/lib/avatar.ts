@@ -19,6 +19,18 @@ export const AVATAR_COLORS = [
 
 export const DEFAULT_AVATAR_COLOR = AVATAR_COLORS[0].value;
 
+/** The pale wash the design lays behind the learner's Ella in each colour. */
+const AVATAR_TINTS: Record<string, string> = {
+  "#9347DD": "#EDE2FA",
+  "#FF3181": "#FFE3EE",
+  "#FF7A00": "#FFE9D4",
+  "#68B506": "#E7F4D6",
+};
+
+export function avatarTint(color: string): string {
+  return AVATAR_TINTS[paletteColor(color) ?? DEFAULT_AVATAR_COLOR] ?? AVATAR_TINTS[DEFAULT_AVATAR_COLOR];
+}
+
 /** One of the palette's colours, whatever case it was stored in, or nothing. */
 function paletteColor(value: string | null | undefined): string | undefined {
   if (!value) return undefined;

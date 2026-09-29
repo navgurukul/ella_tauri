@@ -1,7 +1,8 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { bridge } from "./lib/bridge";
+import { dayKey } from "./lib/days";
 import { mouthGeometry } from "./lib/mouth";
 import { SMILE } from "./lib/visemes";
 import type { Assessment, EllaBridge, PhonemeSpan, SpeechSegment, TurnResult } from "./types";
@@ -566,7 +567,7 @@ describe("Ella profile", () => {
     await openProfile();
     expect(screen.getByText("14 years old")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit profile" }));
     fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "Aarav K" } });
     fireEvent.change(screen.getByLabelText("Your age"), { target: { value: "15" } });
     fireEvent.click(screen.getByRole("button", { name: "Orange" }));
@@ -586,7 +587,7 @@ describe("Ella profile", () => {
 
   it("only offers Done for a name and age the backend can take", async () => {
     await openProfile();
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit profile" }));
     const done = screen.getByRole("button", { name: "Done" });
 
     fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "A" } });
@@ -607,7 +608,7 @@ describe("Ella profile", () => {
       .spyOn(bridge, "saveLearner")
       .mockRejectedValueOnce(new Error("Ella could not save that just now."));
     try {
-      fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+      fireEvent.click(screen.getByRole("button", { name: "Edit profile" }));
       fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "Aarav K" } });
       fireEvent.click(screen.getByRole("button", { name: "Done" }));
 
@@ -615,6 +616,35 @@ describe("Ella profile", () => {
       expect(screen.getByLabelText("Your name")).toHaveValue("Aarav K");
     } finally {
       refuse.mockRestore();
+    }
+  });
+
+  it("adds up the time spoken once Ella has kept how long an answer lasted", async () => {
+    await bridge.saveLearner("Asha", 14);
+    const read = bridge.bootstrap.bind(bridge);
+    const spoken = vi.spyOn(bridge, "bootstrap").mockImplementation(async () => {
+      const snapshot = await read();
+      return {
+        ...snapshot,
+        progress: {
+          ...snapshot.progress,
+          days: [{ day: dayKey(new Date()), talks: 1, answers: 3, spoken_ms: 120_000 }],
+          talks_finished: 1,
+          answers: 3,
+          spoken_ms: 7_380_000,
+          spoken_answers: 3,
+        },
+      };
+    });
+    try {
+      render(<App />);
+      await screen.findByText("Namaste, Asha!");
+      expect(document.querySelector(".card--week")).toHaveTextContent("2minutes spoken");
+      fireEvent.click(screen.getByRole("button", { name: /view profile/i }));
+      await screen.findByText("My profile");
+      expect(statTile("SPOKEN")).toBe("2h 3m");
+    } finally {
+      spoken.mockRestore();
     }
   });
 
@@ -662,7 +692,8 @@ describe("Ella profile", () => {
     await screen.findByText("My profile");
     expect(screen.getByText("14 years old")).toBeInTheDocument();
     expect(statTile("TALKS DONE")).toBe("1");
-    expect(statTile("ANSWERS")).toBe("1");
+    // A typed answer has no length to add up, so nothing is known yet.
+    expect(statTile("SPOKEN")).toBe("—");
     expect(statTile("DAY STREAK")).toBe("1");
   });
 
@@ -684,7 +715,7 @@ describe("Ella profile", () => {
     await screen.findByText("My profile");
     expect(screen.getByText("15 years old")).toBeInTheDocument();
     expect(statTile("TALKS DONE")).toBe("1");
-    expect(statTile("ANSWERS")).toBe("2");
+    expect(statTile("SPOKEN")).toBe("—");
     expect((await bridge.bootstrap()).learner).toEqual({
       ...aarav,
       name: "Aarav K",
@@ -695,7 +726,7 @@ describe("Ella profile", () => {
 
   it("keeps the learner's avatar colour through log out and log in", async () => {
     await openProfile("Aarav");
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit profile" }));
     fireEvent.click(screen.getByRole("button", { name: "Green" }));
     fireEvent.click(screen.getByRole("button", { name: "Done" }));
     await waitFor(() => expect(sidebarAvatarColor()).toBe("#68B506"));
@@ -709,7 +740,7 @@ describe("Ella profile", () => {
     await screen.findByText("Namaste, Aarav!");
     expect(sidebarAvatarColor()).toBe("#68B506");
     fireEvent.click(screen.getByRole("button", { name: /view profile/i }));
-    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit profile" }));
     expect(screen.getByRole("button", { name: "Green" })).toHaveAttribute("aria-pressed", "true");
   });
 
@@ -751,7 +782,7 @@ describe("Ella profile", () => {
       .spyOn(bridge, "saveAvatarColor")
       .mockRejectedValueOnce(new Error("Ella could not save that colour."));
     try {
-      fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+      fireEvent.click(screen.getByRole("button", { name: "Edit profile" }));
       fireEvent.click(screen.getByRole("button", { name: "Pink" }));
       // Straight away, with nothing covering the profile.
       expect(screen.getByRole("button", { name: "Pink" })).toHaveAttribute("aria-pressed", "true");
@@ -768,7 +799,7 @@ describe("Ella profile", () => {
     await openProfile("Aarav");
     const refuse = vi.spyOn(bridge, "saveAvatarColor").mockRejectedValue(new Error("Ella could not save that colour."));
     try {
-      fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+      fireEvent.click(screen.getByRole("button", { name: "Edit profile" }));
       fireEvent.click(screen.getByRole("button", { name: "Pink" }));
       fireEvent.click(screen.getByRole("button", { name: "Green" }));
       await screen.findByRole("alert");
@@ -805,7 +836,7 @@ describe("Ella profile", () => {
       await waitFor(() => expect(reread).toHaveBeenCalled());
       fireEvent.click(await screen.findByRole("button", { name: "Done" }));
       fireEvent.click(await screen.findByRole("button", { name: /view profile/i }));
-      fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Edit profile" }));
       fireEvent.click(screen.getByRole("button", { name: "Pink" }));
       await waitFor(async () => expect((await read()).learner?.avatar_color).toBe("#FF3181"));
 
@@ -933,15 +964,24 @@ describe("Ella levels", () => {
     expect(screen.queryByText("Step complete!")).not.toBeInTheDocument();
 
     fireEvent.click(level);
-    expect(await screen.findByRole("heading", { name: "Your levels" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Levels and badges" })).toBeInTheDocument();
     const path = await screen.findByRole("list", { name: "Levels" });
     expect(path.querySelectorAll(".level-stop")).toHaveLength(6);
     expect(path.querySelector(".level-stop.is-current")).toHaveTextContent("You’re here · 0% to level 4");
-    expect(path.querySelector(".level-stop.is-current")).toHaveTextContent("Step 1 of 5 · 0 of 4 skills");
+    expect(path.querySelector(".level-stop.is-current")).toHaveTextContent("0 of 20 skills filled");
     const page = screen.getByRole("region", { name: "Level 3: Finding My Voice" });
     expect(page).toHaveTextContent("Fill every bar to reach level 4.");
     expect(page.querySelectorAll(".level-step")).toHaveLength(5);
-    expect(page.querySelector(".level-step.is-yours .level-step__skills")?.children).toHaveLength(4);
+    expect(page.querySelector(".level-step.is-yours")).toHaveTextContent("Your step");
+    // What the bar's segments stand for, in words, for a screen reader.
+    expect(page.querySelector(".level-step.is-yours")).toHaveTextContent(", 0 of 4 skills");
+    expect(page.querySelector(".level-step.is-yours ul")?.children).toHaveLength(4);
+    expect(page.querySelector(".level-step.is-yours ul")).toHaveTextContent("(still to show)");
+    expect(page.querySelector(".level-step.is-yours .level-step__bar")?.children).toHaveLength(4);
+    // The badges the design files at this level, still to earn.
+    expect(page).toHaveTextContent("Badges at level 3");
+    expect(page).toHaveTextContent("Bargainer");
+    expect(page).toHaveTextContent("Deposit back");
 
     // Another level's page is a press away.
     fireEvent.click(screen.getByRole("button", { name: /Pre-Beginner/ }));
@@ -1035,7 +1075,7 @@ describe("Ella levels", () => {
       expect(await screen.findByText("Step complete!")).toBeInTheDocument();
       expect(screen.getByText("On to Step 2 of Finding My Voice.")).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "See levels" }));
-      expect(await screen.findByRole("heading", { name: "Your levels" })).toBeInTheDocument();
+      expect(await screen.findByRole("heading", { name: "Levels and badges" })).toBeInTheDocument();
       expect(screen.queryByText("Step complete!")).not.toBeInTheDocument();
     } finally {
       assess.mockRestore();
@@ -1133,7 +1173,7 @@ describe("Ella levels", () => {
   it("offers a learner who never had a placement the chat from the level map", async () => {
     await onboard("Dev");
     fireEvent.click(screen.getByRole("button", { name: /my level: finding my voice/i }));
-    await screen.findByRole("heading", { name: "Your levels" });
+    await screen.findByRole("heading", { name: "Levels and badges" });
     fireEvent.click(await screen.findByRole("button", { name: "Not sure? Find my level" }));
 
     // The chat takes the whole window, as a talk does.
@@ -1141,7 +1181,7 @@ describe("Ella levels", () => {
     expect(document.querySelector("aside.sidebar")).not.toBeInTheDocument();
     expect(promptText()).toBe("So Dev, tell me about your day so far!");
     fireEvent.click(screen.getByRole("button", { name: "Skip" }));
-    expect(await screen.findByRole("heading", { name: "Your levels" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Levels and badges" })).toBeInTheDocument();
 
     fireEvent.click(await screen.findByRole("button", { name: "Not sure? Find my level" }));
     await typeAnswers(5);
@@ -1158,6 +1198,142 @@ describe("Ella levels", () => {
     fireEvent.click(screen.getByRole("button", { name: /view profile/i }));
     await screen.findByText("My profile");
     fireEvent.click(screen.getByRole("button", { name: /my level: finding my voice/i }));
-    expect(await screen.findByRole("heading", { name: "Your levels" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Levels and badges" })).toBeInTheDocument();
+  });
+});
+
+describe("Ella badges", () => {
+  beforeEach(() => window.localStorage.clear());
+
+  async function openProfile(name: string, age = "14") {
+    await onboard(name, age);
+    fireEvent.click(screen.getByRole("button", { name: /view profile/i }));
+    await screen.findByText("My profile");
+  }
+
+  it("lists them on the profile, and opens one's sheet over the window", async () => {
+    await openProfile("Aarav");
+    // The sidebar lights the learner's own row while they are on it.
+    expect(screen.getByRole("button", { name: /view profile/i })).toHaveAttribute("aria-current", "page");
+    const card = screen.getByRole("region", { name: "Badges" });
+    expect(card).toHaveTextContent("0 of 8");
+    expect(card).toHaveTextContent("Finish a talk with Ella to earn your first badge.");
+
+    // Nothing tried yet, so what comes next is where the catalogue starts.
+    const next = within(card).getAllByRole("button").map((button) => button.textContent);
+    expect(next.slice(1)).toEqual([
+      "Hello, EllaElla · Placement talkNot tried",
+      "First talkHome · Today’s talkNot tried",
+      "BargainerBippo · Talk a stall price downNot tried",
+    ]);
+    // Opened from the keyboard, focus comes back to the badge when it closes.
+    const opener = within(card).getByRole("button", { name: /Hello, Ella/ });
+    opener.focus();
+    fireEvent.click(opener);
+    const sheet = screen.getByRole("dialog", { name: "Hello, Ella" });
+    expect(sheet).toHaveTextContent("Not tried yet");
+    expect(sheet).toHaveTextContent("Say hi to Ella in your placement talk.");
+    expect(sheet).toHaveTextContent("WHERE TO EARN IT");
+    expect(within(sheet).getByRole("button", { name: "Close" })).toHaveFocus();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(opener).toHaveFocus();
+  });
+
+  it("keeps Tab inside an open sheet", async () => {
+    await openProfile("Aarav");
+    fireEvent.click(within(screen.getByRole("region", { name: "Badges" })).getByRole("button", { name: /First talk/ }));
+    const sheet = screen.getByRole("dialog", { name: "First talk" });
+    const close = within(sheet).getByRole("button", { name: "Close" });
+    const mic = within(sheet).getByRole("button", { name: "Start this talk" });
+    expect(close).toHaveFocus();
+    fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
+    expect(mic).toHaveFocus();
+    fireEvent.keyDown(window, { key: "Tab" });
+    expect(close).toHaveFocus();
+  });
+
+  it("brings a placement chat started from Hello, Ella's sheet back to the profile when it is skipped", async () => {
+    await openProfile("Aarav");
+    fireEvent.click(within(screen.getByRole("region", { name: "Badges" })).getByRole("button", { name: /Hello, Ella/ }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Hello, Ella" })).getByRole("button", { name: "Start this talk" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Skip" }));
+    expect(await screen.findByText("My profile")).toBeInTheDocument();
+  });
+
+  it("earns First talk with a finished talk, dated the day it ended", async () => {
+    await onboard("Aarav");
+    fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
+    await screen.findByText("End talk");
+    await typeAnswers(1);
+    fireEvent.click(screen.getByRole("button", { name: "End talk" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Done" }));
+    fireEvent.click(await screen.findByRole("button", { name: /view profile/i }));
+    await screen.findByText("My profile");
+
+    const card = screen.getByRole("region", { name: "Badges" });
+    // A talk a day makes a day's streak, and three days make a badge.
+    expect(card).toHaveTextContent("1 of 8");
+    fireEvent.click(within(card).getByRole("button", { name: "First talk" }));
+    const sheet = screen.getByRole("dialog", { name: "First talk" });
+    expect(sheet).toHaveTextContent("Earned today");
+    expect(sheet).toHaveTextContent("WHERE YOU EARNED IT");
+    // An earned badge that is not a partner's has nothing more to start.
+    expect(within(sheet).queryByRole("button", { name: "Start this talk" })).not.toBeInTheDocument();
+    fireEvent.click(within(sheet).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("opens what earns a badge from its sheet: a partner's scenes, or a talk", async () => {
+    await openProfile("Aarav");
+    fireEvent.click(screen.getByRole("button", { name: "Where to earn more" }));
+    const page = await screen.findByRole("region", { name: "Level 3: Finding My Voice" });
+    fireEvent.click(within(page).getByRole("button", { name: /Bargainer/ }));
+    const sheet = screen.getByRole("dialog", { name: "Bargainer" });
+    expect(sheet).toHaveTextContent("Talk a stall price down · 5 min");
+    fireEvent.click(within(sheet).getByRole("button", { name: "Talk to Bippo" }));
+    expect(await screen.findByText("Your mentor")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /view profile/i }));
+    await screen.findByText("My profile");
+    fireEvent.click(within(screen.getByRole("region", { name: "Badges" })).getByRole("button", { name: /First talk/ }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "First talk" })).getByRole("button", { name: "Start this talk" }));
+    expect(await screen.findByText("End talk")).toBeInTheDocument();
+  });
+
+  it("files the rest under their levels and the anytime badges, and goes back to the profile", async () => {
+    await openProfile("Meera", "12");
+    fireEvent.click(screen.getByRole("button", { name: /my level: finding my voice/i }));
+    await screen.findByRole("heading", { name: "Levels and badges" });
+    expect(screen.getByRole("button", { name: /view profile/i })).toHaveAttribute("aria-current", "page");
+
+    // Too young for Grumble's deposit, so its badge is not offered either.
+    const page = screen.getByRole("region", { name: "Level 3: Finding My Voice" });
+    expect(page).toHaveTextContent("0 of 1 earned");
+    expect(page).not.toHaveTextContent("Deposit back");
+
+    fireEvent.click(screen.getByRole("button", { name: /Anytime badges/ }));
+    const anytime = screen.getByRole("region", { name: "Anytime badges" });
+    expect(anytime).toHaveTextContent("0 of 4 earned");
+    expect(within(anytime).getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "3-day streakAny talk, every day0 / 3",
+      "7-day streakAny talk, every day0 / 7",
+      "30-day streakAny talk, every day0 / 30",
+      "50 talksAny talk counts0 / 50",
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: /Pre-Beginner/ }));
+    const first = screen.getByRole("region", { name: "Level 1: Pre-Beginner" });
+    expect(first).toHaveTextContent("Hello, Ella");
+    expect(first).toHaveTextContent("First talk");
+    fireEvent.click(screen.getByRole("button", { name: /Speaking Freely/ }));
+    expect(screen.getByRole("region", { name: "Level 4: Speaking Freely" })).toHaveTextContent(
+      "No badges at this level yet.",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to profile" }));
+    expect(await screen.findByText("My profile")).toBeInTheDocument();
   });
 });

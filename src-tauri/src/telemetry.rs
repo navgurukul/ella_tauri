@@ -103,6 +103,13 @@ impl LatencyTrace {
         self.timings.audio_after_vad_ms = Some(round_ms(speech_ms));
     }
 
+    /// How long a spoken answer lasted: the speech the VAD kept, or the whole
+    /// recording for a streamed turn, which is not trimmed. `None` for a typed
+    /// turn, which recorded nothing.
+    pub fn spoken_ms(&self) -> Option<u64> {
+        self.timings.audio_after_vad_ms
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn record_stt(
         &mut self,

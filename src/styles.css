@@ -50,6 +50,7 @@
   --ink-40: rgba(38, 38, 38, 0.4);
   --ink-18: rgba(38, 38, 38, 0.18);
   --ink-16: rgba(38, 38, 38, 0.16);
+  --ink-14: rgba(38, 38, 38, 0.14);
   --ink-12: rgba(38, 38, 38, 0.12);
   --ink-10: rgba(38, 38, 38, 0.10);
   --ink-08: rgba(38, 38, 38, 0.08);
@@ -442,23 +443,26 @@ button { font-family: inherit; }
 }
 .streak-pill b { font-family: var(--display); font-size: 16px; font-weight: 800; }
 
+.sidebar__me { padding-top: 10px; border-top: 1.5px solid var(--ink-10); }
 .profile {
   display: flex;
   align-items: center;
   gap: 11px;
   width: 100%;
-  padding: 12px 10px 0;
+  padding: 8px 10px;
   border: none;
-  border-top: 1.5px solid var(--ink-10);
-  background: none;
+  border-radius: var(--r-nav);
+  background: transparent;
   color: var(--ink);
   cursor: pointer;
   text-align: left;
+  transition: background 0.15s ease;
 }
+.profile:hover { background: var(--canvas); }
+.profile.is-active { background: var(--lilac); }
 .profile__text { flex: 1; min-width: 0; }
 .profile__text strong { display: block; font-size: 14px; font-weight: 700; }
 .profile__text small { display: block; font-size: 12px; font-weight: 500; color: var(--ink-50); }
-.profile:hover small { color: var(--violet); }
 
 /* A two-drop flame; each place it appears sizes it and picks its colours. */
 .flame { position: relative; flex: none; }
@@ -538,8 +542,9 @@ button { font-family: inherit; }
 .ella__body {
   position: absolute;
   inset: 0;
-  background: var(--violet);
+  background: var(--ella-color, var(--violet));
   border-radius: 50% 50% 0 0 / var(--body-curve) var(--body-curve) 0 0;
+  transition: background 0.3s ease;
 }
 
 /* An ear is a box that grows from its base, holding a tilted capsule; the
@@ -558,8 +563,9 @@ button { font-family: inherit; }
   position: absolute;
   inset: 0;
   border-radius: var(--ear-round);
-  background: var(--violet);
+  background: var(--ella-color, var(--violet));
   transform: rotate(-14deg);
+  transition: background 0.3s ease;
 }
 .ella__ear--right i { transform: rotate(12deg); }
 
@@ -715,6 +721,16 @@ button { font-family: inherit; }
   --eye: 14px; --eye-top: 40px; --eye-l-left: 156px; --eye-r-left: 210px;
   --glint: 5px; --glint-at: 3px;
   --mouth-top: 66px; --mouth-left: 177px; --mouth-w: 26px; --mouth-h: 12px; --mouth-line: 3px; --mouth-curve: 20px;
+}
+
+.ella--profile {
+  --body-curve: 46%;
+  --ear-w: 22px; --ear-round: 18px;
+  --ear-l-top: -28px; --ear-l-left: 55px; --ear-l-h: 48px;
+  --ear-r-top: -25px; --ear-r-left: 112px; --ear-r-h: 45px;
+  --eye: 20px; --eye-top: 38px; --eye-l-left: 57px; --eye-r-left: 113px;
+  --glint: 7px; --glint-at: 4px;
+  --mouth-top: 70px; --mouth-left: 77px; --mouth-w: 35px; --mouth-h: 17px; --mouth-line: 6px; --mouth-curve: 24px;
 }
 
 /* Listening, her ears prick up and twitch; after a dive in from above they
@@ -1093,10 +1109,12 @@ button { font-family: inherit; }
 }
 .partner:hover { transform: translateY(-4px); box-shadow: 0 14px 30px rgba(38, 38, 38, 0.1); }
 
-.partner[data-character="stall-owner"] { --tint: #ffe9d4; --tint-hover: #fff6ec; --accent: var(--orange); --shadow-w: 180px; }
-.partner[data-character="landlord"] { --tint: #e4ecfb; --tint-hover: #f1f5fd; --accent: #5b7def; }
-.partner[data-character="doctor"] { --tint: #ffe2da; --tint-hover: #fff0ed; --accent: #ff685b; }
-.partner[data-character="debater"] { --tint: #e7f4d6; --tint-hover: #f2f9e9; --accent: var(--green); }
+/* Each partner's wash, hover, colour and floor shadow. The recap's band and a
+   badge's sheet draw them the same way. */
+[data-character="stall-owner"] { --tint: #ffe9d4; --tint-hover: #fff6ec; --accent: var(--orange); --shadow-w: 180px; }
+[data-character="landlord"] { --tint: #ececec; --tint-hover: #f4f4f4; --accent: var(--ink); --shadow-w: 110px; }
+[data-character="doctor"] { --tint: #ffe2ee; --tint-hover: #fff0f6; --accent: var(--pink); --shadow-w: 200px; }
+[data-character="debater"] { --tint: #e7f4d6; --tint-hover: #f2f9e9; --accent: var(--green); --shadow-w: 150px; }
 
 .partner__stage {
   position: relative;
@@ -1114,10 +1132,7 @@ button { font-family: inherit; }
   border-radius: 50%;
   background: rgba(38, 38, 38, 0.08);
 }
-.partner[data-character="stall-owner"] .partner__shadow,
-.partner[data-character="landlord"] .partner__shadow,
-.partner[data-character="doctor"] .partner__shadow,
-.partner[data-character="debater"] .partner__shadow { display: none; }
+.partner[data-character="landlord"] .partner__shadow { background: rgba(38, 38, 38, 0.1); }
 .partner__entry {
   position: absolute;
   left: 50%;
@@ -1125,16 +1140,6 @@ button { font-family: inherit; }
   width: 240px;
   height: 190px;
   margin-left: -120px;
-}
-/* These silhouettes continue past the card's right and bottom edges. */
-.partner[data-character="landlord"] .partner__entry,
-.partner[data-character="doctor"] .partner__entry,
-.partner[data-character="debater"] .partner__entry { left: auto; right: 0; margin-left: 0; }
-.partner[data-character="stall-owner"] .partner__entry {
-  left: auto;
-  right: 0;
-  width: min(280px, 100%);
-  margin-left: 0;
 }
 
 .partner__about { padding: 16px 18px 6px; }
@@ -1182,7 +1187,8 @@ button { font-family: inherit; }
   color: var(--white);
 }
 
-/* The cast, drawn in CSS and SVG, each bobbing at their own pace. */
+/* The cast, drawn in CSS on a 240 by 190 box, each bobbing at their own
+   pace. */
 .figure {
   position: absolute;
   inset: 0;
@@ -1190,74 +1196,140 @@ button { font-family: inherit; }
   animation: bobIdle var(--bob) ease-in-out var(--bob-delay, 0s) infinite;
 }
 .figure i { position: absolute; display: block; }
-.figure__portrait { display: block; width: 100%; height: 100%; color: var(--accent); }
 
-.figure--stall-owner {
-  --bob: 4.6s;
-  transform-origin: 100% 100%;
-  animation-name: partnerBreathe;
-}
-.figure--stall-owner .figure__body { left: 20%; bottom: -12px; width: 100%; height: 162px; border-radius: 50% 50% 0 0 / 80% 80% 0 0; background: var(--orange); }
-.figure--stall-owner .figure__eye { bottom: 96px; width: 26px; height: 13px; border: 4px solid var(--ink); border-bottom: none; border-radius: 18px 18px 0 0; }
-.figure--stall-owner .figure__eye--left { left: 50%; }
-.figure--stall-owner .figure__eye--right { left: 72%; }
-.figure--stall-owner .figure__cheek { bottom: 72px; width: 20px; height: 20px; border-radius: 50%; background: #ffb48a; }
-.figure--stall-owner .figure__cheek--left { left: 40%; }
-.figure--stall-owner .figure__cheek--right { left: 84%; }
-.figure--stall-owner .figure__mouth { left: calc(61% - 13px); bottom: 58px; width: 52px; height: 23px; border: 4px solid var(--ink); border-top: none; border-radius: 0 0 35px 35px; }
+.figure--stall-owner { --bob: 4.6s; }
+.figure--stall-owner .figure__body { left: 30px; bottom: -8px; width: 180px; height: 112px; border-radius: 90px 90px 0 0 / 80px 80px 0 0; background: var(--orange); }
+.figure--stall-owner .figure__eye { bottom: 66px; width: 18px; height: 9px; border: 3px solid var(--ink); border-bottom: none; border-radius: 12px 12px 0 0; }
+.figure--stall-owner .figure__eye--left { left: 86px; }
+.figure--stall-owner .figure__eye--right { left: 136px; }
+.figure--stall-owner .figure__cheek { bottom: 50px; width: 14px; height: 14px; border-radius: 50%; background: #ffb48a; }
+.figure--stall-owner .figure__cheek--left { left: 66px; }
+.figure--stall-owner .figure__cheek--right { left: 160px; }
+.figure--stall-owner .figure__mouth { left: 102px; bottom: 40px; width: 36px; height: 16px; border: 3px solid var(--ink); border-top: none; border-radius: 0 0 24px 24px; }
 
-.figure--landlord,
-.figure--doctor,
-.figure--debater {
-  transform-origin: 100% 100%;
-  animation-name: partnerBreathe;
-}
 .figure--landlord { --bob: 5.4s; --bob-delay: 0.6s; }
+.figure--landlord .figure__body { left: 80px; bottom: -6px; width: 80px; height: 166px; border-radius: 40px 40px 0 0 / 56px 56px 0 0; background: #3b3b3b; transform: skewX(-3deg); transform-origin: 50% 100%; }
+.figure--landlord .figure__brow { bottom: 122px; width: 22px; height: 4px; border-radius: 2px; background: var(--white); }
+.figure--landlord .figure__brow--left { left: 92px; transform: rotate(16deg); }
+.figure--landlord .figure__brow--right { left: 128px; transform: rotate(-16deg); }
+.figure--landlord .figure__eye { bottom: 106px; width: 9px; height: 9px; border-radius: 50%; background: var(--white); }
+.figure--landlord .figure__eye--left { left: 100px; }
+.figure--landlord .figure__eye--right { left: 132px; }
+.figure--landlord .figure__pupil { top: 2px; left: 3px; width: 4px; height: 4px; border-radius: 50%; background: var(--ink); }
+.figure--landlord .figure__eye--right .figure__pupil { left: 2px; }
+.figure--landlord .figure__mouth { left: 111px; bottom: 86px; width: 18px; height: 3px; border-radius: 2px; background: var(--white); }
+
 .figure--doctor { --bob: 3.8s; --bob-delay: 1.1s; }
+.figure--doctor .figure__body { left: 20px; bottom: -10px; width: 200px; height: 118px; border-radius: 100px 100px 0 0 / 96px 96px 0 0; background: var(--pink); transform: rotate(-4deg); transform-origin: 50% 100%; }
+.figure--doctor .figure__eye { width: 10px; height: 10px; border-radius: 50%; background: var(--ink); }
+.figure--doctor .figure__eye--left { left: 100px; bottom: 60px; }
+.figure--doctor .figure__eye--right { left: 134px; bottom: 62px; }
+.figure--doctor .figure__mouth { left: 112px; bottom: 42px; width: 20px; height: 9px; border: 3px solid var(--ink); border-top: none; border-radius: 0 0 14px 14px; transform: rotate(-4deg); }
+
 .figure--debater { --bob: 3.2s; --bob-delay: 0.3s; }
+.figure--debater .figure__body { left: 30px; bottom: -8px; width: 184px; height: 120px; border-radius: 110px 74px 0 0 / 118px 96px 0 0; background: var(--green); }
+.figure--debater .figure__lobe { background: var(--green); transform-origin: 50% 100%; }
+.figure--debater .figure__lobe--left { left: 84px; bottom: 60px; width: 52px; height: 72px; border-radius: 26px 26px 0 0 / 40px 40px 0 0; transform: rotate(-16deg); }
+.figure--debater .figure__lobe--middle { left: 122px; bottom: 64px; width: 56px; height: 90px; border-radius: 28px 28px 0 0 / 44px 44px 0 0; transform: rotate(-2deg); }
+.figure--debater .figure__lobe--right { left: 160px; bottom: 58px; width: 48px; height: 74px; border-radius: 24px 24px 0 0 / 38px 38px 0 0; transform: rotate(22deg); }
+.figure--debater .figure__brow { width: 22px; border: 3px solid var(--ink); border-bottom: none; border-radius: 14px 14px 0 0; }
+.figure--debater .figure__brow--left { left: 94px; bottom: 84px; height: 10px; transform: rotate(-4deg); }
+.figure--debater .figure__brow--right { left: 140px; bottom: 90px; height: 12px; transform: rotate(14deg); }
+.figure--debater .figure__eye { width: 20px; height: 20px; border-radius: 50%; background: var(--white); }
+.figure--debater .figure__eye--left { left: 96px; bottom: 60px; }
+.figure--debater .figure__eye--right { left: 140px; bottom: 62px; }
+.figure--debater .figure__pupil { top: 6px; left: 7px; width: 10px; height: 10px; border-radius: 50%; background: var(--ink); }
+.figure--debater .figure__eye--right .figure__pupil { left: 6px; }
+.figure--debater .figure__mouth { left: 112px; bottom: 40px; width: 40px; height: 14px; border: 3px solid var(--ink); border-top: none; border-radius: 0 0 26px 26px; transform: rotate(-10deg); }
 
 /* ------------------------------------------------------------- Profile ---- */
 
-.screen--profile { padding: 36px 44px; }
+.screen--profile { padding: 36px 44px 40px; }
 
 .profile-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
   gap: 20px;
   align-items: start;
   margin-top: 28px;
 }
-.profile-col { display: flex; flex-direction: column; gap: 16px; }
+.profile-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.profile-panel__title { margin: 0; font-family: var(--display); font-size: 20px; font-weight: 700; }
 
-.profile-card { padding: 24px; }
-.profile-card__row { display: flex; align-items: center; gap: 18px; }
-.profile-card__who { flex: 1; min-width: 0; }
-.profile-card__who h2 { font-size: 32px; line-height: 1.1; }
-.profile-card__who p { margin: 3px 0 0; font-size: 14px; font-weight: 500; color: var(--ink-55); }
-.profile-card__who + .btn--quiet { flex: none; color: var(--ink); }
-
-.profile-card__fields { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 0; }
-.profile-card__name-field,
-.profile-card__age-field {
+/* The learner, washed in the colour they gave their Ella, with her rising
+   out of the card's corner. */
+.profile-hero {
+  position: relative;
+  min-height: 232px;
+  padding: 28px 30px;
+  border-radius: var(--r-panel);
+  overflow: hidden;
+  transition: background 0.3s ease;
+}
+.profile-hero__text { position: relative; z-index: 2; max-width: 236px; }
+.profile-hero__name { font-size: 40px; line-height: 1.02; overflow-wrap: anywhere; }
+.profile-hero__about {
+  margin: 6px 0 0;
+  font-size: 14.5px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: rgba(38, 38, 38, 0.68);
+}
+.profile-hero__about span { display: block; }
+.profile-hero__edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  margin-top: 18px;
+  padding: 0 18px 0 14px;
+  border: none;
+  border-radius: var(--r-pill);
+  background: var(--white);
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+  transition: box-shadow 0.15s ease, transform 0.1s ease;
+}
+.profile-hero__edit:hover { box-shadow: 0 6px 16px rgba(38, 38, 38, 0.14); }
+.profile-hero__edit:active { transform: translateY(2px); }
+.profile-hero__edit svg { fill: var(--ink); }
+.profile-hero__form { display: flex; flex-direction: column; align-items: flex-start; }
+.profile-hero__name-field,
+.profile-hero__age-field {
   border: none;
   border-bottom: 2.5px solid var(--pink);
   background: transparent;
   outline: none;
   font-family: var(--display);
   font-weight: 700;
-  color: var(--violet);
+  color: var(--ink);
 }
-.profile-card__name-field { width: 100%; padding: 2px 0 6px; font-size: 26px; }
-.profile-card__age-field { width: 80px; padding: 2px 0 5px; font-size: 19px; }
-.profile-card__name-field::placeholder,
-.profile-card__age-field::placeholder { color: rgba(147, 71, 221, 0.35); }
+.profile-hero__name-field { width: 100%; padding: 2px 0 6px; font-size: 28px; }
+.profile-hero__age-row { display: flex; align-items: baseline; gap: 10px; margin-top: 10px; }
+.profile-hero__age-field { width: 60px; padding: 2px 0 4px; font-size: 20px; }
+.profile-hero__age-row span { font-size: 14.5px; font-weight: 500; color: rgba(38, 38, 38, 0.68); }
+.profile-hero__name-field::placeholder,
+.profile-hero__age-field::placeholder { color: var(--ink-40); }
+.profile-hero .swatches { margin-top: 16px; }
+.profile-hero__done {
+  height: 40px;
+  margin-top: 16px;
+  padding: 0 24px;
+  border: none;
+  border-radius: var(--r-pill);
+  background: var(--ink);
+  color: var(--white);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+}
+.profile-hero__done:not(:disabled):hover { background: #000000; }
+.profile-hero__done:not(:disabled):active { transform: translateY(2px); }
+.profile-hero__done:disabled { opacity: 0.45; cursor: not-allowed; }
+.ella--profile-peek { right: 30px; bottom: -10px; }
 
-.profile-card__foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 18px;
-}
 .swatches { display: flex; gap: 10px; }
 .swatch {
   width: 32px;
@@ -1266,60 +1338,33 @@ button { font-family: inherit; }
   border: 2.5px solid rgba(38, 38, 38, 0.12);
   border-radius: 50%;
   cursor: pointer;
+  transition: transform 0.15s ease;
 }
+.swatch:hover { transform: scale(1.1); }
 .swatch.is-picked { border-color: var(--ink); }
 
-.stat-tiles {
+/* The three counts in one card. */
+.profile-stats {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-  margin: 0;
+  padding: 20px 0 18px;
+  border: 1.5px solid var(--ink-10);
+  border-radius: var(--r-card);
+  background: var(--white);
 }
-.stat-tile { padding: 18px 10px; border-radius: var(--r-tile); text-align: center; }
-.stat-tile dt { font-size: 30px; }
-.stat-tile dd { margin: 6px 0 0; font-size: 10px; color: var(--ink-50); }
+.profile-stat { display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0; }
+.profile-stat + .profile-stat { border-left: 1.5px solid var(--ink-08); }
+.profile-stat strong { font-size: 28px; line-height: 1; }
+.profile-stat .mono { font-size: 10px; color: var(--ink-55); }
 
-.badges {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  margin: 14px 0 0;
-  padding: 0;
-  list-style: none;
-}
-.badge { display: flex; flex-direction: column; align-items: center; gap: 8px; }
-.badge__disc {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 66px;
-  height: 66px;
-  border: 2px dashed rgba(38, 38, 38, 0.25);
-  border-radius: 50%;
-  font-family: var(--display);
-  font-size: 26px;
-  font-weight: 800;
-  color: rgba(38, 38, 38, 0.3);
-}
-.badge__label { font-size: 12px; font-weight: 600; color: var(--ink-45); text-align: center; }
-.badge.is-earned .badge__disc { border: none; color: var(--white); }
-.badge.is-earned .badge__label { color: rgba(38, 38, 38, 0.65); }
-.badge--streak.is-earned .badge__disc { background: var(--orange); }
-.badge--first-talk.is-earned .badge__disc { background: var(--violet); }
-.badge--bargainer.is-earned .badge__disc { background: var(--green); }
-
-.flame--badge { width: 22px; height: 26px; }
-.flame--badge i:first-child { left: 2px; top: 4px; width: 18px; height: 18px; background: var(--white); }
-.flame--badge i:last-child { left: 7px; top: 12px; width: 8px; height: 8px; background: var(--orange); }
-
-.panel--settings { padding-bottom: 8px; }
-.settings { display: flex; flex-direction: column; margin-top: 6px; }
+.profile-settings { padding: 20px 24px 6px; border-radius: var(--r-card); }
+.settings { display: flex; flex-direction: column; margin-top: 4px; }
 .settings__row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  height: 56px;
+  height: 54px;
   padding: 0;
   border: none;
   border-bottom: 1.5px solid var(--ink-08);
@@ -1332,16 +1377,342 @@ button { font-family: inherit; }
 button.settings__row { cursor: pointer; }
 button.settings__row:not(:disabled):hover { color: var(--violet); }
 .settings__chevron {
+  flex: none;
   fill: none;
   stroke: rgba(38, 38, 38, 0.35);
   stroke-width: 2.5;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.settings__value { font-size: 14px; font-weight: 500; color: var(--ink-50); }
-.settings__row--danger { border-bottom: none; color: var(--pink); font-weight: 700; }
+.settings__value { font-size: 14px; font-weight: 500; color: var(--ink-60); }
+.settings__row--danger { justify-content: flex-start; border-bottom: none; color: var(--pink); font-weight: 700; }
 button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 .settings__row:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* MY LEVEL on the profile: the level, how far to the next, and a track of
+   every level. */
+.level-track-card {
+  display: block;
+  width: 100%;
+  padding: 24px 28px 22px;
+  border: none;
+  border-radius: var(--r-panel);
+  background: var(--violet);
+  color: var(--white);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.level-track-card:hover { transform: translateY(-3px); box-shadow: 0 16px 34px rgba(147, 71, 221, 0.28); }
+.level-track-card:active { transform: translateY(0); }
+.level-track-card .eyebrow { color: rgba(255, 255, 255, 0.85); }
+.level-track-card__top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.level-track-card__all {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 10px 0 14px;
+  border-radius: var(--r-pill);
+  background: rgba(255, 255, 255, 0.18);
+  font-size: 13px;
+  font-weight: 700;
+}
+.level-track-card__head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-top: 6px; }
+.level-track-card__who { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+.level-track-card__number { flex: none; font-size: 64px; line-height: 0.95; }
+.level-track-card__name { font-size: 24px; font-weight: 700; line-height: 1.1; }
+.level-track-card__to { flex: none; padding-bottom: 6px; text-align: right; }
+.level-track-card__to strong { display: block; font-size: 28px; line-height: 1; }
+.level-track-card__to small { display: block; margin-top: 2px; font-size: 13px; font-weight: 600; }
+.level-track { display: flex; align-items: flex-start; margin-top: 18px; }
+.level-track__stop { display: flex; align-items: flex-start; flex: 1; min-width: 0; }
+.level-track__stop:last-child { flex: none; }
+.level-track__node { display: flex; flex-direction: column; align-items: center; gap: 7px; flex: none; width: 24px; }
+.level-track__dot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 2px solid rgba(255, 255, 255, 0.55);
+  border-radius: 50%;
+}
+.level-track__stop.is-done .level-track__dot,
+.level-track__stop.is-current .level-track__dot { border: none; background: var(--white); }
+.level-track__stop.is-current .level-track__dot { box-shadow: 0 0 0 5px rgba(255, 255, 255, 0.28); }
+.level-track__stop.is-current .level-track__dot::after {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--violet);
+}
+.level-track__dot svg { fill: none; stroke: var(--violet); stroke-width: 3.8; stroke-linecap: round; stroke-linejoin: round; }
+.level-track__label { font-size: 11px; color: rgba(255, 255, 255, 0.8); }
+.level-track__stop.is-done .level-track__label,
+.level-track__stop.is-current .level-track__label { color: var(--white); }
+.level-track__bar {
+  flex: 1;
+  min-width: 0;
+  height: 4px;
+  margin: 10px 4px 0;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.28);
+  overflow: hidden;
+}
+.level-track__bar > span { display: block; height: 100%; border-radius: 2px; background: var(--white); }
+
+/* Badges: those earned, latest first, and the ones to earn next. */
+.profile-badges { padding: 22px 24px 14px; }
+.profile-badges__head { display: flex; align-items: baseline; gap: 10px; }
+.profile-badges__count { font-size: 13px; font-weight: 600; color: var(--ink-60); }
+.profile-badges__more {
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--violet);
+  cursor: pointer;
+  font-size: 13.5px;
+  font-weight: 700;
+}
+.profile-badges__more:hover { color: var(--violet-deep); }
+.profile-badges__row {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.profile-badge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 4px 8px;
+  border: none;
+  border-radius: 18px;
+  background: transparent;
+  color: rgba(38, 38, 38, 0.72);
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-align: center;
+  transition: background 0.15s ease;
+}
+.profile-badge:hover { background: #f4f7ee; }
+.profile-badges__none { margin: 14px 0 6px; font-size: 14px; font-weight: 500; color: var(--ink-60); }
+.profile-badges__next { margin-top: 12px; padding-top: 16px; border-top: 1.5px solid var(--ink-07); }
+.profile-badges__label { margin: 0; letter-spacing: 0.14em; color: var(--ink-55); }
+.profile-badges__next .badge-list { margin-top: 6px; }
+
+/* A badge's disc, its row in a list, and the bar of a count still going. */
+.badge-disc { display: flex; align-items: center; justify-content: center; flex: none; border-radius: 50%; }
+.badge-disc--pop { animation: badgePop 0.55s cubic-bezier(0.3, 1.3, 0.5, 1) 0.12s both; }
+.badge-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 8px -12px 0;
+  padding: 0;
+  list-style: none;
+}
+.badge-list--two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 24px; row-gap: 2px; }
+.badge-row-item { min-width: 0; }
+.badge-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  border-radius: 16px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s ease;
+}
+.badge-row:hover { background: #f4f7ee; }
+.badge-row__text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.badge-row__text strong { font-size: 15px; font-weight: 700; line-height: 1.2; }
+.badge-row__text > span:not(.badge-bar) {
+  margin-top: 3px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--ink-62);
+  text-wrap: pretty;
+}
+.badge-row__stat {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  font-size: 13px;
+  font-weight: 700;
+  color: rgba(38, 38, 38, 0.58);
+}
+.badge-row__stat.is-earned { color: #3f7a00; }
+.badge-bar {
+  display: block;
+  height: 6px;
+  margin-top: 8px;
+  border-radius: var(--r-pill);
+  background: var(--ink-08);
+  overflow: hidden;
+}
+.badge-bar > span { display: block; height: 100%; border-radius: inherit; }
+.check-glyph { fill: none; stroke: currentColor; stroke-width: 3.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* One badge over the whole window: how it is going, what earns it, where. */
+.badge-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.badge-sheet__scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(38, 38, 38, 0.38);
+  cursor: pointer;
+  animation: fadeIn 0.2s ease-out;
+}
+.badge-sheet__card {
+  position: relative;
+  width: 460px;
+  max-width: calc(100% - 48px);
+  max-height: calc(100% - 48px);
+  overflow-y: auto;
+  padding: 34px 28px 26px;
+  border-radius: var(--r-panel);
+  background: var(--white);
+  box-shadow: 0 30px 70px rgba(38, 38, 38, 0.28);
+  animation: modalIn 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.badge-sheet__close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 1.5px solid rgba(38, 38, 38, 0.14);
+  border-radius: 50%;
+  background: var(--white);
+  color: var(--ink);
+  cursor: pointer;
+}
+.badge-sheet__close:hover { border-color: var(--ink); }
+.badge-sheet__close svg { fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; }
+.badge-sheet__head { display: flex; flex-direction: column; align-items: center; text-align: center; }
+.badge-sheet__name { margin-top: 14px; font-size: 30px; line-height: 1.05; }
+.badge-sheet__pill {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  margin-top: 10px;
+  padding: 0 13px;
+  border-radius: var(--r-pill);
+  background: var(--ink-07);
+  color: rgba(38, 38, 38, 0.72);
+  font-size: 13px;
+  font-weight: 700;
+}
+.badge-sheet__pill.is-earned { background: var(--green); color: var(--white); }
+.badge-sheet__how {
+  max-width: 340px;
+  margin: 14px 0 0;
+  font-size: 15.5px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: rgba(38, 38, 38, 0.75);
+  text-wrap: pretty;
+}
+.badge-bar--sheet { width: 240px; height: 8px; margin-top: 14px; }
+.badge-sheet__label { margin: 26px 0 0; letter-spacing: 0.14em; color: var(--ink-55); }
+.badge-place {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 8px;
+  padding: 10px 14px 10px 10px;
+  border-radius: 20px;
+}
+.badge-place__thumb { position: relative; flex: none; width: 96px; height: 76px; border-radius: 16px; overflow: hidden; }
+.badge-place__figure {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 240px;
+  height: 190px;
+  transform: scale(0.4);
+  transform-origin: top left;
+}
+.badge-place__figure .figure { animation: none; }
+.badge-place__glyph {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  margin: -23px 0 0 -23px;
+  border-radius: 50%;
+}
+.badge-place__text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.badge-place__text strong { font-size: 19px; line-height: 1.1; }
+.badge-place__text span {
+  margin-top: 3px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: rgba(38, 38, 38, 0.68);
+  text-wrap: pretty;
+}
+.badge-place__go {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  font-size: 12px;
+  font-weight: 700;
+  color: rgba(38, 38, 38, 0.68);
+}
+.badge-place__mic {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 50px;
+  height: 50px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  color: var(--white);
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+.badge-place__mic:not(:disabled):hover { transform: scale(1.06); }
+.badge-place__mic:not(:disabled):active { transform: scale(0.95); }
+.badge-place__mic:disabled { opacity: 0.55; cursor: not-allowed; }
+
+@keyframes fadeIn { 0% { opacity: 0; } 100% { opacity: 1; } }
+@keyframes modalIn { 0% { opacity: 0; transform: translateY(14px) scale(0.97); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes badgePop { 0% { transform: scale(0) rotate(-40deg); } 65% { transform: scale(1.14) rotate(8deg); } 100% { transform: scale(1) rotate(0deg); } }
 
 /* --------------------------------------------------------------- Talk ----- */
 
@@ -2029,11 +2400,10 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   background: var(--role-tint);
 }
 .recap-band--role[data-character="landlord"] {
-  --role-tint: #e4ecfb;
-  --role-deep: #3d5fcf;
-  --role-ray: #cbd8f7;
-  --role-tick: #5b7def;
-  --accent: #5b7def;
+  --role-tint: #ececec;
+  --role-deep: #3b3b3b;
+  --role-ray: #dcdcdc;
+  --role-tick: var(--ink);
 }
 .recap-band--role .recap-band__text { flex: none; }
 .recap-band--role .recap-band__eyebrow { color: var(--role-deep); }
@@ -2177,7 +2547,9 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   transform: scale(1.5);
   transform-origin: 0 0;
 }
-.recap-band__partner .partner__entry { position: absolute; inset: 0; }
+.recap-band__partner .partner__entry { position: absolute; inset: 0; margin: 0; }
+/* On the recap the partner breathes rather than bobs, as its design has it. */
+.recap-band__partner .figure { animation-name: partnerBreathe; }
 .recap-band__bubble {
   position: absolute;
   z-index: 3;
@@ -2797,74 +3169,100 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 }
 .level-card__chevron { fill: none; stroke: currentColor; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
 
-.screen--levels { padding: 36px 44px 44px; }
+.screen--levels { padding: 36px 44px 40px; }
+.levels-head { display: flex; align-items: center; gap: 16px; }
+.back-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 46px;
+  height: 46px;
+  padding: 0;
+  border: 1.5px solid var(--ink-16);
+  border-radius: 50%;
+  background: var(--white);
+  color: var(--ink);
+  cursor: pointer;
+}
+.back-button:hover { border-color: var(--ink); }
+.back-button svg { fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
 .levels-wait { display: flex; justify-content: center; padding: 80px 0; color: var(--violet); }
 .levels-grid {
   display: grid;
-  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
-  gap: 28px;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 24px;
   align-items: start;
   margin-top: 28px;
 }
+.levels-side { min-width: 0; }
 
 /* The path: a numbered stop per level, joined by a line that is solid once
    the level is done and dashed before. */
 .level-path { margin: 0; padding: 0; list-style: none; }
 .level-stop { position: relative; }
-/* From just below this stop's node to just inside the next one's, which
-   starts 8px down its own row. */
+/* From just below this stop's node to just short of the next one's. */
 .level-stop::before {
   content: "";
   position: absolute;
-  top: 62px;
+  z-index: 1;
+  top: 70px;
   bottom: -10px;
-  left: 34px;
+  left: 38px;
   width: 4px;
   border-radius: 2px;
   background: repeating-linear-gradient(to bottom, var(--ink-18) 0 6px, transparent 6px 12px);
+  pointer-events: none;
 }
 .level-stop.is-done::before { background: var(--lv); }
 .level-stop.is-last::before { display: none; }
-.level-stop__button {
-  display: flex;
-  align-items: flex-start;
-  gap: 14px;
+.level-stop__button,
+.anytime-stop {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  column-gap: 14px;
   width: 100%;
-  padding: 8px 12px 22px 10px;
-  border: none;
+  padding: 12px 14px;
+  border: 1.5px solid transparent;
   border-radius: var(--r-tile);
   background: transparent;
   color: inherit;
   font: inherit;
   text-align: left;
   cursor: pointer;
+  transition: background 0.15s ease;
 }
-.level-stop__button:hover { background: rgba(255, 255, 255, 0.6); }
-.level-stop.is-picked .level-stop__button { background: var(--white); box-shadow: 0 0 0 1.5px var(--ink-10); }
+.level-stop__button:hover,
+.anytime-stop:hover { background: rgba(255, 255, 255, 0.65); }
+.level-stop.is-picked .level-stop__button,
+.anytime-stop.is-picked {
+  background: var(--white);
+  border-color: var(--ink-10);
+  box-shadow: 0 10px 24px rgba(38, 38, 38, 0.06);
+}
 .level-stop__node {
   position: relative;
-  z-index: 1;
+  z-index: 2;
   display: flex;
   align-items: center;
   justify-content: center;
-  flex: none;
   width: 52px;
   height: 52px;
-  border: 2px solid var(--ink-12);
+  border: 2px solid var(--ink-14);
   border-radius: 50%;
   background: var(--white);
   font-family: var(--display);
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 800;
-  color: var(--ink-40);
+  color: var(--ink-50);
 }
 .level-stop.is-done .level-stop__node,
 .level-stop.is-current .level-stop__node { border-color: var(--lv); background: var(--lv); color: var(--white); }
 .level-stop.is-current .level-stop__node { box-shadow: 0 0 0 6px var(--lv-tint); }
 .level-stop__tick {
   position: absolute;
-  right: -4px;
-  bottom: -4px;
+  top: 34px;
+  left: 34px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2874,145 +3272,169 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   background: var(--white);
   color: var(--lv);
 }
-.level-stop__tick svg { fill: none; stroke: currentColor; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
-.level-stop__text { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; padding-top: 6px; }
+.level-stop__tick svg { fill: none; stroke: currentColor; stroke-width: 3.8; stroke-linecap: round; stroke-linejoin: round; }
+.level-stop__text { display: flex; flex-direction: column; align-self: center; min-width: 0; }
 .level-stop__name { font-size: 20px; line-height: 1.1; }
-.level-stop.is-next .level-stop__name,
-.level-stop.is-locked .level-stop__name { color: var(--ink-55); }
-.level-stop__status { font-size: 12.5px; font-weight: 700; color: var(--ink-50); }
+.level-stop.is-locked .level-stop__name { color: var(--ink-62); }
+.level-stop__status { margin-top: 2px; font-size: 13px; font-weight: 700; color: var(--ink-60); }
 .level-stop.is-done .level-stop__status { color: #3f7a00; }
-.level-stop.is-current .level-stop__status { color: var(--lv-deep); }
-.level-stop__bar { margin-top: 8px; }
-.level-stop__progress { margin-top: 4px; font-size: 12px; font-weight: 500; color: var(--ink-55); }
-
-/* A level's page: its number huge in its colour on its wash, its goal, and
-   its steps as bars with a segment per skill. */
-.level-page { padding: 0; overflow: hidden; }
-.level-page__head {
-  display: flex;
-  align-items: flex-end;
-  gap: 22px;
-  padding: 28px 30px 24px;
+.level-stop.is-current .level-stop__status { color: var(--lv); }
+.level-stop__bar {
+  display: block;
+  width: 100%;
+  height: 8px;
+  margin-top: 10px;
+  border-radius: var(--r-pill);
   background: var(--lv-tint);
+  overflow: hidden;
 }
-.level-page__number { font-size: 104px; line-height: 0.8; letter-spacing: -0.02em; color: var(--lv); }
-.level-page.is-next .level-page__number,
-.level-page.is-locked .level-page__number { opacity: 0.5; }
-.level-page__title h2 { font-size: 32px; line-height: 1.05; }
+.level-stop__bar > span { display: block; height: 100%; border-radius: inherit; background: var(--lv); }
+.level-stop__progress { margin-top: 6px; font-size: 12.5px; font-weight: 500; color: var(--ink-62); }
+
+/* The badges no level holds, under the path. */
+.levels-side__anytime { margin-top: 12px; padding-top: 12px; border-top: 1.5px solid var(--ink-08); }
+.anytime-stop { align-items: center; }
+.anytime-stop__disc {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--orange);
+}
+.anytime-stop__text { min-width: 0; }
+.anytime-stop__text strong { display: block; font-size: 20px; line-height: 1.1; }
+.anytime-stop__text small { display: block; margin-top: 2px; font-size: 13px; font-weight: 700; color: var(--ink-60); }
+
+/* A level's page: its number huge in its colour on its wash, its goal, its
+   steps as bars with a segment per skill, and the badges filed under it. */
+.level-page {
+  min-width: 0;
+  border: 1.5px solid var(--ink-10);
+  border-radius: var(--r-panel);
+  background: var(--white);
+  overflow: hidden;
+}
+.level-page__head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  min-height: 180px;
+  padding: 30px 32px 28px;
+  background: var(--lv-tint);
+  overflow: hidden;
+  transition: background 0.25s ease;
+}
+.level-page__number { flex: none; font-size: 132px; line-height: 0.8; letter-spacing: -0.02em; color: var(--lv); }
+.level-page__title { position: relative; z-index: 2; min-width: 0; max-width: 290px; }
 .level-page__pill {
   display: inline-flex;
-  margin-top: 10px;
-  padding: 5px 12px;
+  align-items: center;
+  height: 28px;
+  padding: 0 12px;
   border-radius: var(--r-pill);
   background: var(--white);
-  font-size: 12.5px;
+  color: rgba(38, 38, 38, 0.72);
+  font-size: 13px;
   font-weight: 700;
-  color: var(--ink-62);
 }
 .level-page.is-done .level-page__pill { background: var(--green); color: var(--white); }
 .level-page.is-current .level-page__pill { background: var(--lv); color: var(--white); }
-.level-page__title p { margin: 8px 0 0; font-size: 13.5px; font-weight: 500; color: var(--ink-70); }
-.level-page__heading { margin: 22px 30px 0; font-family: var(--display); font-size: 18px; font-weight: 700; }
-.level-page__heading--row { display: flex; align-items: baseline; justify-content: space-between; }
+.level-page__title h2 { margin-top: 10px; font-size: 32px; line-height: 1.05; }
+.level-page__title p {
+  margin: 6px 0 0;
+  font-size: 14.5px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--ink-70);
+  text-wrap: pretty;
+}
+.ella--level-peek { right: 32px; bottom: -10px; }
+.level-page__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 36px;
+  padding: 26px 32px 30px;
+}
+.level-page__col { min-width: 0; }
+.level-page__heading { margin: 0; font-family: var(--display); font-size: 20px; font-weight: 700; }
+.level-page__heading--row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 .level-page__heading--row h3 { margin: 0; font: inherit; }
-.level-page__heading--row span { font-family: var(--body); font-size: 12.5px; font-weight: 600; color: var(--ink-50); }
+.level-page__heading--row span { flex: none; font-family: var(--body); font-size: 13px; font-weight: 600; color: var(--ink-60); }
+.level-page__goal + .level-page__heading--row { margin-top: 28px; }
 .level-page__goal {
   position: relative;
-  margin: 8px 30px 0;
-  padding-left: 18px;
+  margin: 12px 0 0;
+  padding-left: 20px;
   font-size: 15px;
   font-weight: 500;
   line-height: 1.45;
+  text-wrap: pretty;
 }
 .level-page__goal::before {
   content: "";
   position: absolute;
   left: 0;
-  top: 7px;
+  top: 8px;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--lv);
 }
-
-.level-steps {
-  margin: 10px 30px 28px;
-  padding: 0;
-  list-style: none;
-  border: 1.5px solid var(--ink-10);
-  border-radius: var(--r-tile);
-}
-.level-page.is-current .level-steps { margin-bottom: 0; }
-.level-step { padding: 12px 16px; }
-.level-step + .level-step { border-top: 1.5px solid var(--ink-07); }
-.level-step__row { display: flex; align-items: center; gap: 12px; }
-.level-step__title {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex: 1;
-  min-width: 0;
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 1.25;
-}
-.level-step__number {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: var(--ink-07);
-  font-size: 11.5px;
-  font-weight: 700;
-  color: var(--ink-60);
-}
-.level-step.is-yours .level-step__number { background: var(--lv); color: var(--white); }
+.level-steps { display: flex; flex-direction: column; gap: 14px; margin: 14px 0 0; padding: 0; list-style: none; }
+.level-step { display: grid; grid-template-columns: minmax(0, 1fr) 150px; align-items: center; gap: 14px; }
+.level-step__title { font-size: 14.5px; font-weight: 600; line-height: 1.25; }
 .level-step__here {
-  flex: none;
-  padding: 2px 8px;
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
   border-radius: var(--r-pill);
   background: var(--lv-tint);
   color: var(--lv-deep);
   font-size: 11px;
   font-weight: 700;
+  vertical-align: 1px;
+  white-space: nowrap;
 }
-.level-step__bar { display: flex; gap: 4px; flex: none; width: 140px; }
+.level-step__bar { display: flex; gap: 4px; }
 .level-step__bar i { flex: 1; height: 10px; border-radius: 3px; background: var(--ink-07); }
 .level-page.is-done .level-step__bar i,
 .level-page.is-current .level-step__bar i { background: var(--lv-tint); }
 /* After the washes above, and as specific as them, so a passed skill fills
    on every level's page. */
 .level-page .level-step__bar i.is-passed { background: var(--lv); }
-.level-step__focus { margin: 8px 0 0 32px; font-size: 13px; font-weight: 500; color: var(--ink-60); }
-.level-step__skills {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 8px 0 2px 32px;
-  padding: 0;
-  list-style: none;
+.level-page__note { margin: 12px 0 0; font-size: 13px; font-weight: 500; color: var(--ink-62); }
+.level-page__col .badge-list { margin-top: 8px; }
+.level-page__none {
+  margin: 14px 0 0;
+  padding: 16px 18px;
+  border-radius: 20px;
+  background: #f6f7f2;
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: rgba(38, 38, 38, 0.65);
 }
-.level-step__skills li { display: flex; gap: 10px; font-size: 13.5px; line-height: 1.4; }
-.level-step__check {
+.level-page__actions { display: flex; flex-direction: column; align-items: stretch; gap: 10px; margin-top: 20px; }
+.level-page__practise { width: 100%; height: 52px; font-size: 15px; }
+
+/* The anytime badges' page. */
+.level-page--anytime .level-page__head { gap: 24px; background: #ffe9d4; }
+.level-page--anytime .level-page__title { max-width: 420px; }
+.level-page--anytime .level-page__title h2 { margin-top: 0; }
+.anytime-page__disc {
   display: flex;
   align-items: center;
   justify-content: center;
   flex: none;
-  width: 18px;
-  height: 18px;
-  margin-top: 1px;
-  border: 1.5px solid var(--ink-18);
+  width: 96px;
+  height: 96px;
   border-radius: 50%;
-  color: transparent;
+  background: var(--orange);
 }
-.level-step__check svg { fill: none; stroke: currentColor; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
-.level-step__skills li.is-passed .level-step__check { border-color: var(--lv); background: var(--lv); color: var(--white); }
-.level-page__note { margin: 10px 30px 0; font-size: 12.5px; font-weight: 500; line-height: 1.4; color: var(--ink-55); }
-.level-page__actions { display: flex; align-items: center; gap: 14px; margin: 20px 30px 28px; }
-.level-page__practise { height: 50px; }
+.anytime-page__body { padding: 24px 32px 28px; }
 
 /* The placement's result: the level it found, in that level's colour. */
 .level-reveal {
@@ -3071,7 +3493,18 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 @media (max-width: 1320px) {
   .screen--levels { padding: 32px 30px 36px; }
   .levels-grid { grid-template-columns: minmax(260px, 300px) minmax(0, 1fr); gap: 22px; }
-  .level-page__number { font-size: 88px; }
+  .level-page__head { gap: 22px; padding: 26px 26px 24px; }
+  .level-page__number { font-size: 104px; }
+  /* Too narrow for two columns of steps and badges side by side. */
+  .level-page__body { grid-template-columns: minmax(0, 1fr); gap: 28px; padding: 24px 26px 28px; }
+  .ella--level-peek { right: 20px; --ella-scale: 0.72 !important; }
+  .anytime-page__body { padding: 22px 26px 26px; }
+  .badge-list--two { grid-template-columns: minmax(0, 1fr); }
+  .ella--profile-peek { right: 20px; --ella-scale: 0.72 !important; }
+  .profile-hero__text { max-width: 210px; }
+  .level-track-card { padding: 22px 24px 20px; }
+  .level-track-card__number { font-size: 54px; }
+  .level-track-card__name { font-size: 21px; }
 }
 
 /* "Your level" beside the first talk's name in its chip. */
