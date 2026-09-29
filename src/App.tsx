@@ -21,7 +21,16 @@ import {
   type UpdateProgress,
 } from "./lib/updates";
 import { levelTone } from "./lib/curriculum";
-import type { AppSnapshot, Assessment, CastGoal, LearnerProgress, Session, SessionSummary, Topic } from "./types";
+import type {
+  AppSnapshot,
+  Assessment,
+  BadgeStart,
+  CastGoal,
+  LearnerProgress,
+  Session,
+  SessionSummary,
+  Topic,
+} from "./types";
 
 /** A finished talk's summary, with what the recap needs from before it: the
  * learner's figures, which its streak counts on from, and its topic, which
@@ -74,6 +83,9 @@ export default function App() {
   const [assessing, setAssessing] = useState<Assessing | null>(null);
   const [movedOn, setMovedOn] = useState<Assessment | null>(null);
   const [busy, setBusy] = useState(false);
+  // Where a placement chat skipped part-way goes back to: the level map, or
+  // the profile when Hello, Ella's sheet started it.
+  const [placementBack, setPlacementBack] = useState<"levels" | "profile">("levels");
   const [error, setError] = useState<string | null>(null);
   const [update, setUpdate] = useState<UpdateProgress | null>(null);
   const [applyUpdate, setApplyUpdate] = useState<ApplyUpdate | null>(null);
@@ -257,6 +269,19 @@ export default function App() {
     });
   }
 
+  /** A badge sheet's mic: the partner's scenes on Talk partners, the
+   * placement chat, or the talk that earns it. */
+  function handleBadgeStart(start: BadgeStart) {
+    if (start.kind === "partners") setScreen("cast");
+    else if (start.kind === "placement") openPlacement("profile");
+    else void handleStartTopic(start.topicId);
+  }
+
+  function openPlacement(from: "levels" | "profile") {
+    setPlacementBack(from);
+    setScreen("placement");
+  }
+
   /** Reopens a conversation the learner left running, messages and all. */
   async function handleResume(sessionId: string) {
     await run(async () => {
@@ -432,6 +457,7 @@ export default function App() {
       {nav !== undefined && (
         <Sidebar
           active={nav}
+          profileActive={screen === "profile" || screen === "levels"}
           learnerName={snapshot.learner?.name ?? "friend"}
           streakDays={streak(snapshot.progress).days}
           avatarColor={avatarColor}
@@ -466,14 +492,18 @@ export default function App() {
             onMicCheck={() => setScreen("miccheck")}
             onLevels={openLevels}
             onLogOut={() => void handleLogOut()}
+            onBadgeStart={handleBadgeStart}
           />
         )}
         {screen === "levels" && (
           <LevelsScreen
-            standing={snapshot.standing ?? null}
+            snapshot={snapshot}
+            avatarColor={avatarColor}
             busy={busy}
+            onBack={() => setScreen("profile")}
             onPractise={() => void handleStartTopic(null)}
-            onFindLevel={() => setScreen("placement")}
+            onFindLevel={() => openPlacement("levels")}
+            onBadgeStart={handleBadgeStart}
           />
         )}
         {screen === "placement" && (
@@ -483,7 +513,7 @@ export default function App() {
             onDone={(placed) => {
               // Placed, the new level is the next thing to see; skipped, back
               // to where they asked for it.
-              setScreen(placed ? "home" : "levels");
+              setScreen(placed ? "home" : placementBack);
               void refreshSnapshot();
             }}
           />

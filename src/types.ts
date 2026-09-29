@@ -27,6 +27,19 @@ export interface DayActivity {
   talks: number;
   /** Answers given this day, in any talk. */
   answers: number;
+  /** How long this day's spoken answers lasted. Typed answers, and spoken
+   * ones from before Ella kept their length, add nothing. */
+  spoken_ms: number;
+}
+
+/** One finished talk, as the badges read them. */
+export interface FinishedTalk {
+  /** The topic, chore or placement (`placement`) it was. */
+  topic_id: string;
+  /** `YYYY-MM-DD` it ended on, on the learner's own clock. */
+  day: string;
+  /** A ledger chore whose character agreed at or past the target. */
+  goal_met: boolean;
 }
 
 /** What the signed-in learner has done, over their whole history. */
@@ -41,6 +54,12 @@ export interface LearnerProgress {
   finished_topics: string[];
   /** Ledger chores whose goal a finished talk met, each once. */
   chores_met: string[];
+  /** Every finished talk, the first to end first. */
+  talks: FinishedTalk[];
+  /** How long the spoken answers lasted, over the `spoken_answers` whose
+   * length was kept. None kept means not known yet, not nothing said. */
+  spoken_ms: number;
+  spoken_answers: number;
 }
 
 export interface Topic {
@@ -442,16 +461,58 @@ export interface Streak {
   week: StreakDay[];
 }
 
-/** Talks and the answers spoken in them, over whatever window was asked for. */
+/** Talks, the answers given in them and how long the spoken ones lasted,
+ * over whatever window was asked for. */
 export interface TalkTally {
   talks: number;
   answers: number;
+  spokenMs: number;
 }
 
-export interface Badge {
+/** The glyph a badge is drawn with, by the design's names for them. */
+export type BadgeGlyph = "ella" | "mic" | "tag" | "house" | "flame" | "star";
+
+/** What a badge's mic starts: its partner's scenes on Talk partners, the
+ * placement chat, or a talk (today's when the topic is null). */
+export type BadgeStart =
+  | { kind: "partners" }
+  | { kind: "placement" }
+  | { kind: "topic"; topicId: string | null };
+
+/** A count a badge waits on: a streak's days or a number of talks. */
+export interface BadgeGoal {
+  have: number;
+  of: number;
+  unit: "days" | "talks";
+}
+
+/** A badge as it stands for the learner. */
+export interface LearnerBadge {
   id: string;
-  label: string;
+  name: string;
+  /** The ladder level it is listed at, 1 to 6; null for the anytime badges. */
+  level: number | null;
+  /** `#RRGGBB`: its disc once earned, its ring and glyph until then. */
+  color: string;
+  glyph: BadgeGlyph;
+  /** What earns it, as its sheet says. */
+  how: string;
+  /** Where it is earned, on its row: "Bippo · Talk a stall price down". */
+  where: string;
+  /** And on its sheet, as a title and a line: "Bippo", "Talk a stall price
+   * down". */
+  place: string;
+  line: string;
+  /** The talk partner whose scene earns it, drawn on its sheet. */
+  partner: CastId | null;
+  minutes: number | null;
+  start: BadgeStart;
   earned: boolean;
+  /** `YYYY-MM-DD` it was first earned; null until it is. */
+  earnedOn: string | null;
+  /** Finished talks of its scene, goal met or not. */
+  tries: number;
+  goal: BadgeGoal | null;
 }
 
 export type CastId = "stall-owner" | "landlord" | "doctor" | "debater";

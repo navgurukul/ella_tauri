@@ -44,6 +44,25 @@ pub struct DayActivity {
     pub talks: u32,
     /// Answers given on this day, whichever talk they belong to.
     pub answers: u32,
+    /// How long this day's spoken answers lasted, in milliseconds. Typed
+    /// answers, and spoken ones from before their length was kept, add
+    /// nothing.
+    #[serde(default)]
+    pub spoken_ms: u64,
+}
+
+/// One finished talk: a completed session the learner said something in, as
+/// the badges read them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FinishedTalk {
+    /// The topic, chore or placement it was: a chore session stores its chore
+    /// id as its topic, and a placement chat stores `placement`.
+    pub topic_id: String,
+    /// `YYYY-MM-DD` it ended on, in the laptop's own timezone.
+    pub day: String,
+    /// A ledger chore whose character agreed to a figure at or past the
+    /// target. Always false for anything else.
+    pub goal_met: bool,
 }
 
 /// Lifetime figures for the learner, worked out from every session they have
@@ -68,6 +87,18 @@ pub struct LearnerProgress {
     /// character agreed to a figure at or past the target.
     #[serde(default)]
     pub chores_met: Vec<String>,
+    /// Every finished talk, the first to end first: what the badges are
+    /// earned from, the day each was first earned, and the goes at each.
+    #[serde(default)]
+    pub talks: Vec<FinishedTalk>,
+    /// How long every spoken answer lasted, in milliseconds, over the answers
+    /// whose length was kept: `spoken_answers` of them. Answers from before
+    /// Ella kept their length count in `answers` and not here, so no spoken
+    /// answers means nothing is known yet, not that nothing was said.
+    #[serde(default)]
+    pub spoken_ms: u64,
+    #[serde(default)]
+    pub spoken_answers: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

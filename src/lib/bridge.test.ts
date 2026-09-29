@@ -18,6 +18,18 @@ async function talk(bridge: EllaBridge, answers: string[], topicId = "street-foo
   return bridge.completeSession(session.id);
 }
 
+/** What a signed-out snapshot and a learner who has said nothing show. */
+const NOTHING_YET = {
+  days: [],
+  talks_finished: 0,
+  answers: 0,
+  finished_topics: [],
+  chores_met: [],
+  talks: [],
+  spoken_ms: 0,
+  spoken_answers: 0,
+};
+
 describe("browser proof-of-concept bridge", () => {
   it("runs a complete learner journey and persists it", async () => {
     const bridge = createBrowserBridge(memoryStorage());
@@ -201,7 +213,7 @@ describe("the preview's learner", () => {
     const snapshot = await bridge.bootstrap();
     expect(snapshot.learner).toBeNull();
     expect(snapshot.saved_learner).toBeNull();
-    expect(snapshot.progress).toEqual({ days: [], talks_finished: 0, answers: 0, finished_topics: [], chores_met: [] });
+    expect(snapshot.progress).toEqual(NOTHING_YET);
     await expect(bridge.logIn()).rejects.toThrow("Tell Ella your name first.");
   });
 
@@ -266,7 +278,7 @@ describe("the preview's learner", () => {
     const signedOut = await bridge.logOut();
     expect(signedOut.learner).toBeNull();
     expect(signedOut.recent_sessions).toEqual([]);
-    expect(signedOut.progress).toEqual({ days: [], talks_finished: 0, answers: 0, finished_topics: [], chores_met: [] });
+    expect(signedOut.progress).toEqual(NOTHING_YET);
     // Signed out, the laptop still knows who it keeps.
     expect(signedOut.saved_learner).toEqual({ name: "Aarav Kumar", avatar_color: "#FF7A00" });
     expect(await bridge.bootstrap()).toEqual(signedOut);
@@ -328,7 +340,7 @@ describe("the preview's learner", () => {
     );
     let snapshot = await bridge.bootstrap();
     expect(snapshot.recent_sessions[0].status).toBe("complete");
-    expect(snapshot.progress).toEqual({ days: [], talks_finished: 0, answers: 0, finished_topics: [], chores_met: [] });
+    expect(snapshot.progress).toEqual(NOTHING_YET);
 
     // An answer in a talk left open counts as an answer and a talk day, but
     // not as a finished talk.
@@ -357,8 +369,12 @@ describe("the preview's learner", () => {
     await bridge.completeSession(session.id);
 
     expect((await bridge.bootstrap()).progress.days).toEqual([
-      { day: "2026-09-25", talks: 0, answers: 2 },
-      { day: "2026-09-24", talks: 1, answers: 1 },
+      { day: "2026-09-25", talks: 0, answers: 2, spoken_ms: 0 },
+      { day: "2026-09-24", talks: 1, answers: 1, spoken_ms: 0 },
+    ]);
+    // It ended on the day it ended, which the badges date it by.
+    expect((await bridge.bootstrap()).progress.talks).toEqual([
+      { topic_id: "street-food", day: "2026-09-25", goal_met: false },
     ]);
   });
 

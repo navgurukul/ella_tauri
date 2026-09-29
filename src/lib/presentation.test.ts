@@ -1,25 +1,32 @@
 import { describe, expect, it, vi } from "vitest";
 import { addDays, dayKey } from "./days";
 import {
-  badges,
+  badgeStat,
+  badgeStatus,
   castFor,
   castName,
+  earnedBadges,
   goalFigure,
+  learnerBadges,
   nextTopicLabel,
+  openBadges,
   reachedGoal,
+  shortDate,
+  spokenTime,
   streak,
+  streakReachedOn,
   streakRecap,
   talkTotals,
   weeklyDigest,
 } from "./presentation";
-import type { AppSnapshot, ChoreRecap, DayActivity, LearnerProgress } from "../types";
+import type { AppSnapshot, ChoreRecap, DayActivity, FinishedTalk, LearnerBadge, LearnerProgress } from "../types";
 
 /** Friday morning on whatever clock the tests run on. */
 const today = new Date(2026, 8, 25, 10);
 
 /** A talk day some days back, as the backend reports it. */
-function day(daysAgo: number, talks = 1, answers = 2): DayActivity {
-  return { day: dayKey(addDays(today, -daysAgo)), talks, answers };
+function day(daysAgo: number, talks = 1, answers = 2, spoken_ms = 0): DayActivity {
+  return { day: dayKey(addDays(today, -daysAgo)), talks, answers, spoken_ms };
 }
 
 /** Progress made of these days, newest first; every talk in them finished
@@ -31,8 +38,36 @@ function progressWith(days: DayActivity[], overrides: Partial<LearnerProgress> =
     answers: days.reduce((sum, entry) => sum + entry.answers, 0),
     finished_topics: days.length > 0 ? ["street-food"] : [],
     chores_met: [],
+    talks: [],
+    spoken_ms: 0,
+    spoken_answers: 0,
     ...overrides,
   };
+}
+
+/** A finished talk that ended some days back. */
+function ended(topic_id: string, daysAgo: number, goal_met = false): FinishedTalk {
+  return { topic_id, day: dayKey(addDays(today, -daysAgo)), goal_met };
+}
+
+/** The badges of a learner of `age` with this progress. */
+function badgesOf(progress: LearnerProgress, age: number | null = 14): LearnerBadge[] {
+  const snapshot = {
+    learner: { name: "Asha", age, level_name: "", created_at: "" },
+    topics: [
+      { id: "street-food", label: "Street food stories", prompt: "", emoji: "", color: "" },
+      { id: "market-bargaining", label: "Bargaining at the market", prompt: "", emoji: "", color: "" },
+    ],
+    recent_sessions: [],
+    progress,
+  } as unknown as AppSnapshot;
+  return learnerBadges(snapshot, today);
+}
+
+function badge(badges: LearnerBadge[], id: string): LearnerBadge {
+  const found = badges.find((candidate) => candidate.id === id);
+  if (!found) throw new Error(`no ${id} badge`);
+  return found;
 }
 
 describe("the streak", () => {
@@ -42,7 +77,7 @@ describe("the streak", () => {
       // Half past midnight on Friday in Pune is still Thursday in UTC. The
       // backend put the talk on Friday, and so must the strip.
       const now = new Date("2026-09-25T00:30:00+05:30");
-      const run = streak(progressWith([{ day: "2026-09-25", talks: 1, answers: 1 }]), now);
+      const run = streak(progressWith([{ day: "2026-09-25", talks: 1, answers: 1, spoken_ms: 0 }]), now);
       expect(run.days).toBe(1);
       expect(run.week.map((entry) => entry.state)).toEqual([
         "future",
@@ -107,66 +142,155 @@ describe("the streak", () => {
 });
 
 describe("talk tallies", () => {
-  it("counts the talks and answers of the last seven days, today included", () => {
-    const progress = progressWith([day(0, 2, 5), day(6, 1, 2), day(7, 3, 9), day(30, 4, 11)]);
-    expect(weeklyDigest(progress, today)).toEqual({ talks: 3, answers: 7 });
+  it("counts the talks, answers and time spoken of the last seven days, today included", () => {
+    const progress = progressWith([day(0, 2, 5, 90_000), day(6, 1, 2, 30_000), day(7, 3, 9, 60_000), day(30, 4, 11)]);
+    expect(weeklyDigest(progress, today)).toEqual({ talks: 3, answers: 7, spokenMs: 120_000 });
   });
 
-  it("reports the whole history's finished talks and answers", () => {
-    const progress = progressWith([day(0), day(40)], { talks_finished: 57, answers: 312 });
-    expect(talkTotals(progress)).toEqual({ talks: 57, answers: 312 });
+  it("reports the whole history's finished talks, answers and time spoken", () => {
+    const progress = progressWith([day(0), day(40)], { talks_finished: 57, answers: 312, spoken_ms: 5_400_000 });
+    expect(talkTotals(progress)).toEqual({ talks: 57, answers: 312, spokenMs: 5_400_000 });
+  });
+
+  it("prints time spoken as the profile does", () => {
+    expect([spokenTime(0), spokenTime(44_600), spokenTime(59_400), spokenTime(90_000)]).toEqual(["0s", "45s", "59s", "2m"]);
+    expect([spokenTime(12 * 60_000), spokenTime(3 * 3_600_000), spokenTime(12_600_000)]).toEqual(["12m", "3h", "3h 30m"]);
   });
 });
 
 describe("badges", () => {
-  it("are all locked for someone who has not talked yet", () => {
-    const progress = progressWith([]);
-    expect(badges(progress, streak(progress, today)).map((badge) => badge.earned)).toEqual([
-      false,
-      false,
-      false,
+  it("are all still to earn before anyone has talked", () => {
+    const badges = badgesOf(progressWith([]));
+    expect(badges.map((entry) => entry.id)).toEqual([
+      "hello",
+      "first-talk",
+      "bargainer",
+      "deposit",
+      "streak-3",
+      "streak-7",
+      "streak-30",
+      "talks-50",
+    ]);
+    expect(badges.filter((entry) => entry.earned)).toEqual([]);
+    expect(badges.map((entry) => entry.level)).toEqual([1, 1, 3, 3, null, null, null, null]);
+    expect(badges.map((entry) => badgeStat(entry, today))).toEqual([
+      "Not tried",
+      "Not tried",
+      "Not tried",
+      "Not tried",
+      "0 / 3",
+      "0 / 7",
+      "0 / 30",
+      "0 / 50",
     ]);
   });
 
-  it("are earned by a running streak, a finished talk and a stall price talked down", () => {
-    const progress = progressWith([day(0), day(1)], {
-      finished_topics: ["market-cloth-price", "street-food"],
-      chores_met: ["market-cloth-price"],
+  it("are dated by the talk that first earned them, and count the goes at a scene", () => {
+    const progress = progressWith([], {
+      talks: [
+        ended("placement", 10),
+        ended("street-food", 9),
+        ended("market-cloth-price", 8),
+        ended("market-cloth-price", 5, true),
+        ended("deposit-refund", 4),
+        ended("market-cloth-price", 3, true),
+        ended("deposit-refund", 2),
+      ],
     });
-    expect(badges(progress, streak(progress, today))).toEqual([
-      { id: "streak", label: "2-day streak", earned: true },
-      { id: "first-talk", label: "First talk", earned: true },
-      { id: "bargainer", label: "Bargainer", earned: true },
+    const badges = badgesOf(progress);
+    expect(badge(badges, "hello").earnedOn).toBe(dayKey(addDays(today, -10)));
+    expect(badge(badges, "first-talk").earnedOn).toBe(dayKey(addDays(today, -9)));
+    const bargainer = badge(badges, "bargainer");
+    expect([bargainer.earnedOn, bargainer.tries]).toEqual([dayKey(addDays(today, -5)), 3]);
+    expect([bargainer.where, bargainer.partner, bargainer.start]).toEqual([
+      "Bippo · Talk a stall price down",
+      "stall-owner",
+      { kind: "partners" },
+    ]);
+    const deposit = badge(badges, "deposit");
+    expect([deposit.earned, deposit.tries]).toEqual([false, 2]);
+    expect(badgeStat(deposit, today)).toBe("2 tries");
+    expect(badgeStatus(deposit, today)).toBe("Not yet · 2 tries");
+  });
+
+  it("only count a stall price as met when its goal was, as the recap says", () => {
+    const tried = badgesOf(progressWith([], { talks: [ended("market-cloth-price", 1)] }));
+    expect(badge(tried, "bargainer").earned).toBe(false);
+    expect(badgeStat(badge(tried, "bargainer"), today)).toBe("1 try");
+    // Another chore's goal is not a bargain.
+    const deposit = badgesOf(progressWith([], { talks: [ended("deposit-refund", 1, true)] }));
+    expect(badge(deposit, "bargainer").earned).toBe(false);
+    expect(badge(deposit, "deposit").earned).toBe(true);
+  });
+
+  it("give the Bargainer for the free bargaining talk too, and say that is where it was earned", () => {
+    const badges = badgesOf(progressWith([], { talks: [ended("market-bargaining", 2)] }));
+    const bargainer = badge(badges, "bargainer");
+    expect(bargainer.earned).toBe(true);
+    expect([bargainer.where, bargainer.place, bargainer.line, bargainer.partner]).toEqual([
+      "Home · Bargaining at the market",
+      "Bargaining at the market",
+      "Home",
+      null,
     ]);
   });
 
-  it("keep the Bargainer for the stall price until its goal is met, as the recap says", () => {
-    const tried = progressWith([day(0)], { finished_topics: ["market-cloth-price"] });
-    expect(badges(tried, streak(tried, today)).find((badge) => badge.id === "bargainer")?.earned).toBe(false);
-    // Another chore's goal is not a bargain.
-    const deposit = progressWith([day(0)], { chores_met: ["deposit-refund"] });
-    expect(badges(deposit, streak(deposit, today)).find((badge) => badge.id === "bargainer")?.earned).toBe(false);
+  it("follow the scenes a learner is offered: too young for one, its badge is left out", () => {
+    const young = badgesOf(progressWith([]), 9);
+    expect(young.map((entry) => entry.id)).not.toContain("deposit");
+    // Bippo is not offered at nine, but the bargaining talk is.
+    expect([badge(young, "bargainer").where, badge(young, "bargainer").start]).toEqual([
+      "Home · Bargaining at the market",
+      { kind: "topic", topicId: "market-bargaining" },
+    ]);
+    expect(badgesOf(progressWith([]), 13).map((entry) => entry.id)).not.toContain("deposit");
+    expect(badgesOf(progressWith([]), null).map((entry) => entry.id)).toContain("deposit");
   });
 
-  it("do not count talking without finishing", () => {
-    // Answers were given today, but nothing was finished.
-    const progress = progressWith([day(0)], { talks_finished: 0, finished_topics: [] });
-    const earned = badges(progress, streak(progress, today));
-    expect(earned.find((badge) => badge.id === "streak")?.earned).toBe(true);
-    expect(earned.find((badge) => badge.id === "first-talk")?.earned).toBe(false);
-    expect(earned.find((badge) => badge.id === "bargainer")?.earned).toBe(false);
+  it("earn a streak's badge the day a run first reached it, and keep it after the run breaks", () => {
+    // Seven days in a row a month ago, then two days in a row up to today.
+    const days = [day(0), day(1), ...[30, 31, 32, 33, 34, 35, 36].map((back) => day(back))];
+    const progress = progressWith(days);
+    expect(streakReachedOn(progress, 3)).toBe(dayKey(addDays(today, -34)));
+    const badges = badgesOf(progress);
+    expect(badge(badges, "streak-7").earnedOn).toBe(dayKey(addDays(today, -30)));
+    const month = badge(badges, "streak-30");
+    expect(month.earned).toBe(false);
+    expect(month.goal).toEqual({ have: 2, of: 30, unit: "days" });
+    expect([badgeStat(month, today), badgeStatus(month, today)]).toEqual(["2 / 30", "2 of 30 days"]);
+    expect(streakReachedOn(progressWith([day(0), day(2), day(4)]), 2)).toBeNull();
   });
 
-  it("stay earned however long the history grows", () => {
-    // Two months of talking, the one bargain long ago, and a streak that has
-    // since lapsed: only the streak badge is lost.
-    const days = Array.from({ length: 60 }, (_, back) => day(back + 3));
-    const progress = progressWith(days, { finished_topics: ["market-bargaining", "street-food"] });
-    const earned = badges(progress, streak(progress, today));
-    expect(earned).toEqual([
-      { id: "streak", label: "Day streak", earned: false },
-      { id: "first-talk", label: "First talk", earned: true },
-      { id: "bargainer", label: "Bargainer", earned: true },
+  it("earn 50 talks on the day the fiftieth ended", () => {
+    const talks = Array.from({ length: 52 }, (_, index) => ended("street-food", 60 - index));
+    const badges = badgesOf(progressWith([], { talks, talks_finished: 52 }));
+    expect(badge(badges, "talks-50").earnedOn).toBe(dayKey(addDays(today, -11)));
+    const almost = badge(badgesOf(progressWith([], { talks: talks.slice(0, 34), talks_finished: 34 })), "talks-50");
+    expect([almost.earned, almost.goal?.have]).toEqual([false, 34]);
+  });
+
+  it("say when they were earned: today, this year, or another year", () => {
+    const badges = badgesOf(progressWith([], { talks: [ended("placement", 400), ended("street-food", 0)] }));
+    expect(badgeStat(badge(badges, "first-talk"), today)).toBe("Today");
+    expect(badgeStatus(badge(badges, "first-talk"), today)).toBe("Earned today");
+    expect(shortDate("2026-08-21", today)).toBe("21 Aug");
+    expect(badgeStatus(badge(badges, "hello"), today)).toBe(`Earned ${shortDate(dayKey(addDays(today, -400)), today)}`);
+    expect(shortDate(dayKey(addDays(today, -400)), today)).toMatch(/ 2025$/);
+  });
+
+  it("list the earned ones latest first, and the rest tried most first", () => {
+    const badges = badgesOf(
+      progressWith([day(2), day(3), day(4)], {
+        talks: [ended("placement", 4), ended("street-food", 3), ended("deposit-refund", 2), ended("deposit-refund", 1)],
+      }),
+    );
+    expect(earnedBadges(badges).map((entry) => entry.id)).toEqual(["streak-3", "first-talk", "hello"]);
+    expect(openBadges(badges).map((entry) => entry.id)).toEqual([
+      "deposit",
+      "bargainer",
+      "streak-7",
+      "streak-30",
+      "talks-50",
     ]);
   });
 });

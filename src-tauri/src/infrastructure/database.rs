@@ -4,7 +4,10 @@ use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, Transact
 
 use crate::{
     curriculum::{self, Position},
-    domain::{find_chore, DayActivity, Learner, LearnerProgress, Message, Session, SessionListItem, WinCondition},
+    domain::{
+        find_chore, DayActivity, FinishedTalk, Learner, LearnerProgress, Message, Session, SessionListItem,
+        WinCondition,
+    },
     error::{EllaError, EllaResult},
     progress::SkillProgress,
 };
@@ -146,6 +149,7 @@ impl Database {
         keep_one_learner(&connection)?;
         add_learner_profile(&connection)?;
         add_curriculum(&connection)?;
+        add_spoken_time(&connection)?;
         Ok(())
     }
 
@@ -466,10 +470,11 @@ impl Database {
         let connection = self.connection()?;
         let mut day_statement = connection.prepare(
             "WITH answers AS (
-               SELECT session_id, created_at FROM messages WHERE speaker = 'learner'
+               SELECT session_id, created_at, spoken_ms FROM messages WHERE speaker = 'learner'
              ),
              answer_days AS (
-               SELECT date(created_at, 'localtime') AS day, COUNT(*) AS answers
+               SELECT date(created_at, 'localtime') AS day, COUNT(*) AS answers,
+                      COALESCE(SUM(spoken_ms), 0) AS spoken_ms
                FROM answers GROUP BY 1
              ),
              talk_days AS (
@@ -478,7 +483,7 @@ impl Database {
                  FROM answers GROUP BY session_id
                ) GROUP BY day
              )
-             SELECT a.day, COALESCE(t.talks, 0), a.answers
+             SELECT a.day, COALESCE(t.talks, 0), a.answers, a.spoken_ms
              FROM answer_days a LEFT JOIN talk_days t ON t.day = a.day
              WHERE a.day IS NOT NULL
              ORDER BY a.day DESC",
@@ -489,51 +494,73 @@ impl Database {
                     day: row.get(0)?,
                     talks: row.get(1)?,
                     answers: row.get(2)?,
+                    spoken_ms: row.get::<_, i64>(3)?.max(0) as u64,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
-        let answers = connection.query_row(
-            "SELECT COUNT(*) FROM messages WHERE speaker = 'learner'",
+        let (answers, spoken_answers, spoken_ms) = connection.query_row(
+            "SELECT COUNT(*), COUNT(spoken_ms), COALESCE(SUM(spoken_ms), 0)
+             FROM messages WHERE speaker = 'learner'",
             [],
-            |row| row.get::<_, u32>(0),
+            |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?, row.get::<_, i64>(2)?)),
         )?;
 
         // A finished talk is a completed session the learner said something
         // in. One that closed before they answered — a placement talk that
-        // never heard them — earns nothing.
+        // never heard them — earns nothing. Each is dated by the day it
+        // ended; a completed session with no end time, which no release
+        // writes, by its last message.
         let mut finished_statement = connection.prepare(
-            "SELECT s.topic_id FROM sessions s
-             WHERE s.status = 'complete'
-               AND EXISTS (
-                 SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.speaker = 'learner'
-               )",
+            "WITH finished AS (
+               SELECT s.rowid AS position, s.topic_id, s.chore_id,
+                      COALESCE(s.completed_at,
+                               (SELECT MAX(m.created_at) FROM messages m WHERE m.session_id = s.id))
+                        AS ended_at,
+                      l.current, l.agreed
+               FROM sessions s LEFT JOIN ledger_state l ON l.session_id = s.id
+               WHERE s.status = 'complete'
+                 AND EXISTS (
+                   SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.speaker = 'learner'
+                 )
+             )
+             SELECT topic_id, chore_id, date(ended_at, 'localtime'), current, agreed
+             FROM finished ORDER BY julianday(ended_at), position",
         )?;
-        let mut finished_topics = finished_statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        let talks_finished = finished_topics.len() as u32;
-        finished_topics.sort();
-        finished_topics.dedup();
-
-        // Read off the ledgers rather than stored, so every goal met before
-        // the recap existed counts as well.
-        let mut ledger_statement = connection.prepare(
-            "SELECT s.chore_id, l.current FROM ledger_state l JOIN sessions s ON s.id = l.session_id
-             WHERE s.status = 'complete' AND l.agreed = 1 AND s.chore_id IS NOT NULL",
-        )?;
-        let mut chores_met = ledger_statement
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?)))?
+        // A goal met is read off the talk's ledger rather than stored, so
+        // every goal met before the recap existed counts as well: the
+        // character agreed to a figure at or past the target.
+        let mut chores_met = Vec::new();
+        let talks = finished_statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i32>>(3)?,
+                    row.get::<_, Option<bool>>(4)?,
+                ))
+            })?
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
-            .filter(|(chore_id, current)| {
-                find_chore(chore_id).is_some_and(|chore| match chore.win {
-                    WinCondition::Ledger(spec) => spec.reached_target(*current),
-                    WinCondition::Rubric { .. } => false,
-                })
+            .map(|(topic_id, chore_id, day, current, agreed)| {
+                let goal_met = agreed == Some(true)
+                    && chore_id.as_deref().and_then(find_chore).is_some_and(|chore| {
+                        match (chore.win, current) {
+                            (WinCondition::Ledger(spec), Some(current)) => spec.reached_target(current),
+                            _ => false,
+                        }
+                    });
+                if goal_met {
+                    chores_met.extend(chore_id);
+                }
+                FinishedTalk { topic_id, day: day.unwrap_or_default(), goal_met }
             })
-            .map(|(chore_id, _)| chore_id)
             .collect::<Vec<_>>();
+        let talks_finished = talks.len() as u32;
+        let mut finished_topics = talks.iter().map(|talk| talk.topic_id.clone()).collect::<Vec<_>>();
+        finished_topics.sort();
+        finished_topics.dedup();
         chores_met.sort();
         chores_met.dedup();
 
@@ -543,19 +570,31 @@ impl Database {
             answers,
             finished_topics,
             chores_met,
+            talks,
+            spoken_ms: spoken_ms.max(0) as u64,
+            spoken_answers,
         })
     }
 
+    /// One exchange. `spoken_ms` is how long the learner's answer lasted when
+    /// they said it aloud, and `None` when they typed it.
     pub fn persist_turn(
         &self,
         session_id: &str,
         learner: &Message,
         ella: &Message,
+        spoken_ms: Option<u64>,
     ) -> EllaResult<()> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         insert_message(&transaction, session_id, learner)?;
         insert_message(&transaction, session_id, ella)?;
+        if let Some(spoken_ms) = spoken_ms {
+            transaction.execute(
+                "UPDATE messages SET spoken_ms = ?2 WHERE id = ?1",
+                params![learner.id, spoken_ms as i64],
+            )?;
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -1066,6 +1105,17 @@ fn add_curriculum(connection: &Connection) -> EllaResult<()> {
            last_seen TEXT
          );",
     )?;
+    Ok(())
+}
+
+/// How long each spoken answer lasted, for the time the profile and Home say
+/// the learner has spoken. Added the way `age` was, so v0.1.6 can still open
+/// the database: its inserts name their columns and leave this one empty, as
+/// every typed answer and every answer from before it does.
+fn add_spoken_time(connection: &Connection) -> EllaResult<()> {
+    if !has_column(connection, "messages", "spoken_ms")? {
+        connection.execute("ALTER TABLE messages ADD COLUMN spoken_ms INTEGER", [])?;
+    }
     Ok(())
 }
 
@@ -1946,6 +1996,7 @@ mod tests {
                     &id,
                     &message(Speaker::Learner, turn, when),
                     &message(Speaker::Ella, turn, when),
+                    None,
                 )
                 .unwrap();
         }
@@ -2025,8 +2076,8 @@ mod tests {
             }
 
             // Table for table, what v0.1.6 made of an empty file, with only
-            // columns added to the learner and the sessions, and the
-            // curriculum's own table beside them.
+            // columns added to the learner, the sessions and the messages,
+            // and the curriculum's own table beside them.
             let old = tempfile::tempdir().unwrap();
             let old_path = old.path().join("ella.sqlite3");
             let old_schema = {
@@ -2040,7 +2091,7 @@ mod tests {
                 .iter()
                 .filter(|line| !old_schema.contains(line))
                 .collect::<Vec<_>>();
-            assert_eq!(changed.len(), 3, "{changed:?}");
+            assert_eq!(changed.len(), 4, "{changed:?}");
             assert!(
                 changed.iter().any(|line| line.contains("\"learner\"")
                     && line.contains(
@@ -2052,6 +2103,10 @@ mod tests {
             assert!(
                 changed.iter().any(|line| line.contains("\"sessions\"")
                     && line.contains(", kind TEXT, target_skill TEXT, assessment TEXT, level_code TEXT")),
+                "{changed:?}"
+            );
+            assert!(
+                changed.iter().any(|line| line.contains("\"messages\"") && line.contains(", spoken_ms INTEGER")),
                 "{changed:?}"
             );
             assert!(
@@ -2095,17 +2150,19 @@ mod tests {
                 assert_eq!(count(&connection, table), *rows_before, "rows lost from {table}");
             }
             // Every row outside the learner's is exactly as it was: nothing
-            // was rebuilt, only columns added. The sessions gained three,
-            // empty on every talk v0.1.6 had.
+            // was rebuilt, only columns added. The sessions gained four and
+            // the messages one, empty on every talk v0.1.6 had.
             let after = V0_1_6_TABLES
                 .iter()
                 .filter(|table| **table != "learner")
                 .flat_map(|table| {
-                    let columns = if *table == "sessions" {
-                        "id, topic_id, topic_label, status, started_at, completed_at, \
-                         chore_id, character_id, outcome"
-                    } else {
-                        "*"
+                    let columns = match *table {
+                        "sessions" => {
+                            "id, topic_id, topic_label, status, started_at, completed_at, \
+                             chore_id, character_id, outcome"
+                        }
+                        "messages" => "id, session_id, speaker, content, turn_number, created_at",
+                        _ => "*",
                     };
                     rows(&connection, &format!("SELECT {columns} FROM {table} ORDER BY rowid"))
                 })
@@ -2121,14 +2178,23 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(untouched, count(&connection, "sessions"));
+            let unmeasured: i64 = connection
+                .query_row("SELECT COUNT(*) FROM messages WHERE spoken_ms IS NULL", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(unmeasured, count(&connection, "messages"), "no answer v0.1.6 kept has a length");
             let schema_after = schema(&connection);
             let changed = schema_after
                 .iter()
                 .filter(|line| !schema_before.contains(line))
                 .collect::<Vec<_>>();
-            assert_eq!(changed.len(), 3, "the learner and sessions grow, and one table is new: {changed:?}");
+            assert_eq!(
+                changed.len(),
+                4,
+                "the learner, sessions and messages grow, and one table is new: {changed:?}"
+            );
             assert!(changed.iter().any(|line| line.contains("\"learner\"")), "{changed:?}");
             assert!(changed.iter().any(|line| line.contains("\"sessions\"")), "{changed:?}");
+            assert!(changed.iter().any(|line| line.contains("\"messages\"")), "{changed:?}");
             assert!(changed.iter().any(|line| line.contains("\"skill_mastery\"")), "{changed:?}");
             assert_eq!(schema_after.len(), schema_before.len() + 1);
             assert!(learner_is_pinned(&connection).unwrap());
@@ -2287,7 +2353,11 @@ mod tests {
                     chore_id, character_id, outcome
              FROM sessions ORDER BY id",
         );
-        let mut rest = rows(connection, "SELECT * FROM messages ORDER BY id");
+        let mut rest = rows(
+            connection,
+            "SELECT id, session_id, speaker, content, turn_number, created_at
+             FROM messages ORDER BY id",
+        );
         rest.extend(rows(connection, "SELECT * FROM ledger_state ORDER BY session_id"));
         rest.extend(rows(connection, "SELECT * FROM observations ORDER BY id"));
         (sessions, rest)
@@ -2623,6 +2693,7 @@ mod tests {
                 &id,
                 &message(Speaker::Learner, 2, after_midnight),
                 &message(Speaker::Ella, 2, after_midnight),
+                None,
             )
             .unwrap();
         database
@@ -2633,8 +2704,8 @@ mod tests {
         assert_eq!(
             progress.days,
             vec![
-                DayActivity { day: "2026-01-16".into(), talks: 0, answers: 1 },
-                DayActivity { day: "2026-01-15".into(), talks: 1, answers: 1 },
+                DayActivity { day: "2026-01-16".into(), talks: 0, answers: 1, spoken_ms: 0 },
+                DayActivity { day: "2026-01-15".into(), talks: 1, answers: 1, spoken_ms: 0 },
             ]
         );
         assert_eq!(progress.days.iter().map(|day| day.talks).sum::<u32>(), 1);

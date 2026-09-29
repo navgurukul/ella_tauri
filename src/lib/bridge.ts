@@ -267,7 +267,16 @@ const AVATAR_COLOR = /^#[0-9A-Fa-f]{6}$/;
 
 /** No talks, no days: what a signed-out snapshot and a brand-new learner show. */
 function emptyProgress(): LearnerProgress {
-  return { days: [], talks_finished: 0, answers: 0, finished_topics: [], chores_met: [] };
+  return {
+    days: [],
+    talks_finished: 0,
+    answers: 0,
+    finished_topics: [],
+    chores_met: [],
+    talks: [],
+    spoken_ms: 0,
+    spoken_answers: 0,
+  };
 }
 
 /**
@@ -281,13 +290,12 @@ function progressOf(sessions: Session[]): LearnerProgress {
   const on = (key: string) => {
     const known = days.get(key);
     if (known) return known;
-    const fresh = { day: key, talks: 0, answers: 0 };
+    const fresh = { day: key, talks: 0, answers: 0, spoken_ms: 0 };
     days.set(key, fresh);
     return fresh;
   };
   let answers = 0;
-  let finished = 0;
-  const finishedTopics = new Set<string>();
+  const finished: Array<{ topic_id: string; ended: Date }> = [];
 
   for (const session of sessions) {
     const given = session.messages
@@ -299,19 +307,26 @@ function progressOf(sessions: Session[]): LearnerProgress {
     const first = given.reduce((earliest, at) => (at < earliest ? at : earliest));
     on(dayKey(first)).talks += 1;
     if (session.status === "complete") {
-      finished += 1;
-      finishedTopics.add(session.topic_id);
+      const last = session.messages[session.messages.length - 1]?.created_at;
+      finished.push({ topic_id: session.topic_id, ended: new Date(session.completed_at ?? last) });
     }
   }
+  // Stored in the order they started; listed in the order they ended.
+  const ended = finished.map((talk, index) => ({ ...talk, index }));
+  ended.sort((left, right) => left.ended.getTime() - right.ended.getTime() || left.index - right.index);
 
   return {
     // `YYYY-MM-DD` sorts as text in date order.
     days: [...days.values()].sort((left, right) => right.day.localeCompare(left.day)),
-    talks_finished: finished,
+    talks_finished: finished.length,
     answers,
-    finished_topics: [...finishedTopics].sort(),
+    finished_topics: [...new Set(finished.map((talk) => talk.topic_id))].sort(),
     // The preview plays no ledger, so no goal is ever met in it.
     chores_met: [],
+    talks: ended.map((talk) => ({ topic_id: talk.topic_id, day: dayKey(talk.ended), goal_met: false })),
+    // Nor does it hear anyone: its answers are typed.
+    spoken_ms: 0,
+    spoken_answers: 0,
   };
 }
 
