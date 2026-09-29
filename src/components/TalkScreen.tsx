@@ -1,4 +1,4 @@
-import { FormEvent, Fragment, useEffect, useRef, useState } from "react";
+import { FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
 import { LoaderCircle, Send } from "lucide-react";
 import {
@@ -14,12 +14,15 @@ import {
   createSpeechQueue,
   createVoiceCapture,
   speakText,
+  type SpeechMouth,
   type SpeechQueue,
   type SpeechQueueCallbacks,
 } from "../lib/speech";
 import { llog, logServerTimings, markTurnStart, turnElapsed } from "../lib/latency";
+import { VISEMES } from "../lib/visemes";
 import type {
   AudioPayload,
+  PhonemeSpan,
   Session,
   SessionSummary,
   SpokenLine,
@@ -27,8 +30,8 @@ import type {
   WordSpan,
 } from "../types";
 
-/** Anything that can be played with its word timings: a turn, or the opening. */
-type Playback = { audio?: AudioPayload | null; speech_words: WordSpan[] };
+/** Anything that can be played with its timings: a turn, or the opening. */
+type Playback = { audio?: AudioPayload | null; speech_words: WordSpan[]; speech_phonemes?: PhonemeSpan[] };
 
 /** How the last turn went, for the screen reader's status line. */
 type Reaction = "success" | "error" | null;
@@ -127,6 +130,20 @@ export function TalkScreen({
    * never acts on a stale state. */
   const spaceAction = useRef<() => void>(() => undefined);
   const loom = useListenEntrance(entryFrame, state === "listening");
+  // Her mouth follows whichever queue is playing. With none — the system voice
+  // — there is nothing timed to follow, and the design's static "o" stands in.
+  const speechMouth = useMemo<SpeechMouth>(
+    () => ({
+      get timed() {
+        return speechQueue.current ? speechQueue.current.queue.mouth.timed : false;
+      },
+      get started() {
+        return speechQueue.current?.queue.mouth.started ?? false;
+      },
+      shape: () => speechQueue.current?.queue.mouth.shape() ?? VISEMES.rest,
+    }),
+    [],
+  );
 
   const latestElla = [...session.messages].reverse().find((message) => message.speaker === "ella");
 
@@ -168,7 +185,7 @@ export function TalkScreen({
         // Segments arrive in order on one channel; an index already queued is a
         // repeat, and queueing it would say the sentence twice.
         if (segment.index < armed.queue.received) return;
-        armed.queue.push(segment.audio, segment.words);
+        armed.queue.push(segment.audio, segment.words, segment.phonemes);
       })
       .then((stop) => {
         if (dropped) stop();
@@ -371,7 +388,7 @@ export function TalkScreen({
     if (result?.audio) {
       const queue = createSpeechQueue(queueCallbacks(generation, "playback:replay"));
       speechQueue.current = { generation, queue };
-      queue.push(result.audio, result.speech_words);
+      queue.push(result.audio, result.speech_words, result.speech_phonemes);
       queue.finish(1);
       return;
     }
@@ -707,6 +724,7 @@ export function TalkScreen({
             className="ella--stage-talk"
             state={state}
             ears={state === "listening" ? (loom ? "loom" : "listen") : "rest"}
+            speech={speechMouth}
             pokeable
             decorative
           />

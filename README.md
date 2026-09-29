@@ -64,7 +64,9 @@ design's window chrome — title bar and traffic lights — is left to the OS.
   cursor and blink, she flies in when a screen opens, and she squishes when
   poked. On the talk stage she bobs, leans in to listen, bounces as she speaks
   and sways while she thinks; when the mic opens she dives away and comes back
-  from a random side, ears pricked (or looming, if she came from above).
+  from a random side, ears pricked (or looming, if she came from above). Her
+  mouth there follows the sounds she is making, as on Ella Mobile: see
+  [Lip sync](#lip-sync).
 - Onboarding is the five-step flow — welcome, name, age, mic check, placement
   chat — in
   [`src/components/OnboardingFlow.tsx`](src/components/OnboardingFlow.tsx). The
@@ -291,16 +293,61 @@ only reused when it says exactly what the reply says. Nothing the learner hears
 is ever retracted.
 
 The reply carries word timings, so the word being spoken is highlighted and the
-words ahead of it are dimmed. Piper hands back audio without timings, so
-`infrastructure/speech_timing.rs` estimates them from syllables, characters and
-punctuation, anchored to the sentence's exact duration and to the leading and
-trailing silence measured off the PCM. Fitted and measured against real Piper
-phoneme alignments: onset error mean ~70 ms, p90 ~160 ms, roughly three quarters
-of words inside 100 ms. Swapping in exact alignments is a change to that module
-alone — it costs a 68 MB `onnx` dependency, ~30 ms per sentence, and still needs
-this estimator as a fallback, because espeak merges words ("in the" becomes one
-phoneme group) in about 8% of sentences and leaves no safe positional mapping
+words ahead of it are dimmed. `infrastructure/speech_timing.rs` estimates them
+from syllables, characters and punctuation, anchored to the sentence's exact
+duration and to the leading and trailing silence measured off the PCM. Fitted
+and measured against real Piper phoneme alignments: onset error mean ~70 ms, p90
+~160 ms, roughly three quarters of words inside 100 ms. The words stay an
+estimate even though Piper's own sound timings now reach the window (below):
+the one-shot binary reports none, and espeak merges words ("in the" becomes one
+phoneme group) in about 8% of sentences, which leaves no safe positional mapping
 back to the text.
+
+### Lip sync
+
+On the talk stage Ella's mouth takes the shape of each sound she makes, as it
+does on Ella Mobile, and from the same inference as her voice: Piper's duration
+predictor is random, so timings from a second pass would not line up.
+
+- **The timings.** The resident daemon
+  ([`piper_daemon.py`](src-tauri/src/infrastructure/piper_daemon.py)) loads the
+  voice with its sampled token durations marked as a second graph output — the
+  one change `piper.patch_voice_with_alignment` makes, done to the model's bytes
+  in memory, so it needs neither the 68 MB `onnx` package nor a patched copy of
+  the voice, and works for any Piper voice. The NavGurukul voice's session loads
+  in the same ~0.7 s as before, plus ~35 ms to read and patch the model; a
+  voice the patch cannot read loads as it always did, without timings. Every
+  response then
+  carries each token's `[symbol, samples]` — sounds, stress marks, word spaces,
+  Piper's blanks and the sentence's `^`/`$` — and only if they add up to every
+  sample of the audio. `phoneme_spans` in `speech_timing.rs` turns them into
+  `PhonemeSpan`s, on every streamed sentence (`phonemes`) and on the whole reply
+  for replay (`speech_phonemes`).
+- **The mouth.** The window ports Ella Mobile's lip sync:
+  [`alignment.ts`](src/lib/alignment.ts) makes timed cues of the tokens (blanks
+  and stress lead into the next sound, a p shuts on the silent end of the vowel
+  before it, diphthongs keep their glide), [`visemes.ts`](src/lib/visemes.ts) is
+  the palette of 21 speaking poses and silence and the sampler that blends each
+  sound with its neighbours, and [`mouth.ts`](src/lib/mouth.ts) is the one path,
+  with teeth and tongue inside it, that every pose shares. The speech queue
+  keeps one track per reply on the AudioContext clock, so a gap between
+  sentences closes her mouth like any pause, and samples it 20 ms ahead of the
+  sound actually leaving the speakers (`getOutputTimestamp`, which headphones
+  over Bluetooth push a fifth of a second behind `currentTime`).
+- **Her smile.** With lip sync on, the talk stage draws her U smile in the same
+  path, so speech grows out of it in 60 ms and hands back to it over the face's
+  160 ms fade. It fills the stylesheet smile's box (29.4 by 13.5 px against its
+  30 by 13) with Ella Mobile's curve and round line ends.
+- **Where it cannot follow.** The Windows build's `piper.exe` and the system
+  voice report no timings, so there her mouth opens into the design's static
+  "o" while she talks, as it always did.
+
+Running a live check needs piper-tts and a voice:
+
+```bash
+ELLA_PIPER_PYTHON=<python with piper-tts 1.8> ELLA_PIPER_VOICE=<voice.onnx> \
+cargo test --manifest-path src-tauri/Cargo.toml --lib live_piper -- --ignored --nocapture
+```
 
 Environment overrides:
 

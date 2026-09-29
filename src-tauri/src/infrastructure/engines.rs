@@ -18,14 +18,14 @@ use serde_json::{json, Value};
 use crate::{
     domain::{
         AudioPayload, ChoreContext, Confidence, Direction, EngineComponent, EngineStatus, Focus,
-        LedgerSpec, Message, Pitch, PlacementReading, Readiness, Scorable, Speaker, Topic,
-        TurnSignal, TutorRequest, WordSpan,
+        LedgerSpec, Message, PhonemeSpan, Pitch, PlacementReading, Readiness, Scorable, Speaker,
+        Topic, TurnSignal, TutorRequest, WordSpan,
     },
     error::{EllaError, EllaResult},
     infrastructure::{
         audio::raw_pcm_to_wav,
         engine_manager::LlamaServer,
-        speech_timing::{shifted, word_spans},
+        speech_timing::{phoneme_spans, shifted, word_spans},
         stt::{
             CanaryStt, SpeechToTextEngine, SttRouter, Transcription, WindowsStt,
             CANARY_FILE_NAME,
@@ -75,12 +75,30 @@ pub struct SynthesizedAudio {
     pub completion_ms: Option<f64>,
     /// When each word of the whole reply is spoken, from the start of `audio`.
     pub words: Vec<WordSpan>,
+    /// Every token of the whole reply, from the start of `audio`, when the
+    /// voice timed them all. Empty otherwise.
+    pub phonemes: Vec<PhonemeSpan>,
     /// How many sentences this was cut into and pushed to the sink. Zero means
     /// nothing was streamed, so the whole recording still has to be played.
     pub segments: u32,
 }
 
 const PIPER_DAEMON_SOURCE: &str = include_str!("piper_daemon.py");
+
+/// What the resident daemon hands back for one request.
+struct DaemonSpeech {
+    /// Raw 16-bit mono PCM.
+    pcm: Vec<u8>,
+    sample_rate: u32,
+    /// Every token Piper spoke, with how many samples of `pcm` it lasted.
+    /// Empty when the voice could not say, or said something that does not
+    /// add up to the audio.
+    alignment: Vec<(String, u32)>,
+    /// Milliseconds to the response header.
+    first_audio_ms: f64,
+    /// Milliseconds to the last byte of audio.
+    completion_ms: f64,
+}
 
 struct PiperDaemonProcess {
     child: Child,
@@ -167,17 +185,21 @@ impl PiperDaemon {
                 header["error"].as_str().unwrap_or("unknown error")
             )));
         }
+        // The daemon says why when it cannot time its sounds.
+        let lip_sync = match header["untimed"].as_str() {
+            Some(reason) => format!("no sound timings for lip sync: {reason}"),
+            None => "timing every sound for lip sync".into(),
+        };
         eprintln!(
-            "[LATENCY]     tts> resident Piper ready in {:.0}ms (voice load {} ms)",
+            "[LATENCY]     tts> resident Piper ready in {:.0}ms (voice load {} ms, {lip_sync})",
             started.elapsed().as_secs_f64() * 1_000.0,
-            header["ready_ms"]
+            header["ready_ms"],
         );
         *guard = Some(process);
         Ok(())
     }
 
-    /// Returns (raw PCM, sample rate, ms to response header, total ms).
-    fn synthesize(&self, text: &str) -> EllaResult<(Vec<u8>, u32, f64, f64)> {
+    fn synthesize(&self, text: &str) -> EllaResult<DaemonSpeech> {
         let mut last_error = EllaError::Engine("Piper daemon unavailable".into());
         // One respawn retry covers a daemon that died between turns.
         for _attempt in 0..2 {
@@ -203,10 +225,7 @@ impl PiperDaemon {
         Err(last_error)
     }
 
-    fn request(
-        process: &mut PiperDaemonProcess,
-        text: &str,
-    ) -> EllaResult<(Vec<u8>, u32, f64, f64)> {
+    fn request(process: &mut PiperDaemonProcess, text: &str) -> EllaResult<DaemonSpeech> {
         let started = Instant::now();
         let request = serde_json::to_string(&json!({ "text": text }))?;
         process.stdin.write_all(request.as_bytes())?;
@@ -225,14 +244,53 @@ impl PiperDaemon {
         let mut pcm = vec![0_u8; pcm_bytes];
         process.stdout.read_exact(&mut pcm)?;
         let completion_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        let alignment = daemon_alignment(&header, pcm.len() / 2);
         eprintln!(
-            "[LATENCY]     tts> resident Piper synthesized {} PCM bytes (~{:.0} ms of audio) in {:.1}ms (daemon inference {} ms)",
+            "[LATENCY]     tts> resident Piper synthesized {} PCM bytes (~{:.0} ms of audio, {} timed tokens) in {:.1}ms (daemon inference {} ms)",
             pcm.len(),
             pcm.len() as f64 / 2.0 / sample_rate as f64 * 1_000.0,
+            alignment.len(),
             completion_ms,
             header["synth_ms"]
         );
-        Ok((pcm, sample_rate, first_audio_ms, completion_ms))
+        Ok(DaemonSpeech {
+            pcm,
+            sample_rate,
+            alignment,
+            first_audio_ms,
+            completion_ms,
+        })
+    }
+}
+
+/// The daemon's `alignment`: `[symbol, samples]` for every token it spoke.
+///
+/// Only an alignment that accounts for every sample of the audio is kept. One
+/// that does not would put Ella's mouth out of step with her voice for the
+/// rest of the reply, and no mouth movement at all is the better failure.
+fn daemon_alignment(header: &Value, samples: usize) -> Vec<(String, u32)> {
+    let Some(rows) = header["alignment"].as_array() else {
+        return Vec::new();
+    };
+    let tokens: Option<Vec<(String, u32)>> = rows
+        .iter()
+        .map(|row| {
+            let symbol = row.get(0)?.as_str()?;
+            let count = u32::try_from(row.get(1)?.as_u64()?).ok()?;
+            Some((symbol.to_owned(), count))
+        })
+        .collect();
+    let covered = |tokens: &[(String, u32)]| -> usize {
+        tokens.iter().map(|(_, count)| *count as usize).sum()
+    };
+    match tokens {
+        Some(tokens) if covered(&tokens) == samples => tokens,
+        _ => {
+            eprintln!(
+                "[LATENCY]     tts> dropped a sound alignment that does not match its {samples} samples"
+            );
+            Vec::new()
+        }
     }
 }
 
@@ -261,6 +319,9 @@ pub struct SpeechSegment {
     pub ready_ms: f64,
     /// When each word of `text` is spoken, from the start of `audio`.
     pub words: Vec<WordSpan>,
+    /// Every token of `audio`, from its start. Empty when the voice cannot
+    /// time them.
+    pub phonemes: Vec<PhonemeSpan>,
 }
 
 /// Where finished sentences go while the turn is still generating. The engine
@@ -501,13 +562,16 @@ impl SpeechPipeline {
             // relative to the concatenation, so each is shifted by however much
             // audio came before it.
             let mut reply_words: Vec<WordSpan> = Vec::new();
+            // Only kept while every sentence has them: a replay whose mouth
+            // stops in the middle is worse than one that only opens.
+            let mut reply_phonemes: Option<Vec<PhonemeSpan>> = Some(Vec::new());
             for sentence in rx {
                 let text = spoken_form(&sentence);
                 if !text.chars().any(char::is_alphanumeric) {
                     continue;
                 }
-                let (chunk, rate, _, synth_ms) = match daemon.synthesize(&text) {
-                    Ok(result) => result,
+                let speech = match daemon.synthesize(&text) {
+                    Ok(speech) => speech,
                     Err(error) => {
                         // A failed segment must not leave a hole in the middle
                         // of the reply, so stop streaming and let the caller
@@ -529,30 +593,40 @@ impl SpeechPipeline {
                     first_ready_ms = Some(ready_ms);
                 }
                 eprintln!(
-                    "[LATENCY]     tts> segment {segments} ready at +{ready_ms:.1}ms (synth {synth_ms:.1}ms, {} chars): {text:?}",
+                    "[LATENCY]     tts> segment {segments} ready at +{ready_ms:.1}ms (synth {:.1}ms, {} chars): {text:?}",
+                    speech.completion_ms,
                     text.chars().count()
                 );
                 if !spoken.is_empty() {
                     spoken.push(' ');
                 }
                 spoken.push_str(&text);
+                let rate = speech.sample_rate;
                 sample_rate = Some(rate);
-                let words = word_spans(&text, &chunk, rate);
+                let words = word_spans(&text, &speech.pcm, rate);
                 let offset_ms = pcm.len() as f64 / 2.0 * 1_000.0 / rate as f64;
                 reply_words.extend(shifted(&words, offset_ms));
+                let phonemes = phoneme_spans(&speech.alignment, rate, 0);
+                reply_phonemes = reply_phonemes
+                    .filter(|_| !phonemes.is_empty())
+                    .map(|mut reply| {
+                        reply.extend(phoneme_spans(&speech.alignment, rate, pcm.len() / 2));
+                        reply
+                    });
                 if let Some(sink) = sink.as_ref() {
                     sink.segment(SpeechSegment {
                         index: segments,
                         text: text.clone(),
                         audio: AudioPayload {
                             mime_type: "audio/wav".into(),
-                            base64: STANDARD.encode(raw_pcm_to_wav(&chunk, rate, 1)),
+                            base64: STANDARD.encode(raw_pcm_to_wav(&speech.pcm, rate, 1)),
                         },
                         ready_ms,
                         words,
+                        phonemes,
                     });
                 }
-                pcm.extend_from_slice(&chunk);
+                pcm.extend_from_slice(&speech.pcm);
                 segments += 1;
             }
             let audio = sample_rate.map(|rate| SynthesizedAudio {
@@ -563,6 +637,7 @@ impl SpeechPipeline {
                 first_audio_ms: first_ready_ms,
                 completion_ms: Some(started.elapsed().as_secs_f64() * 1_000.0),
                 words: reply_words,
+                phonemes: reply_phonemes.unwrap_or_default(),
                 segments,
             });
             StreamedSpeech {
@@ -2110,6 +2185,7 @@ impl TutorEngine for DemoEngine {
             first_audio_ms: None,
             completion_ms: None,
             words: Vec::new(),
+            phonemes: Vec::new(),
             segments: 0,
         })
     }
@@ -2613,6 +2689,7 @@ impl TutorEngine for LocalEngine {
                 first_audio_ms: None,
                 completion_ms: None,
                 words: Vec::new(),
+                phonemes: Vec::new(),
                 segments: 0,
             });
         }
@@ -2622,10 +2699,10 @@ impl TutorEngine for LocalEngine {
                 text.chars().count()
             );
             match daemon.synthesize(text) {
-                Ok((pcm, sample_rate, first_audio_ms, completion_ms)) => {
-                    let words = word_spans(text, &pcm, sample_rate);
+                Ok(speech) => {
+                    let words = word_spans(text, &speech.pcm, speech.sample_rate);
                     let encode_started = Instant::now();
-                    let base64 = STANDARD.encode(raw_pcm_to_wav(&pcm, sample_rate, 1));
+                    let base64 = STANDARD.encode(raw_pcm_to_wav(&speech.pcm, speech.sample_rate, 1));
                     eprintln!(
                         "[LATENCY]     tts> wav+base64 encode took {:.1}ms ({} chars)",
                         encode_started.elapsed().as_secs_f64() * 1_000.0,
@@ -2636,9 +2713,10 @@ impl TutorEngine for LocalEngine {
                             mime_type: "audio/wav".into(),
                             base64,
                         }),
-                        first_audio_ms: Some(first_audio_ms),
-                        completion_ms: Some(completion_ms),
+                        first_audio_ms: Some(speech.first_audio_ms),
+                        completion_ms: Some(speech.completion_ms),
                         words,
+                        phonemes: phoneme_spans(&speech.alignment, speech.sample_rate, 0),
                         segments: 0,
                     });
                 }
@@ -3065,6 +3143,8 @@ impl LocalEngine {
             first_audio_ms,
             completion_ms: Some(completion_ms),
             words: word_spans(text, &pcm, 22_050),
+            // The standalone binary reports no timings, so her mouth only opens.
+            phonemes: Vec::new(),
             segments: 0,
         })
     }
@@ -4318,6 +4398,7 @@ mod speech_stream_tests {
                 first_audio_ms: Some(1.0),
                 completion_ms: Some(2.0),
                 words: Vec::new(),
+                phonemes: Vec::new(),
                 segments: 2,
             }),
             segments: 2,
@@ -4373,6 +4454,64 @@ mod speech_stream_tests {
         let (audio, played) = aborted.resolve("Hello there. How was your day?");
         assert!(audio.is_none(), "aborted audio must not be reused");
         assert_eq!(played, 0, "the window must not think it has the whole reply");
+    }
+
+    /// The daemon's timings are only believed when they add up to its audio.
+    #[test]
+    fn a_daemon_alignment_is_kept_only_when_it_covers_the_audio() {
+        let header = json!({ "ok": true, "alignment": [["^", 256], ["a", 512], ["$", 256]] });
+        assert_eq!(
+            daemon_alignment(&header, 1_024),
+            vec![("^".to_string(), 256), ("a".to_string(), 512), ("$".to_string(), 256)]
+        );
+        assert!(daemon_alignment(&header, 1_025).is_empty(), "a sample short");
+        assert!(daemon_alignment(&json!({ "alignment": [["a", -1]] }), 0).is_empty());
+        assert!(daemon_alignment(&json!({ "alignment": [[3, 512]] }), 512).is_empty());
+        assert!(daemon_alignment(&json!({ "ok": true }), 1_024).is_empty(), "an untimed voice");
+    }
+
+    /// Piper's own timings, through the real daemon and the sentence stream:
+    ///
+    ///     ELLA_PIPER_PYTHON=<python with piper-tts> ELLA_PIPER_VOICE=<voice.onnx> \
+    ///     cargo test --lib live_piper -- --ignored
+    #[test]
+    #[ignore = "needs piper-tts and a Piper voice"]
+    fn live_piper_times_every_sound_of_a_streamed_reply() {
+        struct Recorder(Mutex<Vec<SpeechSegment>>);
+        impl SpeechSink for Recorder {
+            fn segment(&self, segment: SpeechSegment) {
+                self.0.lock().unwrap().push(segment);
+            }
+        }
+        let python = PathBuf::from(env::var("ELLA_PIPER_PYTHON").expect("ELLA_PIPER_PYTHON"));
+        let voice = PathBuf::from(env::var("ELLA_PIPER_VOICE").expect("ELLA_PIPER_VOICE"));
+        let recorder = Arc::new(Recorder(Mutex::new(Vec::new())));
+        let mut pipeline = SpeechPipeline::start(
+            PiperDaemon::new(python, voice),
+            Some(recorder.clone() as Arc<dyn SpeechSink>),
+            Instant::now(),
+        );
+        pipeline.push("Hello there, my friend! What did you eat for breakfast today?");
+        let reply = pipeline.finish().audio.expect("the reply was synthesized");
+        let segments = recorder.0.lock().unwrap();
+        assert_eq!(segments.len(), 2);
+        let mut offset_ms = 0.0;
+        for segment in segments.iter() {
+            let wav = STANDARD.decode(&segment.audio.base64).unwrap();
+            let clip_ms = (wav.len() - 44) as f64 / 2.0 * 1_000.0 / 22_050.0;
+            let phonemes = &segment.phonemes;
+            assert_eq!(phonemes.first().map(|p| p.phoneme.as_str()), Some("^"));
+            assert_eq!(phonemes.last().map(|p| p.phoneme.as_str()), Some("$"));
+            assert_eq!(phonemes[0].start_ms, 0.0);
+            assert!((phonemes.last().unwrap().end_ms - clip_ms).abs() <= 0.05, "{clip_ms}");
+            for pair in phonemes.windows(2) {
+                assert_eq!(pair[0].end_ms, pair[1].start_ms, "{pair:?}");
+            }
+            offset_ms += clip_ms;
+        }
+        let per_segment: usize = segments.iter().map(|segment| segment.phonemes.len()).sum();
+        assert_eq!(reply.phonemes.len(), per_segment);
+        assert!((reply.phonemes.last().unwrap().end_ms - offset_ms).abs() <= 0.1);
     }
 }
 

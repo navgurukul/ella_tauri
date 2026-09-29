@@ -2,7 +2,9 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { bridge } from "./lib/bridge";
-import type { Assessment, EllaBridge, SpeechSegment, TurnResult } from "./types";
+import { mouthGeometry } from "./lib/mouth";
+import { SMILE } from "./lib/visemes";
+import type { Assessment, EllaBridge, PhonemeSpan, SpeechSegment, TurnResult } from "./types";
 
 /** Read the current conversation prompt without coupling tests to its markup. */
 function promptText(): string {
@@ -259,6 +261,100 @@ describe("Ella learner flow", () => {
       held.mockRestore();
       delete (bridge as EllaBridge).onSpeechSegment;
     }
+  });
+
+  /**
+   * Her mouth follows Piper's own timing of what she says: the opening streams
+   * with its sounds, the talk stage opens her mouth on the vowel, and it goes
+   * back to her smile once she has finished.
+   */
+  it("moves Ella's mouth with the sounds of what she says", async () => {
+    const started: { at: number }[] = [];
+    let clock: { currentTime: number; drain(): void } | undefined;
+    class FakeAudioContext {
+      state = "running";
+      currentTime = 0;
+      destination = {};
+      private ended: (() => void)[] = [];
+      constructor() {
+        clock = this;
+      }
+      async resume() {}
+      async close() {}
+      /** A second of audio per byte of payload. */
+      async decodeAudioData(buffer: ArrayBuffer) {
+        return { duration: buffer.byteLength } as AudioBuffer;
+      }
+      createBufferSource() {
+        const ended = this.ended;
+        return {
+          buffer: null,
+          onended: null as (() => void) | null,
+          connect() {},
+          stop() {},
+          start(at: number) {
+            started.push({ at });
+            ended.push(() => this.onended?.());
+          },
+        };
+      }
+      drain() {
+        for (const end of this.ended.splice(0)) end();
+      }
+    }
+    // Three seconds: a long "a" between the sentence's start and end.
+    const phonemes: PhonemeSpan[] = [
+      { phoneme: "^", start_ms: 0, end_ms: 100 },
+      { phoneme: "a", start_ms: 100, end_ms: 900 },
+      { phoneme: "$", start_ms: 900, end_ms: 3000 },
+    ];
+    const audio = { mime_type: "audio/wav", base64: "AAAA" };
+    let emit: ((segment: SpeechSegment) => void) | undefined;
+    Object.defineProperty(window, "AudioContext", { configurable: true, value: FakeAudioContext });
+    (bridge as EllaBridge).onSpeechSegment = async (handler) => {
+      emit = handler;
+      return () => {
+        emit = undefined;
+      };
+    };
+    (bridge as EllaBridge).speakOpening = async (sessionId) => {
+      // Segments arrive as events after the call, never inside it.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      emit?.({ session_id: sessionId, turn: 0, index: 0, text: "Ah.", audio, ready_ms: 300, words: [], phonemes });
+      return { audio, speech_words: [], speech_phonemes: phonemes, streamed_segments: 1 };
+    };
+    const lips = () => document.querySelector(".ella--stage-talk .ella__lips")?.getAttribute("d") ?? "";
+    const depth = () => {
+      const ys = (lips().match(/-?\d+(\.\d+)?/g) ?? []).map(Number).filter((_, index) => index % 2 === 1);
+      return Math.max(...ys) - Math.min(...ys);
+    };
+
+    try {
+      await onboard("Aarav");
+      fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
+      await screen.findByText("End talk");
+      await waitFor(() => expect(started).toHaveLength(1));
+      expect(document.querySelector(".ella--stage-talk")).toHaveClass("ella--lipsync");
+      expect(lips()).toBe(mouthGeometry(SMILE, 30, 3).path);
+
+      clock!.currentTime = started[0].at + 0.5;
+      await waitFor(() => expect(depth()).toBeGreaterThan(10));
+
+      clock!.drain();
+      await waitFor(() => expect(lips()).toBe(mouthGeometry(SMILE, 30, 3).path));
+    } finally {
+      delete (bridge as EllaBridge).onSpeechSegment;
+      delete (bridge as EllaBridge).speakOpening;
+      Reflect.deleteProperty(window, "AudioContext");
+    }
+  });
+
+  /** The system voice reports no timings, so her mouth cannot follow it. */
+  it("keeps the static open mouth for a voice it cannot time", async () => {
+    await onboard("Aarav");
+    fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
+    await screen.findByText("End talk");
+    await waitFor(() => expect(document.querySelector(".ella--stage-talk")).toHaveClass("ella--speaking", "is-untimed"));
   });
 
   it("moves from home to a real conversation with typed fallback", async () => {
