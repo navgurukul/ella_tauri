@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { CircleCheck, Clock, HardDrive, Hourglass, LoaderCircle, RotateCcw, WifiOff } from "lucide-react";
+import { Hourglass, LoaderCircle, RotateCcw, WifiOff } from "lucide-react";
 import { EllaGlyph, EllaMascot, prefersReducedMotion } from "./EllaMascot";
 import { formatBytes, type SetupState } from "../lib/setup";
 
@@ -70,9 +70,6 @@ export function SetupScreen({
         {/* Keyed by the view, so the words fade in afresh only when the story
             changes, never on a progress tick. */}
         <div className="gate__copy" key={view}>
-          <p className={`eyebrow eyebrow--violet gate__eyebrow ${copy.eyebrow ? "" : "is-empty"}`.trim()}>
-            {copy.eyebrow ?? " "}
-          </p>
           <h1 className="display gate__title">{copy.title}</h1>
           <p className="gate__body">{copy.body}</p>
         </div>
@@ -81,8 +78,6 @@ export function SetupScreen({
         </p>
 
         {copy.card}
-
-        {copy.hint && <p className="gate__hint">{copy.hint}</p>}
 
         {(view === "failed-download" || view === "failed-load") && (
           <>
@@ -106,7 +101,7 @@ export function SetupScreen({
             </button>
             {setup?.message && (
               <details className="gate__details">
-                <summary>Details for a grown-up</summary>
+                <summary>Details</summary>
                 <pre>{setup.message}</pre>
               </details>
             )}
@@ -121,11 +116,6 @@ export function SetupScreen({
         className={`ella--corner-boot ${view === "ready" ? "is-peeking" : ""}`.trim()}
         decorative
       />
-      {view === "ready" && (
-        <p className="ob-bubble gate__bubble" aria-hidden="true">
-          I&rsquo;m ready! Let&rsquo;s talk!
-        </p>
-      )}
     </main>
   );
 }
@@ -168,12 +158,11 @@ export function troubleFor(setup: Pick<SetupState, "trouble" | "message">): Down
   return "network";
 }
 
+/** A title, one short line, and at most a progress card: nothing more. */
 interface Copy {
-  eyebrow: string | null;
   title: string;
   body: string;
   card?: ReactNode;
-  hint?: string;
 }
 
 function copyFor(
@@ -185,82 +174,49 @@ function copyFor(
 ): Copy {
   switch (view) {
     case "boot-error":
-      return {
-        eyebrow: null,
-        title: "Ella could not start",
-        body: "Close Ella and open her again. If it keeps happening, restart the laptop.",
-      };
+      return { title: "Ella could not start", body: "Close Ella and open her again." };
 
     case "waking":
-      if (setup?.fell_back) {
-        return {
-          eyebrow: null,
-          title: "Waking Ella up…",
-          body: "She couldn’t get her update just now, so she’s using the one she has. She’ll try again next time she’s online.",
-        };
-      }
       return {
-        eyebrow: null,
         title: "Waking Ella up…",
-        body:
-          since >= 60_000
-            ? "This can take a few minutes on some laptops. Please keep Ella open."
+        body: setup?.fell_back
+          ? "Her update will wait for next time."
+          : since >= 60_000
+            ? "This can take a few minutes."
             : since >= 15_000
-              ? "She’s a little sleepy today. Almost there!"
+              ? "Almost there…"
               : learnerName
-                ? `Hi ${learnerName}! Ella will be ready in a moment.`
+                ? `Hi ${learnerName}! She’ll be ready in a moment.`
                 : "She’ll be ready in a moment.",
       };
 
     case "downloading":
-      // Someone Ella already knows is downloading again (a new model in an
-      // update, or files that went missing), so it is not their first time.
       return {
-        eyebrow: learnerName ? "Step 1 of 2" : "One-time setup · Step 1 of 2",
         title: "Getting Ella ready",
-        body: learnerName
-          ? `Welcome back, ${learnerName}! Ella needs to download a few things first. Your talks and your streak are safe.`
-          : "Ella is downloading what she needs to talk with you. This happens only once.",
+        // Someone Ella already knows is downloading again: an update.
+        body: learnerName ? `Hi ${learnerName}! Ella needs an update first.` : "This happens only once. Keep Ella open.",
         card: setup && <DownloadCard setup={setup} pace={download} />,
-        hint: "Keep Ella open and stay online. If Ella closes, she’ll carry on from here next time.",
       };
 
     case "loading":
       return {
-        eyebrow: learnerName ? "Step 2 of 2" : "One-time setup · Step 2 of 2",
         title: "Almost ready!",
-        body: learnerName
-          ? "Everything is downloaded. Ella is waking up, which takes longest the first time."
-          : "Everything is downloaded. Ella is waking up for the very first time.",
+        body: since >= 120_000 ? "Still waking up. Please keep Ella open." : "Her first wake-up can take a few minutes.",
         card: (
           <div className="gate-card">
-            <div className="gate-card__head">
-              <span className="gate-card__status">Waking up</span>
-            </div>
             <div className="gate-bar gate-bar--sweep" role="progressbar" aria-label="Ella is waking up">
               <span />
             </div>
-            <p className="gate-card__meta">
-              <Clock size={16} aria-hidden="true" />
-              {since >= 120_000
-                ? "Still working. The first time is the slowest; after today she wakes up much faster."
-                : "This can take a few minutes the first time. Please keep Ella open."}
-            </p>
           </div>
         ),
       };
 
     case "ready":
       return {
-        eyebrow: "All set",
         title: "Ella is ready!",
         body: learnerName ? `Let’s talk, ${learnerName}!` : "Let’s say hello.",
         card: (
           <div className="gate-card">
-            <div className="gate-card__head">
-              <span className="gate-card__status">All done</span>
-              <span className="gate-card__percent gate-card__percent--done">100%</span>
-            </div>
             <div
               className="gate-bar gate-bar--done"
               role="progressbar"
@@ -271,10 +227,6 @@ function copyFor(
             >
               <span style={{ width: "100%" }} />
             </div>
-            <p className="gate-card__meta gate-card__meta--done">
-              <CircleCheck size={16} aria-hidden="true" />
-              {setup?.first_run && !setup.fell_back ? "Next time, she’ll wake up much faster." : "Ella is ready to talk."}
-            </p>
           </div>
         ),
       };
@@ -286,67 +238,33 @@ function copyFor(
       switch (trouble) {
         case "disk":
           return {
-            eyebrow: "Download paused",
             title: "This laptop is full",
             body:
               left > 0
-                ? `Ella needs about ${formatBytes(left + 512 * 1024 ** 2)} more free space to finish.`
-                : "Ella needs more free space to finish downloading.",
+                ? `Free up about ${formatBytes(left + 512 * 1024 ** 2)}, then try again.`
+                : "Free up some space, then try again.",
             card: saved,
-            hint: "Ask a grown-up to free up some space, then press Try again.",
           };
         case "busy":
-          return {
-            eyebrow: "Download paused",
-            title: "The internet is very busy",
-            body: "Lots of laptops may be downloading at once. What Ella has so far is saved.",
-            card: saved,
-            hint: "Wait a few minutes, then press Try again.",
-          };
+          return { title: "The download is busy", body: "Wait a few minutes, then try again.", card: saved };
         case "broken":
-          return {
-            eyebrow: "Download paused",
-            title: "Part of the download got mixed up",
-            body: "It didn’t arrive properly, so Ella will download that part again.",
-            hint: "Press Try again to fix it.",
-          };
+          return { title: "The download got mixed up", body: "Try again to fetch that part once more." };
         case "blocked":
-          return {
-            eyebrow: "Download blocked",
-            title: "This network won’t let Ella download",
-            body: "The internet works, but this network is stopping Ella’s download. What she has so far is saved.",
-            card: saved,
-            hint: "Try another Wi-Fi or a phone hotspot, then press Try again.",
-          };
+          return { title: "This network blocks Ella", body: "Try another Wi-Fi or a phone hotspot.", card: saved };
         case "network":
-          if (!setup || setup.downloaded_bytes <= 0) {
-            return {
-              eyebrow: "Download paused",
-              title: "Ella can’t reach the internet",
-              body: "She needs the internet once, to download what she needs to talk with you.",
-              hint: "Check your Wi-Fi or mobile data, then press Try again.",
-            };
-          }
           return {
-            eyebrow: "Download paused",
-            title: "The download paused",
-            body: "Ella lost the internet for a while. Don’t worry, everything she downloaded is saved.",
+            title: setup && setup.downloaded_bytes > 0 ? "The download paused" : "Ella can’t reach the internet",
+            body: "Check your Wi-Fi, then try again.",
             card: saved,
-            hint: "Check your Wi-Fi or mobile data, then press Try again.",
           };
       }
       break;
     }
 
     case "failed-load":
-      return {
-        eyebrow: null,
-        title: "Ella couldn’t wake up",
-        body: "Something on this laptop stopped her from starting.",
-        hint: "Close other apps, then press Try again. If it keeps happening, restart the laptop.",
-      };
+      return { title: "Ella couldn’t wake up", body: "Close other apps, then try again." };
   }
-  return { eyebrow: null, title: "Waking Ella up…", body: "She’ll be ready in a moment." };
+  return { title: "Waking Ella up…", body: "She’ll be ready in a moment." };
 }
 
 /** Whole percent of the download, held under 100 until it is really done. */
@@ -363,9 +281,7 @@ function DownloadCard({ setup, pace }: { setup: SetupState; pace: DownloadPace }
       <div className="gate-card__head">
         <span className="gate-card__percent">{percent === null ? "…" : `${percent}%`}</span>
         {setup.total_bytes > 0 && (
-          <span className="gate-card__amount">
-            {formatBytes(setup.downloaded_bytes)} of {formatBytes(setup.total_bytes)}
-          </span>
+          <span className="gate-card__amount">{amountOf(setup)}</span>
         )}
       </div>
       <div
@@ -375,11 +291,7 @@ function DownloadCard({ setup, pace }: { setup: SetupState; pace: DownloadPace }
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={percent ?? undefined}
-        aria-valuetext={
-          setup.total_bytes > 0
-            ? `${formatBytes(setup.downloaded_bytes)} of ${formatBytes(setup.total_bytes)}`
-            : undefined
-        }
+        aria-valuetext={setup.total_bytes > 0 ? amountOf(setup) : undefined}
       >
         <span style={{ width: `${percent ?? 0}%` }} />
       </div>
@@ -388,9 +300,9 @@ function DownloadCard({ setup, pace }: { setup: SetupState; pace: DownloadPace }
           <>
             <RotateCcw size={16} aria-hidden="true" />{" "}
             {setup.trouble === "busy"
-              ? "The download is busy right now. Trying again…"
+              ? "Server busy. Trying again…"
               : setup.trouble === "network" || setup.trouble === null
-                ? "The internet dropped. Trying again…"
+                ? "Connection dropped. Trying again…"
                 : "Trying again…"}
           </>
         ) : pace.state === "stalled" ? (
@@ -415,9 +327,7 @@ function SavedCard({ setup }: { setup: SetupState }) {
     <div className="gate-card">
       <div className="gate-card__head">
         <span className="gate-card__percent gate-card__percent--paused">{percent}%</span>
-        <span className="gate-card__amount">
-          {formatBytes(setup.downloaded_bytes)} of {formatBytes(setup.total_bytes)} saved
-        </span>
+        <span className="gate-card__amount">{amountOf(setup)} saved</span>
       </div>
       <div
         className="gate-bar gate-bar--paused"
@@ -429,16 +339,22 @@ function SavedCard({ setup }: { setup: SetupState }) {
       >
         <span style={{ width: `${percent}%` }} />
       </div>
-      <p className="gate-card__meta">
-        <HardDrive size={16} aria-hidden="true" /> Ella will carry on from {percent}%.
-      </p>
     </div>
   );
 }
 
+/** "1.3 of 2.3 GB": the unit once, where both sides share it. */
+export function amountOf(setup: Pick<SetupState, "downloaded_bytes" | "total_bytes">): string {
+  const done = formatBytes(setup.downloaded_bytes);
+  const total = formatBytes(setup.total_bytes);
+  const [doneValue, doneUnit] = done.split(" ");
+  const [, totalUnit] = total.split(" ");
+  return doneUnit === totalUnit ? `${doneValue} of ${total}` : `${done} of ${total}`;
+}
+
 /** "About 12 minutes left", from the recent pace; honest when it cannot tell. */
 export function timeLeft(seconds: number | null): string {
-  if (seconds === null) return "Working out how long this will take…";
+  if (seconds === null) return "Working out the time left…";
   if (seconds < 60) return "Less than a minute left";
   const minutes = Math.ceil(seconds / 60);
   if (minutes < 90) return minutes === 1 ? "About 1 minute left" : `About ${minutes} minutes left`;

@@ -4,7 +4,7 @@ import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 import App from "./App";
 import { bridge } from "./lib/bridge";
-import { SetupScreen, timeLeft, troubleFor, viewFor } from "./components/SetupScreen";
+import { SetupScreen, amountOf, timeLeft, troubleFor, viewFor } from "./components/SetupScreen";
 import type { SetupState } from "./lib/setup";
 import type { ApplyUpdate, UpdateProgress } from "./lib/updates";
 
@@ -101,7 +101,7 @@ describe("the setup screen", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Getting Ella ready" })).toBeInTheDocument();
-    expect(screen.getByText("1.2 GB of 2.3 GB")).toBeInTheDocument();
+    expect(screen.getByText("1.2 of 2.3 GB")).toBeInTheDocument();
     expect(screen.getByRole("progressbar", { name: "Download" })).toHaveAttribute("aria-valuenow", "52");
     expect(letsStart()).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /log in/i })).not.toBeInTheDocument();
@@ -131,7 +131,7 @@ describe("the setup screen", () => {
     backend.setupState = () => progress("loading", 2);
     render(<App />);
 
-    expect(await screen.findByText("Hi Asha! Ella will be ready in a moment.")).toBeInTheDocument();
+    expect(await screen.findByText("Hi Asha! She’ll be ready in a moment.")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Waking Ella up…" })).toBeInTheDocument();
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
     expect(screen.queryByText("Namaste, Asha!")).not.toBeInTheDocument();
@@ -209,7 +209,7 @@ describe("when setup fails", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "The download paused" })).toBeInTheDocument();
-    expect(screen.getByText("1.2 GB of 2.3 GB saved")).toBeInTheDocument();
+    expect(screen.getByText("1.2 of 2.3 GB saved")).toBeInTheDocument();
     const retry = screen.getByRole("button", { name: /try again/i });
     expect(retry).toHaveFocus();
     expect(letsStart()).not.toBeInTheDocument();
@@ -218,7 +218,7 @@ describe("when setup fails", () => {
     fireEvent.click(retry);
     expect(backend.retrySetup).toHaveBeenCalledOnce();
     expect(await screen.findByRole("heading", { name: "Getting Ella ready" })).toBeInTheDocument();
-    expect(screen.getByText("1.2 GB of 2.3 GB")).toBeInTheDocument();
+    expect(screen.getByText("1.2 of 2.3 GB")).toBeInTheDocument();
   });
 
   it("brings the button back when a press is refused", async () => {
@@ -241,7 +241,7 @@ describe("when setup fails", () => {
   it("tells a teacher when the school network is blocking the download", async () => {
     backend.setupState = () => ({ ...stopped(4, "Downloading llm failed with HTTP 403 Forbidden"), trouble: "blocked" });
     render(<App />);
-    expect(await screen.findByRole("heading", { name: "This network won’t let Ella download" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "This network blocks Ella" })).toBeInTheDocument();
     expect(screen.getByText(/phone hotspot/)).toBeInTheDocument();
   });
 
@@ -253,19 +253,18 @@ describe("when setup fails", () => {
 
     await announce(progress("loading", 6, { first_run: true, fell_back: true }));
     expect(screen.getByRole("heading", { name: "Waking Ella up…" })).toBeInTheDocument();
-    expect(screen.getByText(/using the one she has/)).toBeInTheDocument();
+    expect(screen.getByText(/update will wait for next time/)).toBeInTheDocument();
     expect(screen.queryByText(/Everything is downloaded/)).not.toBeInTheDocument();
 
     await announce(progress("ready", 7, { first_run: true, fell_back: true }));
-    expect(screen.getByText("Ella is ready to talk.")).toBeInTheDocument();
-    expect(screen.queryByText(/wake up much faster/)).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Ella is ready!" })).toBeInTheDocument();
   });
 
   it("says when the laptop is full, and how much room Ella needs", async () => {
     backend.setupState = () => stopped(4, "No space left on device (os error 28)");
     render(<App />);
     expect(await screen.findByRole("heading", { name: "This laptop is full" })).toBeInTheDocument();
-    expect(screen.getByText(/Ella needs about 1\.6 GB more free space/)).toBeInTheDocument();
+    expect(screen.getByText(/Free up about 1\.6 GB/)).toBeInTheDocument();
   });
 
   it("explains a model that would not load, with the backend's reason tucked away", async () => {
@@ -273,7 +272,7 @@ describe("when setup fails", () => {
       progress("failed", 4, { failure: "load", message: "Language model: llama-server stopped before it was ready" });
     render(<App />);
     expect(await screen.findByRole("heading", { name: "Ella couldn’t wake up" })).toBeInTheDocument();
-    expect(screen.getByText("Details for a grown-up")).toBeInTheDocument();
+    expect(screen.getByText("Details")).toBeInTheDocument();
     expect(screen.getByText(/llama-server stopped/)).not.toBeVisible();
     expect(letsStart()).not.toBeInTheDocument();
   });
@@ -327,7 +326,7 @@ describe("the time left", () => {
       />
     );
     const { rerender } = render(screenAt(reconnecting));
-    expect(screen.getByText(/The internet dropped/)).toBeInTheDocument();
+    expect(screen.getByText(/Connection dropped/)).toBeInTheDocument();
 
     // The backoff pause, then bytes at 1 MB a second, reported every second.
     act(() => vi.advanceTimersByTime(20_000));
@@ -339,13 +338,18 @@ describe("the time left", () => {
 
     // 1014 MB left at 1 MB/s, not the pause averaged in.
     expect(screen.getByText("About 17 minutes left")).toBeInTheDocument();
-    expect(screen.queryByText(/The internet dropped/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Connection dropped/)).not.toBeInTheDocument();
   });
 });
 
 describe("setup screen wording", () => {
+  it("says the unit once when both sides of the amount share it", () => {
+    expect(amountOf({ downloaded_bytes: 1.34 * GB, total_bytes: 2.31 * GB })).toBe("1.3 of 2.3 GB");
+    expect(amountOf({ downloaded_bytes: 640 * 1024 ** 2, total_bytes: 2.31 * GB })).toBe("640 MB of 2.3 GB");
+  });
+
   it("reads the time left in whole, honest steps", () => {
-    expect(timeLeft(null)).toBe("Working out how long this will take…");
+    expect(timeLeft(null)).toBe("Working out the time left…");
     expect(timeLeft(20)).toBe("Less than a minute left");
     expect(timeLeft(61)).toBe("About 2 minutes left");
     expect(timeLeft(60 * 60)).toBe("About 60 minutes left");

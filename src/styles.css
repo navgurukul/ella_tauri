@@ -1934,7 +1934,7 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 .gate {
   justify-content: flex-start;
   gap: 0;
-  padding: max(48px, calc(50vh - 270px)) 44px 40px;
+  padding: max(56px, calc(50vh - 210px)) 44px 40px;
 }
 .gate__column {
   position: relative;
@@ -1951,9 +1951,6 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   gap: 12px;
   animation: fadeUp 0.22s ease-out;
 }
-/* `.boot p` would otherwise restyle every paragraph the gate borrows. */
-.boot .gate__eyebrow { font-size: 11px; font-weight: 700; color: var(--violet-deep); }
-.gate__eyebrow.is-empty { visibility: hidden; }
 .gate__title {
   font-size: 44px;
   line-height: 1.05;
@@ -1962,8 +1959,8 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 }
 .boot .gate__body {
   max-width: 480px;
-  min-height: 2.9em;
-  font-size: 16.5px;
+  min-height: 1.45em;
+  font-size: 17px;
   line-height: 1.45;
   color: var(--ink-70);
   text-wrap: pretty;
@@ -1996,14 +1993,6 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   font-variant-numeric: tabular-nums;
 }
 .gate-card__percent--paused { color: var(--ink-45); }
-.gate-card__percent--done { color: var(--green-deep); }
-.gate-card__status {
-  font-family: var(--display);
-  font-size: 26px;
-  font-weight: 800;
-  line-height: 40px;
-  color: var(--ink);
-}
 .gate-card__amount {
   font-size: 15px;
   font-weight: 700;
@@ -2023,7 +2012,6 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 .gate-card__meta svg { flex: none; color: var(--violet); }
 .boot .gate-card__meta--waiting { color: var(--ink); }
 .gate-card__meta--waiting svg { color: var(--orange); }
-.gate-card__meta--done svg { color: var(--green-deep); }
 
 .gate-bar {
   position: relative;
@@ -2033,6 +2021,8 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   background: var(--lilac);
   overflow: hidden;
 }
+/* A card that is only a bar: loading, and ready. */
+.gate-card > .gate-bar:only-child { margin-top: 0; }
 .gate-bar > span {
   display: block;
   height: 100%;
@@ -2054,14 +2044,6 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   to { transform: translateX(280%); }
 }
 
-.boot .gate__hint {
-  max-width: 460px;
-  margin-top: 18px;
-  font-size: 14px;
-  line-height: 1.45;
-  /* The state's one instruction: AA contrast on the canvas, not a whisper. */
-  color: var(--ink-70);
-}
 .gate__retry { min-width: 240px; margin-top: 24px; }
 .boot .gate__retry .spin { margin-top: 0; color: inherit; }
 .gate__retry[aria-disabled="true"] { opacity: 0.7; cursor: progress; }
@@ -2095,15 +2077,6 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   word-break: break-word;
 }
 
-/* The corner Ella's bubble, over the corner she peeks up from: above her
-   ears, and clear of the card at the narrowest window. */
-.boot .gate__bubble {
-  right: 40px;
-  bottom: 300px;
-  font-size: 23px;
-  font-weight: 700;
-  color: var(--violet);
-}
 
 @media (prefers-reduced-motion: reduce) {
   .gate-bar--sweep > span { width: 100%; opacity: 0.4; animation: none; transform: none; }
