@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { FormEvent } from "react";
 import { LearnerAvatar } from "./EllaMascot";
 import { MicGlyph } from "./HomeScreen";
+import { LevelCard } from "./LevelCard";
 import { AVATAR_COLORS } from "../lib/avatar";
 import { badges, streak, talkTotals } from "../lib/presentation";
 import type { AppSnapshot, Badge } from "../types";
@@ -13,6 +14,7 @@ export function ProfileScreen({
   onSave,
   onAvatarColor,
   onMicCheck,
+  onLevels,
   onLogOut,
 }: {
   snapshot: AppSnapshot;
@@ -22,6 +24,7 @@ export function ProfileScreen({
   onSave: (name: string, age: number | null) => Promise<boolean>;
   onAvatarColor: (color: string) => void;
   onMicCheck: () => void;
+  onLevels: () => void;
   onLogOut: () => void;
 }) {
   const learner = snapshot.learner;
@@ -132,6 +135,8 @@ export function ProfileScreen({
               <dd className="mono">ANSWERS</dd>
             </div>
           </dl>
+
+          {snapshot.standing && <LevelCard standing={snapshot.standing} onOpen={onLevels} />}
         </div>
 
         <div className="profile-col">

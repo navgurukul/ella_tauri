@@ -1,8 +1,8 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { bridge } from "./lib/bridge";
-import type { EllaBridge, SpeechSegment, TurnResult } from "./types";
+import type { Assessment, EllaBridge, SpeechSegment, TurnResult } from "./types";
 
 /** Read the current conversation prompt without coupling tests to its markup. */
 function promptText(): string {
@@ -702,3 +702,325 @@ function avatarColorIn(container: string): string {
   const avatar = document.querySelector<HTMLElement>(`${container} .learner-avatar`);
   return avatar?.style.getPropertyValue("--avatar") ?? "";
 }
+
+/** Name and age, skip the mic check, and arrive at the placement chat. */
+async function reachPlacement(name: string, age = "14") {
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: /let’s start/i }));
+  fireEvent.change(screen.getByLabelText("What should Ella call you?"), { target: { value: name } });
+  fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+  fireEvent.change(screen.getByLabelText(`And how old are you, ${name}?`), { target: { value: age } });
+  fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+  fireEvent.click(await screen.findByRole("button", { name: /skip this check/i }));
+  await screen.findByRole("button", { name: "Skip" });
+}
+
+/** Types answers into the talk on screen, each once the last has been taken. */
+async function typeAnswers(count: number) {
+  fireEvent.click(await screen.findByRole("button", { name: /type instead/i }));
+  for (let answer = 1; answer <= count; answer += 1) {
+    const field = await screen.findByLabelText("Your answer");
+    await waitFor(() => expect(field).toBeEnabled());
+    fireEvent.change(field, { target: { value: `I spent the morning with my family, part ${answer}` } });
+    fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
+    await waitFor(() => expect(screen.queryByLabelText("Your answer")?.getAttribute("value") ?? "").toBe(""));
+  }
+}
+
+describe("Ella levels", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    // Ella finishes each line at once, so what follows a chat's last turn
+    // comes straight after it rather than after the playback watchdog.
+    vi.spyOn(window.speechSynthesis, "speak").mockImplementation((utterance: SpeechSynthesisUtterance) => {
+      setTimeout(() => utterance.onend?.call(utterance, new Event("end") as SpeechSynthesisEvent), 0);
+    });
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("finds the learner's level in a placement chat and lands home with it", async () => {
+    await reachPlacement("Aarav");
+    expect(screen.getByText("Your level")).toBeInTheDocument();
+    expect(promptText()).toBe("So Aarav, tell me about your day so far!");
+
+    // Without a model the chat runs to the shortest length allowed: five answers.
+    await typeAnswers(5);
+    expect(await screen.findByText("Finding My Voice")).toBeInTheDocument();
+    expect(screen.getByText("That was lovely, Aarav!")).toBeInTheDocument();
+    expect(screen.getByText(/Level 3 of 6 · Step 1/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /let’s go/i }));
+    await screen.findByText("Namaste, Aarav!");
+    const card = screen.getByRole("button", { name: "My level: Finding My Voice. See all levels" });
+    expect(card).toHaveTextContent("Step 1 of 5");
+    expect(card).toHaveTextContent("0% to level 4");
+    expect((await bridge.bootstrap()).standing?.placed).toBe(true);
+  });
+
+  it("goes straight home when the placement chat is skipped, placing nobody", async () => {
+    await reachPlacement("Riya");
+    fireEvent.click(screen.getByRole("button", { name: "Skip" }));
+    await screen.findByText("Namaste, Riya!");
+    expect((await bridge.bootstrap()).standing?.placed).toBe(false);
+    // The skipped chat is closed, not left waiting as an unfinished talk.
+    expect(screen.queryByText("Unfinished talk")).not.toBeInTheDocument();
+  });
+
+  it("lets the learner try again when the level could not be read", async () => {
+    const real = bridge.assessSession.bind(bridge);
+    const failing = vi
+      .spyOn(bridge, "assessSession")
+      .mockRejectedValueOnce(new Error("Ella could not work out your level just now. Try again in a moment."))
+      .mockImplementation(real);
+    try {
+      await reachPlacement("Kabir");
+      await typeAnswers(5);
+      expect(await screen.findByRole("alert")).toHaveTextContent("could not work out your level");
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+      expect(await screen.findByText("Finding My Voice")).toBeInTheDocument();
+    } finally {
+      failing.mockRestore();
+    }
+  });
+
+  it("shows where a talk left the learner, and opens the level map from there", async () => {
+    await onboard("Meera");
+    fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
+    await screen.findByText("End talk");
+    await typeAnswers(1);
+    fireEvent.click(screen.getByRole("button", { name: "End talk" }));
+
+    const level = await screen.findByRole("button", { name: /See all levels/ });
+    expect(level).toHaveTextContent("Level 3");
+    expect(level).toHaveTextContent("Finding My Voice");
+    expect(screen.queryByText("Step complete!")).not.toBeInTheDocument();
+
+    fireEvent.click(level);
+    expect(await screen.findByRole("heading", { name: "Your levels" })).toBeInTheDocument();
+    const path = await screen.findByRole("list", { name: "Levels" });
+    expect(path.querySelectorAll(".level-stop")).toHaveLength(6);
+    expect(path.querySelector(".level-stop.is-current")).toHaveTextContent("You’re here · 0% to level 4");
+    expect(path.querySelector(".level-stop.is-current")).toHaveTextContent("Step 1 of 5 · 0 of 4 skills");
+    const page = screen.getByRole("region", { name: "Level 3: Finding My Voice" });
+    expect(page).toHaveTextContent("Fill every bar to reach level 4.");
+    expect(page.querySelectorAll(".level-step")).toHaveLength(5);
+    expect(page.querySelector(".level-step.is-yours .level-step__skills")?.children).toHaveLength(4);
+
+    // Another level's page is a press away.
+    fireEvent.click(screen.getByRole("button", { name: /Pre-Beginner/ }));
+    expect(screen.getByRole("region", { name: "Level 1: Pre-Beginner" })).toHaveTextContent("You’ve already passed this level.");
+  });
+
+  it("celebrates a talk that finished a step, and one that finished a level", async () => {
+    const standing = {
+      level_number: 3,
+      level_count: 6,
+      level_name: "Finding My Voice",
+      step: 2,
+      step_count: 5,
+      step_title: "Next step",
+      percent: 25,
+      placed: true,
+    };
+    const assess = vi.spyOn(bridge, "assessSession").mockImplementation(async (sessionId) => ({
+      session_id: sessionId,
+      kind: "talk",
+      standing,
+      advanced: "step",
+      skills: [{ label: "Past time words", count: 2 }],
+      scored: true,
+    }));
+    try {
+      await onboard("Ira");
+      fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
+      await screen.findByText("End talk");
+      await typeAnswers(1);
+      fireEvent.click(screen.getByRole("button", { name: "End talk" }));
+      expect(await screen.findByText("Step complete!")).toBeInTheDocument();
+      expect(screen.getByText("On to Step 2 of Finding My Voice.")).toBeInTheDocument();
+      expect(screen.getByText("Past time words")).toBeInTheDocument();
+      expect(screen.getByText("2 talks")).toBeInTheDocument();
+
+      assess.mockImplementation(async (sessionId) => ({
+        session_id: sessionId,
+        kind: "talk",
+        standing: { ...standing, level_number: 4, level_name: "Speaking Freely", step: 1, percent: 0 },
+        advanced: "level",
+        skills: [],
+        scored: true,
+      }));
+      fireEvent.click(screen.getByRole("button", { name: "Back home" }));
+      fireEvent.click(await screen.findByRole("button", { name: /start talking/i }));
+      await screen.findByText("End talk");
+      await typeAnswers(1);
+      fireEvent.click(screen.getByRole("button", { name: "End talk" }));
+      expect(await screen.findByText("Level up!")).toBeInTheDocument();
+      expect(screen.getByText("You’ve reached Speaking Freely.")).toBeInTheDocument();
+    } finally {
+      assess.mockRestore();
+    }
+  });
+
+  it("still celebrates a finished step when the learner left the summary before it was known", async () => {
+    let answer: ((assessment: Assessment) => void) | undefined;
+    const assess = vi.spyOn(bridge, "assessSession").mockImplementation(
+      () => new Promise<Assessment>((resolve) => (answer = resolve)),
+    );
+    try {
+      await onboard("Tara");
+      fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
+      await screen.findByText("End talk");
+      await typeAnswers(1);
+      fireEvent.click(screen.getByRole("button", { name: "End talk" }));
+      expect(await screen.findByText("Ella is looking back over your talk…")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Back home" }));
+      await screen.findByText("Namaste, Tara!");
+
+      const sessionId = assess.mock.calls[0][0];
+      act(() =>
+        answer?.({
+          session_id: sessionId,
+          kind: "talk",
+          standing: {
+            level_number: 3,
+            level_count: 6,
+            level_name: "Finding My Voice",
+            step: 2,
+            step_count: 5,
+            step_title: "Next step",
+            percent: 25,
+            placed: true,
+          },
+          advanced: "step",
+          skills: [],
+          scored: true,
+        }),
+      );
+      expect(await screen.findByText("Step complete!")).toBeInTheDocument();
+      expect(screen.getByText("On to Step 2 of Finding My Voice.")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "See levels" }));
+      expect(await screen.findByRole("heading", { name: "Your levels" })).toBeInTheDocument();
+      expect(screen.queryByText("Step complete!")).not.toBeInTheDocument();
+    } finally {
+      assess.mockRestore();
+    }
+  });
+
+  it("shows a placement picked up again from Home as one, and places nobody when it is ended early", async () => {
+    await bridge.saveLearner("Isha", 13);
+    const open = await bridge.startPlacement();
+    await bridge.sendTextTurn(open.id, "I like cricket");
+
+    render(<App />);
+    await screen.findByText("Namaste, Isha!");
+    fireEvent.click(screen.getByRole("button", { name: /continue talking/i }));
+    await screen.findByText("Your level");
+    fireEvent.click(screen.getByRole("button", { name: "Skip" }));
+
+    const level = await screen.findByRole("button", { name: /See all levels/ });
+    expect(level).toHaveTextContent("Level 3");
+    expect(level).not.toHaveTextContent("Your level");
+    expect((await bridge.bootstrap()).standing?.placed).toBe(false);
+  });
+
+  it("catches up with a level read after the learner skipped the wait for it", async () => {
+    const real = bridge.assessSession.bind(bridge);
+    let release: (() => void) | undefined;
+    const held = vi.spyOn(bridge, "assessSession").mockImplementation(
+      (sessionId) => new Promise((resolve) => (release = () => resolve(real(sessionId)))),
+    );
+    try {
+      await reachPlacement("Om");
+      await typeAnswers(5);
+      expect(await screen.findByText("Ella is finding your level…")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Skip" }));
+      await screen.findByText("Namaste, Om!");
+      fireEvent.click(screen.getByRole("button", { name: /my level: finding my voice/i }));
+      expect(await screen.findByRole("button", { name: "Not sure? Find my level" })).toBeInTheDocument();
+
+      // The reading lands: the app reads where Om stands again, and the map
+      // stops offering a placement he has now had.
+      await act(async () => release?.());
+      await waitFor(() =>
+        expect(screen.queryByRole("button", { name: "Not sure? Find my level" })).not.toBeInTheDocument(),
+      );
+    } finally {
+      held.mockRestore();
+    }
+  });
+
+  it("does not celebrate on the next sign-in for a talk assessed after a log out", async () => {
+    let answer: ((assessment: Assessment) => void) | undefined;
+    const assess = vi.spyOn(bridge, "assessSession").mockImplementation(
+      () => new Promise<Assessment>((resolve) => (answer = resolve)),
+    );
+    try {
+      await onboard("Zara");
+      fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
+      await screen.findByText("End talk");
+      await typeAnswers(1);
+      fireEvent.click(screen.getByRole("button", { name: "End talk" }));
+      await screen.findByText("Ella is looking back over your talk…");
+      fireEvent.click(screen.getByRole("button", { name: /view profile/i }));
+      fireEvent.click(await screen.findByRole("button", { name: "Log out" }));
+      fireEvent.click(await screen.findByRole("button", { name: /log in/i }));
+      fireEvent.click(await screen.findByRole("button", { name: "Take me in" }));
+      await screen.findByText("Namaste, Zara!");
+
+      act(() =>
+        answer?.({
+          session_id: assess.mock.calls[0][0],
+          kind: "talk",
+          standing: {
+            level_number: 3,
+            level_count: 6,
+            level_name: "Finding My Voice",
+            step: 2,
+            step_count: 5,
+            step_title: "Next step",
+            percent: 25,
+            placed: true,
+          },
+          advanced: "step",
+          skills: [],
+          scored: true,
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(screen.queryByText("Step complete!")).not.toBeInTheDocument();
+    } finally {
+      assess.mockRestore();
+    }
+  });
+
+  it("offers a learner who never had a placement the chat from the level map", async () => {
+    await onboard("Dev");
+    fireEvent.click(screen.getByRole("button", { name: /my level: finding my voice/i }));
+    await screen.findByRole("heading", { name: "Your levels" });
+    fireEvent.click(await screen.findByRole("button", { name: "Not sure? Find my level" }));
+
+    // The chat takes the whole window, as a talk does.
+    await screen.findByRole("button", { name: "Skip" });
+    expect(document.querySelector("aside.sidebar")).not.toBeInTheDocument();
+    expect(promptText()).toBe("So Dev, tell me about your day so far!");
+    fireEvent.click(screen.getByRole("button", { name: "Skip" }));
+    expect(await screen.findByRole("heading", { name: "Your levels" })).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Not sure? Find my level" }));
+    await typeAnswers(5);
+    fireEvent.click(await screen.findByRole("button", { name: /let’s go/i }));
+    await screen.findByText("Namaste, Dev!");
+    fireEvent.click(screen.getByRole("button", { name: /my level: finding my voice/i }));
+    await screen.findByRole("list", { name: "Levels" });
+    // Placed now, so there is nothing more to find.
+    expect(screen.queryByRole("button", { name: "Not sure? Find my level" })).not.toBeInTheDocument();
+  });
+
+  it("shows the learner's level on their profile", async () => {
+    await onboard("Neha");
+    fireEvent.click(screen.getByRole("button", { name: /view profile/i }));
+    await screen.findByText("My profile");
+    fireEvent.click(screen.getByRole("button", { name: /my level: finding my voice/i }));
+    expect(await screen.findByRole("heading", { name: "Your levels" })).toBeInTheDocument();
+  });
+});

@@ -3,9 +3,62 @@ use std::{path::Path, sync::Mutex};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
 
 use crate::{
+    curriculum::{self, Position},
     domain::{DayActivity, Learner, LearnerProgress, Message, Session, SessionListItem},
     error::{EllaError, EllaResult},
+    progress::SkillProgress,
 };
+
+/// What a session carries for the curriculum, beside its topic and messages.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionCurriculum {
+    /// `placement` for the placement chat; `None` for every other talk.
+    pub kind: Option<String>,
+    /// The skill the talk quietly aims at, as a `skill_key`.
+    pub target_skill: Option<String>,
+    /// The assessment kept once the talk was judged, as JSON.
+    pub assessment: Option<String>,
+    /// The learner's level when the talk began, which its prompts are
+    /// pitched at to the end, whatever another talk's assessment does
+    /// meanwhile. `None` for talks from before it was kept.
+    pub level_code: Option<String>,
+}
+
+/// The learner's curriculum as an assessment's transaction sees it.
+pub struct CurriculumReader<'a> {
+    connection: &'a Connection,
+}
+
+impl CurriculumReader<'_> {
+    /// Where the learner is; `None` until a placement or a finished step has
+    /// put them somewhere.
+    pub fn position(&self) -> EllaResult<Option<Position>> {
+        read_position(self.connection)
+    }
+
+    /// Whether a placement chat has ever read a level for the learner.
+    pub fn placed(&self) -> EllaResult<bool> {
+        read_placed(self.connection)
+    }
+
+    /// How each of `keys` is going, in the same order; fresh for any never
+    /// scored.
+    pub fn skill_progress(&self, keys: &[String]) -> EllaResult<Vec<SkillProgress>> {
+        read_skill_progress(self.connection, keys)
+    }
+}
+
+/// Everything one assessment writes, all at once.
+pub struct AssessmentWrite {
+    /// Only the skills the talk changed.
+    pub skills: Vec<SkillProgress>,
+    /// Where the learner now stands, when the talk placed or moved them.
+    pub position: Option<Position>,
+    /// A placement chat read a level, whether or not it moved them.
+    pub placed: bool,
+    /// What is kept on the session and answered from then on, as JSON.
+    pub assessment: String,
+}
 
 pub struct Database {
     connection: Mutex<Connection>,
@@ -92,6 +145,7 @@ impl Database {
         // with those columns already in it.
         keep_one_learner(&connection)?;
         add_learner_profile(&connection)?;
+        add_curriculum(&connection)?;
         Ok(())
     }
 
@@ -179,22 +233,162 @@ impl Database {
         Ok(learner)
     }
 
-    pub fn create_session(&self, session: &Session, opening: &Message) -> EllaResult<()> {
+    /// A new talk and its opening line. `kind` is `placement` for the
+    /// placement chat and `None` otherwise; `target_skill` is the skill the
+    /// talk quietly aims at, and `level_code` the level it is pitched at.
+    pub fn create_session(
+        &self,
+        session: &Session,
+        opening: &Message,
+        kind: Option<&str>,
+        target_skill: Option<&str>,
+        level_code: Option<&str>,
+    ) -> EllaResult<()> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         transaction.execute(
-            "INSERT INTO sessions(id, topic_id, topic_label, status, started_at)
-             VALUES(?1, ?2, ?3, 'active', ?4)",
+            "INSERT INTO sessions(
+               id, topic_id, topic_label, status, started_at, kind, target_skill, level_code
+             )
+             VALUES(?1, ?2, ?3, 'active', ?4, ?5, ?6, ?7)",
             params![
                 session.id,
                 session.topic_id,
                 session.topic_label,
-                session.started_at
+                session.started_at,
+                kind,
+                target_skill,
+                level_code
             ],
         )?;
         insert_message(&transaction, &session.id, opening)?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Where the learner is in the curriculum; `None` until a placement or a
+    /// finished step has put them somewhere, or on a laptop nobody has used.
+    pub fn position(&self) -> EllaResult<Option<Position>> {
+        let connection = self.connection()?;
+        read_position(&connection)
+    }
+
+    /// Whether a placement chat has ever read a level for the learner.
+    pub fn placed(&self) -> EllaResult<bool> {
+        let connection = self.connection()?;
+        read_placed(&connection)
+    }
+
+    /// How each of `keys` is going, in the same order; fresh for any never
+    /// scored.
+    pub fn skill_progress(&self, keys: &[String]) -> EllaResult<Vec<SkillProgress>> {
+        let connection = self.connection()?;
+        read_skill_progress(&connection, keys)
+    }
+
+    /// The skills the newest talks aimed at, newest first: the last few are
+    /// held back so one skill is not picked talk after talk.
+    pub fn recent_targets(&self) -> EllaResult<Vec<String>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT target_skill FROM sessions WHERE target_skill IS NOT NULL
+             ORDER BY started_at DESC, rowid DESC LIMIT ?1",
+        )?;
+        let targets = statement
+            .query_map([crate::progress::RECENT_TARGETS as i64], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(targets)
+    }
+
+    pub fn session_curriculum(&self, session_id: &str) -> EllaResult<SessionCurriculum> {
+        self.connection()?
+            .query_row(
+                "SELECT kind, target_skill, assessment, level_code FROM sessions WHERE id = ?1",
+                [session_id],
+                |row| {
+                    Ok(SessionCurriculum {
+                        kind: row.get(0)?,
+                        target_skill: row.get(1)?,
+                        assessment: row.get(2)?,
+                        level_code: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| EllaError::NotFound("That conversation could not be found.".into()))
+    }
+
+    /// Keeps a finished talk's assessment, and everything it changed, in one
+    /// transaction. `decide` works out what to write from the learner's
+    /// curriculum as the transaction sees it, so nothing another talk wrote a
+    /// moment ago is written over.
+    ///
+    /// A talk that already has an assessment keeps it: nothing is written and
+    /// the kept one comes back, so a talk counts once however often it is
+    /// asked about.
+    pub fn commit_assessment(
+        &self,
+        session_id: &str,
+        decide: impl FnOnce(&CurriculumReader<'_>) -> EllaResult<AssessmentWrite>,
+    ) -> EllaResult<String> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let kept: Option<String> = transaction
+            .query_row(
+                "SELECT assessment FROM sessions WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| EllaError::NotFound("That conversation could not be found.".into()))?;
+        if let Some(kept) = kept {
+            return Ok(kept);
+        }
+        let write = decide(&CurriculumReader {
+            connection: &transaction,
+        })?;
+        for skill in &write.skills {
+            transaction.execute(
+                "INSERT INTO skill_mastery(skill, mastery, sightings, topics, misses, last_seen)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(skill) DO UPDATE SET
+                   mastery = excluded.mastery,
+                   sightings = excluded.sightings,
+                   topics = excluded.topics,
+                   misses = excluded.misses,
+                   last_seen = excluded.last_seen",
+                params![
+                    skill.skill,
+                    skill.mastery,
+                    skill.sightings,
+                    serde_json::to_string(&skill.topics)
+                        .map_err(|error| EllaError::Engine(error.to_string()))?,
+                    skill.misses,
+                    skill.last_seen
+                ],
+            )?;
+        }
+        if write.placed {
+            transaction.execute("UPDATE learner SET placed = 1 WHERE id = 1", [])?;
+        }
+        if let Some(position) = &write.position {
+            // `level_name` is v0.1.6's own column; it follows the level so
+            // that release still shows the right one.
+            transaction.execute(
+                "UPDATE learner SET level_code = ?1, step = ?2, level_name = ?3 WHERE id = 1",
+                params![
+                    position.level,
+                    position.step,
+                    curriculum::level_name(&position.level)
+                ],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE sessions SET assessment = ?2 WHERE id = ?1",
+            params![session_id, write.assessment],
+        )?;
+        transaction.commit()?;
+        Ok(write.assessment)
     }
 
     pub fn session(&self, id: &str) -> EllaResult<Session> {
@@ -346,6 +540,7 @@ impl Database {
 
     /// A chore session: the same row as a free conversation plus the chore and
     /// character it belongs to, and — for ledger chores — the opening figure.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_chore_session(
         &self,
         session: &Session,
@@ -353,20 +548,24 @@ impl Database {
         chore_id: &str,
         character_id: &str,
         ledger_opening: Option<i32>,
+        level_code: &str,
         now: &str,
     ) -> EllaResult<()> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         transaction.execute(
-            "INSERT INTO sessions(id, topic_id, topic_label, status, started_at, chore_id, character_id)
-             VALUES(?1, ?2, ?3, 'active', ?4, ?5, ?6)",
+            "INSERT INTO sessions(
+               id, topic_id, topic_label, status, started_at, chore_id, character_id, level_code
+             )
+             VALUES(?1, ?2, ?3, 'active', ?4, ?5, ?6, ?7)",
             params![
                 session.id,
                 session.topic_id,
                 session.topic_label,
                 session.started_at,
                 chore_id,
-                character_id
+                character_id,
+                level_code
             ],
         )?;
         if let Some(current) = ledger_opening {
@@ -509,6 +708,54 @@ fn saved_learner(connection: &Connection) -> rusqlite::Result<Option<(Learner, b
             |row| Ok((learner_from_row(row)?, row.get::<_, bool>(5)?)),
         )
         .optional()
+}
+
+fn read_position(connection: &Connection) -> EllaResult<Option<Position>> {
+    let row = connection
+        .query_row(
+            "SELECT level_code, step FROM learner WHERE id = 1",
+            [],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<i64>>(1)?)),
+        )
+        .optional()?;
+    Ok(row.and_then(|(code, step)| {
+        code.map(|level| Position {
+            level,
+            step: step.unwrap_or(1).clamp(1, i64::from(u8::MAX)) as u8,
+        })
+    }))
+}
+
+fn read_placed(connection: &Connection) -> EllaResult<bool> {
+    Ok(connection
+        .query_row("SELECT placed FROM learner WHERE id = 1", [], |row| row.get::<_, bool>(0))
+        .optional()?
+        .unwrap_or(false))
+}
+
+fn read_skill_progress(connection: &Connection, keys: &[String]) -> EllaResult<Vec<SkillProgress>> {
+    let mut statement = connection.prepare(
+        "SELECT mastery, sightings, topics, misses, last_seen FROM skill_mastery WHERE skill = ?1",
+    )?;
+    keys.iter()
+        .map(|key| {
+            let found = statement
+                .query_row([key], |row| {
+                    Ok(SkillProgress {
+                        skill: key.clone(),
+                        mastery: row.get(0)?,
+                        sightings: row.get(1)?,
+                        // Written by `commit_assessment` alone; anything
+                        // unreadable counts as no topics rather than failing.
+                        topics: serde_json::from_str(&row.get::<_, String>(2)?).unwrap_or_default(),
+                        misses: row.get(3)?,
+                        last_seen: row.get(4)?,
+                    })
+                })
+                .optional()?;
+            Ok(found.unwrap_or_else(|| SkillProgress::fresh(key)))
+        })
+        .collect()
 }
 
 fn learner_from_row(row: &Row<'_>) -> rusqlite::Result<Learner> {
@@ -735,6 +982,54 @@ fn add_learner_profile(connection: &Connection) -> EllaResult<()> {
             connection.execute(ddl, [])?;
         }
     }
+    Ok(())
+}
+
+/// Where the learner is in the curriculum and how each skill is going, as on
+/// the phone. Added the way `age` was, so v0.1.6 can still open the database:
+/// it never reads these columns, and `level_name` keeps the level's name for
+/// it.
+///
+/// - `learner.level_code` and `learner.step` are the learner's place. A null
+///   code means nothing has put them anywhere yet, and they stand at the
+///   curriculum's start. `learner.placed` says whether a placement chat has
+///   read a level for them — a learner can move on through talks without
+///   ever having one, and is still offered it.
+/// - `sessions.kind` marks the placement chat; `target_skill` is the skill a
+///   talk quietly aims at; `level_code` is the level it was pitched at when it
+///   began; `assessment` is what judging the talk decided, kept so it is
+///   decided once.
+/// - `skill_mastery` is one row per skill a talk has been scored on. It is a
+///   new name on purpose: the first releases' garden left a `skill_progress`
+///   table of their own on some laptops, and it stays as it was.
+fn add_curriculum(connection: &Connection) -> EllaResult<()> {
+    for (table, column, ddl) in [
+        ("learner", "level_code", "ALTER TABLE learner ADD COLUMN level_code TEXT"),
+        ("learner", "step", "ALTER TABLE learner ADD COLUMN step INTEGER"),
+        (
+            "learner",
+            "placed",
+            "ALTER TABLE learner ADD COLUMN placed INTEGER NOT NULL DEFAULT 0",
+        ),
+        ("sessions", "kind", "ALTER TABLE sessions ADD COLUMN kind TEXT"),
+        ("sessions", "target_skill", "ALTER TABLE sessions ADD COLUMN target_skill TEXT"),
+        ("sessions", "assessment", "ALTER TABLE sessions ADD COLUMN assessment TEXT"),
+        ("sessions", "level_code", "ALTER TABLE sessions ADD COLUMN level_code TEXT"),
+    ] {
+        if !has_column(connection, table, column)? {
+            connection.execute(ddl, [])?;
+        }
+    }
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS skill_mastery (
+           skill TEXT PRIMARY KEY,
+           mastery REAL NOT NULL DEFAULT 0,
+           sightings INTEGER NOT NULL DEFAULT 0,
+           topics TEXT NOT NULL DEFAULT '[]',
+           misses INTEGER NOT NULL DEFAULT 0,
+           last_seen TEXT
+         );",
+    )?;
     Ok(())
 }
 
@@ -1606,7 +1901,7 @@ mod tests {
             messages: Vec::new(),
         };
         database
-            .create_session(&session, &message(Speaker::Ella, 0, at))
+            .create_session(&session, &message(Speaker::Ella, 0, at), None, None, None)
             .unwrap();
         for turn in 1..=answers {
             let when = at + Duration::seconds(20 * i64::from(turn));
@@ -1643,7 +1938,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_laptop_gets_v0_1_6_tables_plus_two_learner_columns() {
+    fn a_fresh_laptop_gets_v0_1_6_tables_with_only_columns_and_a_table_added() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("ella.sqlite3");
         let database = Database::open(&path).unwrap();
@@ -1676,7 +1971,10 @@ mod tests {
                     "name_spoken",
                     "interests",
                     "avatar_color",
-                    "signed_out"
+                    "signed_out",
+                    "level_code",
+                    "step",
+                    "placed"
                 ]
                 .map(|column| format!("Text({column:?})"))
             );
@@ -1691,7 +1989,8 @@ mod tests {
             }
 
             // Table for table, what v0.1.6 made of an empty file, with only
-            // the two learner columns added.
+            // columns added to the learner and the sessions, and the
+            // curriculum's own table beside them.
             let old = tempfile::tempdir().unwrap();
             let old_path = old.path().join("ella.sqlite3");
             let old_schema = {
@@ -1705,12 +2004,25 @@ mod tests {
                 .iter()
                 .filter(|line| !old_schema.contains(line))
                 .collect::<Vec<_>>();
-            assert_eq!(changed.len(), 1, "{changed:?}");
+            assert_eq!(changed.len(), 3, "{changed:?}");
             assert!(
-                changed[0].contains("\"learner\"")
-                    && changed[0].contains(", avatar_color TEXT, signed_out INTEGER NOT NULL DEFAULT 0"),
+                changed.iter().any(|line| line.contains("\"learner\"")
+                    && line.contains(
+                        ", avatar_color TEXT, signed_out INTEGER NOT NULL DEFAULT 0, \
+                         level_code TEXT, step INTEGER, placed INTEGER NOT NULL DEFAULT 0"
+                    )),
                 "{changed:?}"
             );
+            assert!(
+                changed.iter().any(|line| line.contains("\"sessions\"")
+                    && line.contains(", kind TEXT, target_skill TEXT, assessment TEXT, level_code TEXT")),
+                "{changed:?}"
+            );
+            assert!(
+                changed.iter().any(|line| line.contains("\"skill_mastery\"")),
+                "{changed:?}"
+            );
+            assert_eq!(fresh.len(), old_schema.len() + 1, "one table added, none taken away");
         }
         assert_eq!(database.learner().unwrap(), None);
         assert_eq!(database.signed_in_learner().unwrap(), None);
@@ -1747,21 +2059,42 @@ mod tests {
                 assert_eq!(count(&connection, table), *rows_before, "rows lost from {table}");
             }
             // Every row outside the learner's is exactly as it was: nothing
-            // was rebuilt, only two columns added.
+            // was rebuilt, only columns added. The sessions gained three,
+            // empty on every talk v0.1.6 had.
             let after = V0_1_6_TABLES
                 .iter()
                 .filter(|table| **table != "learner")
-                .flat_map(|table| rows(&connection, &format!("SELECT * FROM {table} ORDER BY rowid")))
+                .flat_map(|table| {
+                    let columns = if *table == "sessions" {
+                        "id, topic_id, topic_label, status, started_at, completed_at, \
+                         chore_id, character_id, outcome"
+                    } else {
+                        "*"
+                    };
+                    rows(&connection, &format!("SELECT {columns} FROM {table} ORDER BY rowid"))
+                })
                 .collect::<Vec<_>>();
             assert_eq!(after, before);
+            let untouched: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sessions
+                     WHERE kind IS NULL AND target_skill IS NULL AND assessment IS NULL
+                       AND level_code IS NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(untouched, count(&connection, "sessions"));
             let schema_after = schema(&connection);
             let changed = schema_after
                 .iter()
                 .filter(|line| !schema_before.contains(line))
                 .collect::<Vec<_>>();
-            assert_eq!(changed.len(), 1, "only the learner table changes: {changed:?}");
-            assert!(changed[0].contains("\"learner\""), "{changed:?}");
-            assert_eq!(schema_after.len(), schema_before.len());
+            assert_eq!(changed.len(), 3, "the learner and sessions grow, and one table is new: {changed:?}");
+            assert!(changed.iter().any(|line| line.contains("\"learner\"")), "{changed:?}");
+            assert!(changed.iter().any(|line| line.contains("\"sessions\"")), "{changed:?}");
+            assert!(changed.iter().any(|line| line.contains("\"skill_mastery\"")), "{changed:?}");
+            assert_eq!(schema_after.len(), schema_before.len() + 1);
             assert!(learner_is_pinned(&connection).unwrap());
             assert!(!has_table(&connection, "device_state").unwrap());
             assert_sound(&connection);
@@ -1985,8 +2318,8 @@ mod tests {
         assert_eq!(database.ledger_state("a2").unwrap(), Some((400, true)));
     }
 
-    const RAVI_SIGNED_IN: &str = "Integer(1) | Text(\"Ravi\") | Integer(20) | Text(\"Morning Meadow\") | Text(\"2026-09-21T08:00:00+00:00\") | Null | Text(\"films\") | Text(\"#FF8800\") | Integer(0)";
-    const ASHA_SIGNED_OUT: &str = "Integer(1) | Text(\"Asha\") | Integer(14) | Text(\"Morning Meadow\") | Text(\"2026-09-20T08:00:00+00:00\") | Text(\"AH-sha\") | Text(\"cricket\") | Text(\"#7C5CFF\") | Integer(1)";
+    const RAVI_SIGNED_IN: &str = "Integer(1) | Text(\"Ravi\") | Integer(20) | Text(\"Morning Meadow\") | Text(\"2026-09-21T08:00:00+00:00\") | Null | Text(\"films\") | Text(\"#FF8800\") | Integer(0) | Null | Null | Integer(0)";
+    const ASHA_SIGNED_OUT: &str = "Integer(1) | Text(\"Asha\") | Integer(14) | Text(\"Morning Meadow\") | Text(\"2026-09-20T08:00:00+00:00\") | Text(\"AH-sha\") | Text(\"cricket\") | Text(\"#7C5CFF\") | Integer(1) | Null | Null | Integer(0)";
 
     #[test]
     fn the_multi_learner_layout_folds_back_into_whoever_was_signed_in() {
@@ -2290,7 +2623,9 @@ mod tests {
             .filter(|line| !after.contains(line))
             .collect::<Vec<_>>();
         assert_eq!(changed.len(), 1, "only the learner row changes: {changed:?}");
-        assert!(changed[0].starts_with("learner:") && changed[0].ends_with("Integer(0)"));
+        // `signed_out` was 0, followed by the level, the step and the placement
+        // nothing has set yet.
+        assert!(changed[0].starts_with("learner:") && changed[0].ends_with("Integer(0) | Null | Null | Integer(0)"));
         assert_eq!(after.len(), before.len(), "nothing was deleted");
         assert_eq!(database.session(&session).unwrap().messages.len(), 5);
 

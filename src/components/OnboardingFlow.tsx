@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { LoaderCircle } from "lucide-react";
-import { EllaMascot, LearnerAvatar, VoiceMeter, type EllaState } from "./EllaMascot";
+import { EllaMascot, LearnerAvatar, VoiceMeter } from "./EllaMascot";
 import { MicGlyph } from "./HomeScreen";
+import { PlacementTalk } from "./PlacementTalk";
 import { avatarColorFor } from "../lib/avatar";
-import { createVoiceCapture, type VoiceCaptureResult } from "../lib/speech";
+import { createVoiceCapture } from "../lib/speech";
 import type { LearnerProfile } from "../types";
 
 /** `welcome-back` is Log in's own step, off to the side of the five in order. */
@@ -21,7 +22,7 @@ export function OnboardingFlow({
   savedLearner,
   onSaveLearner,
   onLogIn,
-  onPlacement,
+  onPlacementRead,
   onDone,
 }: {
   busy: boolean;
@@ -32,8 +33,11 @@ export function OnboardingFlow({
   onSaveLearner: (name: string, age: number | null) => Promise<boolean>;
   /** Signs the saved learner back in; resolves false when that was refused. */
   onLogIn: () => Promise<boolean>;
-  /** Runs the recorded first answer as a real conversation turn. */
-  onPlacement: (capture: VoiceCaptureResult) => Promise<void>;
+  /** The placement's level has been read — possibly after the learner
+   * skipped past the wait for it. */
+  onPlacementRead: () => void;
+  /** Onboarding is over: the placement found a level or was skipped, or a
+   * returning learner logged in. */
   onDone: () => void;
 }) {
   const [step, setStep] = useState<ObStep>("welcome");
@@ -137,12 +141,7 @@ export function OnboardingFlow({
       )}
       {step === "miccheck" && <MicCheckStep onNext={next} />}
       {step === "placement" && (
-        <PlacementStep
-          greetName={greetName}
-          busy={busy}
-          onPlacement={onPlacement}
-          onDone={onDone}
-        />
+        <PlacementTalk greetName={greetName} onRead={onPlacementRead} onDone={onDone} />
       )}
 
       {error && <p className="ob__error inline-error">{error}</p>}
@@ -496,132 +495,6 @@ function MicCheckStep({
             {skipLabel}
           </button>
         )}
-      </div>
-    </div>
-  );
-}
-
-type PlacementCall = "prompt" | "listening" | "working" | "done";
-
-const CALL_HINT: Record<PlacementCall, string> = {
-  prompt: "Click to speak",
-  listening: "Listening… click when you finish",
-  working: "Ella is listening back…",
-  done: "Talk finished",
-};
-
-/**
- * The first talk. Ella asks one open question and the recorded answer runs
- * through the ordinary pipeline as a real conversation, so the learner arrives
- * home having already spoken once. Skipping, or having no microphone, simply
- * moves on. Nothing is graded: the proficiency level this step used to
- * announce left with the garden and is being rethought.
- */
-function PlacementStep({
-  greetName,
-  busy,
-  onPlacement,
-  onDone,
-}: {
-  greetName: string;
-  busy: boolean;
-  onPlacement: (capture: VoiceCaptureResult) => Promise<void>;
-  onDone: () => void;
-}) {
-  const [call, setCall] = useState<PlacementCall>("prompt");
-  const voice = useRef(createVoiceCapture());
-
-  useEffect(
-    () => () => {
-      void voice.current.cancel();
-    },
-    [],
-  );
-
-  async function tap() {
-    if (call === "done" || call === "working") return;
-    if (call === "listening") {
-      setCall("working");
-      const capture = await voice.current.stop();
-      await onPlacement(capture);
-      setCall("done");
-      return;
-    }
-    try {
-      await voice.current.start(() => undefined, () => undefined);
-      setCall("listening");
-    } catch {
-      // No microphone here — the answer is optional, so move on gracefully.
-      setCall("done");
-    }
-  }
-
-  const ellaState: EllaState = call === "working" ? "thinking" : "resting";
-
-  return (
-    <div className="screen screen--talk ob-placement" data-screen="onboarding-placement">
-      <header className="talk-head">
-        <span className="pill pill--white">First talk</span>
-        <button className="btn btn--quiet" onClick={onDone} disabled={busy || call === "working"}>
-          Skip
-        </button>
-      </header>
-
-      <div className="talk-stage">
-        {call === "done" ? (
-          <>
-            <p className="talk-prompt">That was lovely, {greetName}!</p>
-            <button className="btn btn--green ob-placement__go" onClick={onDone} disabled={busy}>
-              Let&rsquo;s go!
-            </button>
-          </>
-        ) : call === "working" ? (
-          <p className="talk-prompt" aria-live="polite">
-            <LoaderCircle className="spin" aria-hidden="true" /> Ella is listening back…
-          </p>
-        ) : (
-          <p className="talk-prompt">
-            So {greetName}, tell me about <em className="underline-pink">your day</em> so far!
-          </p>
-        )}
-      </div>
-
-      <div className="talk-dock">
-        <EllaMascot variant="conversation" className="ella--stage-talk" state={ellaState}>
-          <div className="mic-stack">
-            <div className="mic-wrap">
-              {call === "listening" && (
-                <>
-                  <span className="mic-pulse" />
-                  <span className="mic-pulse mic-pulse--delayed" />
-                </>
-              )}
-              <button
-                className={`mic ${call === "done" ? "is-done" : ""}`.trim()}
-                disabled={call === "working" || call === "done"}
-                onClick={() => void tap()}
-                aria-label={
-                  call === "done"
-                    ? "First talk finished"
-                    : call === "listening"
-                      ? "Stop and finish"
-                      : "Start speaking"
-                }
-              >
-                {call === "done" ? (
-                  <svg className="mic__check" viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M20 6L9 17L4 12" />
-                  </svg>
-                ) : call === "working" ? (
-                  <LoaderCircle className="spin" size={30} aria-hidden="true" />
-                ) : (
-                  <MicGlyph />
-                )}
-              </button>
-            </div>
-            <p className="mic-hint mic-hint--soft">{CALL_HINT[call]}</p>
-          </div>
-        </EllaMascot>
       </div>
     </div>
   );

@@ -1,34 +1,55 @@
 import { useEffect, useRef, useState } from "react";
 import { CircleCheck, LoaderCircle, X } from "lucide-react";
 import { CastScreen } from "./components/CastScreen";
-import { EllaGlyph, EllaMascot } from "./components/EllaMascot";
 import { HomeScreen } from "./components/HomeScreen";
+import { LevelsScreen } from "./components/LevelsScreen";
 import { MicRecheck, OnboardingFlow } from "./components/OnboardingFlow";
+import { PlacementTalk } from "./components/PlacementTalk";
 import { ProfileScreen } from "./components/ProfileScreen";
+import { SetupScreen } from "./components/SetupScreen";
 import { Sidebar, type NavKey } from "./components/Sidebar";
 import { SummaryScreen } from "./components/SummaryScreen";
 import { TalkScreen } from "./components/TalkScreen";
 import { avatarColorFor, forgetLegacyAvatarColor, legacyAvatarColor } from "./lib/avatar";
 import { bridge } from "./lib/bridge";
 import { recommendedTopicId, streak } from "./lib/presentation";
-import { formatBytes, useSetupState, type SetupState } from "./lib/setup";
+import { useSetup } from "./lib/setup";
 import {
   downloadUpdateInBackground,
   installExitsTheApp,
   type ApplyUpdate,
   type UpdateProgress,
 } from "./lib/updates";
-import type { VoiceCaptureResult } from "./lib/speech";
-import type { AppSnapshot, CastGoal, Session, SessionSummary, Topic } from "./types";
+import { levelTone } from "./lib/curriculum";
+import type { AppSnapshot, Assessment, CastGoal, Session, SessionSummary, Topic } from "./types";
 
-/** `miccheck` is the mic check opened again from the profile's settings. */
-type Screen = "onboarding" | "home" | "cast" | "profile" | "miccheck" | "talk" | "summary";
+/** The assessment of one finished talk, as far as it has got. */
+interface Assessing {
+  sessionId: string;
+  result: Assessment | null;
+  error: string | null;
+}
+
+/** `miccheck` is the mic check opened again from the profile's settings;
+ * `placement` is the placement chat opened from the level map by a learner
+ * who never had one. */
+type Screen =
+  | "onboarding"
+  | "home"
+  | "cast"
+  | "profile"
+  | "levels"
+  | "miccheck"
+  | "placement"
+  | "talk"
+  | "summary";
 
 /** Which nav item each screen that shows the sidebar lights up. */
 const NAV_FOR: Partial<Record<Screen, NavKey | null>> = {
   home: "home",
   cast: "cast",
   profile: null,
+  levels: null,
   summary: "home",
 };
 
@@ -37,15 +58,28 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("onboarding");
   const [session, setSession] = useState<Session | null>(null);
   const [summary, setSummary] = useState<SessionSummary | null>(null);
+  // What the last finished talk did for the learner. Asked for here rather
+  // than by the summary, so leaving the summary before the model has read
+  // the talk loses nothing: the snapshot is re-read whenever the answer
+  // lands, and a step or level it finished is still celebrated (`movedOn`).
+  const [assessing, setAssessing] = useState<Assessing | null>(null);
+  const [movedOn, setMovedOn] = useState<Assessment | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [update, setUpdate] = useState<UpdateProgress | null>(null);
   const [applyUpdate, setApplyUpdate] = useState<ApplyUpdate | null>(null);
-  const setup = useSetupState();
+  const setup = useSetup();
+  // Set once the setup screen lets the learner in, and never unset: the gate
+  // is for the start of a launch, and must never close again over a talk.
+  const [opened, setOpened] = useState(false);
+  const gated = !opened;
   // Bumped by every change this window makes to the learner (a save, an
   // avatar colour, a log in or out), so a background re-read that started
   // before one cannot put the older state back on screen.
   const learnerEdits = useRef(0);
+  // Bumped by every log out, so an assessment still on its way from the
+  // learner who left cannot celebrate on the next sign-in.
+  const signIns = useRef(0);
   // The avatar colour the backend last confirmed, which is what a refused
   // save goes back to — not whatever an earlier, unsaved press showed.
   const savedAvatarColor = useRef<string | null>(null);
@@ -58,11 +92,13 @@ export default function App() {
     });
   }, []);
 
+  // No Restart while the gate is up: a restart in the middle of the model
+  // load is the one moment it costs the learner the most, and closing Ella
+  // installs the update just the same.
   const updateToast = (
     <UpdateToast
       progress={update}
-      raised={setup !== null && setup.stage !== "ready"}
-      onRestart={applyUpdate ? () => void applyUpdate() : undefined}
+      onRestart={applyUpdate && !gated ? () => void applyUpdate() : undefined}
       onDismiss={() => setUpdate(null)}
     />
   );
@@ -165,33 +201,13 @@ export default function App() {
   }
 
   /**
-   * The onboarding first answer runs through the ordinary pipeline: a real
-   * session, a real voice turn, a real completion. Anything that fails along
-   * the way (no speech recognised, engines still warming) is swallowed —
-   * nothing is graded on it, so onboarding just carries on. A talk that
-   * failed before any answer was heard is closed but counts for nothing: the
-   * backend only counts talks with something said in them.
+   * The placement chat is over: it read a level, or it was skipped. Either way
+   * Home comes next, and the backend's own figures come with it — the new
+   * level, and the streak and totals with the chat in them if it counted.
    */
-  async function handlePlacement(capture: VoiceCaptureResult): Promise<void> {
-    if (!snapshot || capture.samples.length === 0) return;
-    let startedId: string | null = null;
-    try {
-      const created = await bridge.startSession(recommendedTopicId(snapshot));
-      startedId = created.id;
-      await bridge.sendVoiceTurn({
-        sessionId: created.id,
-        samples: capture.samples,
-        sampleRate: capture.sampleRate,
-        browserTranscript: capture.transcript,
-      });
-      await bridge.completeSession(created.id);
-    } catch {
-      // Never leave a half-open placement talk waiting on the home screen.
-      if (startedId) await bridge.completeSession(startedId).catch(() => undefined);
-    }
-    // Home opens on the backend's own streak and totals, with this talk in
-    // them if it counted.
-    await refreshSnapshot();
+  function handlePlacementDone() {
+    setScreen("home");
+    void refreshSnapshot();
   }
 
   async function handleStart(topic: Topic) {
@@ -258,6 +274,36 @@ export default function App() {
     });
     setScreen("summary");
     void refreshSnapshot();
+    assess(result.session_id);
+  }
+
+  /**
+   * Asks what a finished talk did: the skills it counted and any step or
+   * level it finished. The first ask can take a while, as the model reads the
+   * talk; the backend keeps the answer, so asking again is instant and counts
+   * nothing twice. When it lands the snapshot is read again, wherever the
+   * learner is by then, and if they have left the summary a step or level it
+   * finished is celebrated where they are.
+   */
+  function assess(sessionId: string) {
+    const signIn = signIns.current;
+    setAssessing({ sessionId, result: null, error: null });
+    bridge
+      .assessSession(sessionId)
+      .then((result) => {
+        if (signIns.current !== signIn) return;
+        setAssessing((current) => (current?.sessionId === sessionId ? { ...current, result } : current));
+        // Kept until something shows it: the summary, if it is still up,
+        // or else the toast wherever the learner has gone.
+        if (result.advanced) setMovedOn(result);
+        void refreshSnapshot();
+      })
+      .catch((reason: unknown) => {
+        if (signIns.current !== signIn) return;
+        setAssessing((current) =>
+          current?.sessionId === sessionId ? { ...current, error: errorMessage(reason) } : current,
+        );
+      });
   }
 
   /**
@@ -269,9 +315,12 @@ export default function App() {
   async function handleLogOut() {
     await run(async () => {
       learnerEdits.current += 1;
+      signIns.current += 1;
       adopt(await bridge.logOut());
       setSession(null);
       setSummary(null);
+      setAssessing(null);
+      setMovedOn(null);
       setScreen("onboarding");
     });
   }
@@ -308,7 +357,28 @@ export default function App() {
     setSnapshot(fresh);
   }
 
-  if (!snapshot) return <BootScreen error={error} />;
+  // Nobody gets in until Ella can talk: a name typed or a talk started before
+  // then would only meet "Ella is still downloading". The screen stands in
+  // front of everything, onboarding and home alike, from the first frame
+  // until setup says ready — one element throughout, so nothing behind it
+  // ever flashes and its Ella only arrives once.
+  if (gated || !snapshot) {
+    const saved = snapshot?.learner ?? snapshot?.saved_learner ?? null;
+    return (
+      <>
+        <SetupScreen
+          setup={setup.state}
+          booted={snapshot !== null}
+          bootError={snapshot ? null : error}
+          learnerName={saved?.name ?? null}
+          retrying={setup.retrying}
+          onRetry={setup.retry}
+          onOpen={() => setOpened(true)}
+        />
+        {updateToast}
+      </>
+    );
+  }
 
   const avatarColor = avatarColorFor(snapshot.learner);
 
@@ -316,7 +386,6 @@ export default function App() {
     return (
       <>
         <MicRecheck onExit={() => setScreen("profile")} />
-        <SetupBanner setup={setup} />
         {updateToast}
       </>
     );
@@ -331,10 +400,9 @@ export default function App() {
           savedLearner={snapshot.saved_learner ?? null}
           onSaveLearner={handleSaveLearner}
           onLogIn={handleLogIn}
-          onPlacement={handlePlacement}
-          onDone={() => setScreen("home")}
+          onPlacementRead={() => void refreshSnapshot()}
+          onDone={handlePlacementDone}
         />
-        <SetupBanner setup={setup} />
         {updateToast}
         {busy && <BusyVeil />}
       </>
@@ -342,9 +410,11 @@ export default function App() {
   }
 
   const nav = NAV_FOR[screen];
+  const immersive = screen === "talk" || screen === "placement";
+  const openLevels = () => setScreen("levels");
 
   return (
-    <div className={`shell ${screen === "talk" ? "shell--immersive" : ""}`.trim()}>
+    <div className={`shell ${immersive ? "shell--immersive" : ""}`.trim()}>
       {nav !== undefined && (
         <Sidebar
           active={nav}
@@ -362,6 +432,7 @@ export default function App() {
             busy={busy}
             onStart={(topic) => void handleStart(topic)}
             onResume={(sessionId) => void handleResume(sessionId)}
+            onLevels={openLevels}
           />
         )}
         {screen === "cast" && (
@@ -379,22 +450,64 @@ export default function App() {
             onSave={handleSaveLearner}
             onAvatarColor={handleAvatarColor}
             onMicCheck={() => setScreen("miccheck")}
+            onLevels={openLevels}
             onLogOut={() => void handleLogOut()}
+          />
+        )}
+        {screen === "levels" && (
+          <LevelsScreen
+            standing={snapshot.standing ?? null}
+            busy={busy}
+            onPractise={() => void handleStartTopic(null)}
+            onFindLevel={() => setScreen("placement")}
+          />
+        )}
+        {screen === "placement" && (
+          <PlacementTalk
+            greetName={snapshot.learner?.name ?? "friend"}
+            onRead={() => void refreshSnapshot()}
+            onDone={(placed) => {
+              // Placed, the new level is the next thing to see; skipped, back
+              // to where they asked for it.
+              setScreen(placed ? "home" : "levels");
+              void refreshSnapshot();
+            }}
           />
         )}
         {screen === "talk" && session && (
           <TalkScreen
             key={session.id}
             session={session}
+            // A placement chat left open and picked up again from Home.
+            variant={session.topic_id === "placement" ? "placement" : "talk"}
             onSessionChange={setSession}
             onComplete={handleComplete}
           />
         )}
         {screen === "summary" && summary && (
-          <SummaryScreen summary={summary} onHome={() => setScreen("home")} />
+          <SummaryScreen
+            summary={summary}
+            assessment={assessing?.sessionId === summary.session_id ? assessing.result : null}
+            assessError={assessing?.sessionId === summary.session_id ? assessing.error : null}
+            onRetry={() => assess(summary.session_id)}
+            onCelebrated={() =>
+              setMovedOn((current) => (current?.session_id === summary.session_id ? null : current))
+            }
+            onHome={() => setScreen("home")}
+            onLevels={openLevels}
+          />
         )}
       </main>
-      <SetupBanner setup={setup} />
+      {movedOn && !(screen === "summary" && summary?.session_id === movedOn.session_id) && (
+        <MovedOnToast
+          assessment={movedOn}
+          onLevels={() => {
+            setMovedOn(null);
+            openLevels();
+          }}
+          onClose={() => setMovedOn(null)}
+        />
+      )}
       {updateToast}
       {busy && <BusyVeil />}
       {error && <Toast message={error} onClose={() => setError(null)} />}
@@ -426,75 +539,15 @@ function listItemFor(result: SessionSummary, topicId: string, startedAt?: string
   };
 }
 
-function BootScreen({ error }: { error: string | null }) {
-  return (
-    <div className="boot">
-      <div className="wordmark wordmark--lg">
-        <EllaGlyph size={48} />
-        <span>Ella</span>
-      </div>
-      <h1 className="display display--md">{error ? "Ella could not start" : "Waking Ella up…"}</h1>
-      <p>{error ?? "Getting your local learning space ready."}</p>
-      {!error && <LoaderCircle className="spin" aria-label="Loading" />}
-      {!error && <EllaMascot variant="corner" className="ella--corner-boot" />}
-    </div>
-  );
-}
-
-/**
- * The first launch after an install has gigabytes to fetch before Ella can
- * speak. It runs behind the app rather than in front of it: a learner can put
- * in their name and check their microphone while it downloads, and only the
- * talking itself has to wait. Anything that needs the engine early says so in
- * its own words, because the backend returns that sentence with the failure.
- */
-function SetupBanner({ setup }: { setup: SetupState | null }) {
-  if (!setup || setup.stage === "ready") return null;
-
-  const downloading = setup.stage === "downloading" && setup.total_bytes > 0;
-  const percent = downloading
-    ? Math.min(100, Math.round((setup.downloaded_bytes / setup.total_bytes) * 100))
-    : null;
-
-  return (
-    <div className={`setup-strip ${setup.stage === "failed" ? "setup-strip--failed" : ""}`.trim()} aria-live="polite">
-      {setup.stage !== "failed" && <LoaderCircle className="spin" aria-hidden="true" />}
-      <div className="setup-strip__text">
-        <strong>
-          {setup.stage === "failed" ? "Ella could not finish setting up" : "Getting Ella ready"}
-        </strong>
-        <span>
-          {setup.stage === "failed"
-            ? setup.message
-            : downloading
-              ? `${setup.message} — ${formatBytes(setup.downloaded_bytes)} of ${formatBytes(setup.total_bytes)}${
-                  (setup.attempt ?? 1) > 1 ? " — connection dropped, retrying" : ""
-                }`
-              : setup.message}
-        </span>
-      </div>
-      {percent !== null && (
-        <div className="setup-strip__bar" role="progressbar" aria-valuenow={percent}>
-          <span style={{ width: `${percent}%` }} />
-        </div>
-      )}
-    </div>
-  );
-}
-
 /**
  * A new version downloading behind the app, in the corner and out of the way.
- * It wears the first-run strip's styling so both read as the same kind of
- * background work, and it sits above that strip whenever both are showing.
  */
 function UpdateToast({
   progress,
-  raised,
   onRestart,
   onDismiss,
 }: {
   progress: UpdateProgress | null;
-  raised: boolean;
   onRestart?: () => void;
   onDismiss: () => void;
 }) {
@@ -514,7 +567,7 @@ function UpdateToast({
       : `Version ${progress.version}`;
 
   return (
-    <div className={`update-toast ${raised ? "update-toast--raised" : ""}`.trim()} aria-live="polite">
+    <div className="update-toast" aria-live="polite">
       {ready ? (
         <CircleCheck className="update-toast__icon" size={20} aria-hidden="true" />
       ) : (
@@ -551,6 +604,45 @@ function BusyVeil() {
     <div className="veil" aria-live="polite">
       <LoaderCircle className="spin" aria-hidden="true" />
       <span>One moment…</span>
+    </div>
+  );
+}
+
+/**
+ * A talk finished a step or a level after the learner had already left its
+ * summary — the model was still reading the talk. They hear about it anyway,
+ * where they are, as Ella Mobile celebrates a late move on Home.
+ */
+function MovedOnToast({
+  assessment,
+  onLevels,
+  onClose,
+}: {
+  assessment: Assessment;
+  onLevels: () => void;
+  onClose: () => void;
+}) {
+  const { standing } = assessment;
+  const level = assessment.advanced === "level";
+  return (
+    <div className={`moved-on-toast ladder-${levelTone(standing.level_number)}`} role="status">
+      <span className="moved-on__badge moved-on__badge--small" aria-hidden="true">
+        {level ? standing.level_number : "✓"}
+      </span>
+      <span className="moved-on-toast__text">
+        <strong className="display">{level ? "Level up!" : "Step complete!"}</strong>
+        <span>
+          {level
+            ? `You’ve reached ${standing.level_name}.`
+            : `On to Step ${standing.step} of ${standing.level_name}.`}
+        </span>
+      </span>
+      <button className="btn btn--quiet btn--compact" onClick={onLevels}>
+        See levels
+      </button>
+      <button className="moved-on-toast__close" onClick={onClose} aria-label="Dismiss">
+        <X size={16} />
+      </button>
     </div>
   );
 }

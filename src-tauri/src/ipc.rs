@@ -4,11 +4,17 @@ use tauri::State;
 
 use crate::{
     application::AppService,
-    domain::{AppSnapshot, Learner, Session, SessionSummary, SpokenLine, TurnResult},
+    domain::{
+        AppSnapshot, Assessment, Learner, LevelView, Session, SessionSummary, SpokenLine,
+        TurnResult,
+    },
     error::EllaResult,
+    setup::{Setup, SetupProgress},
 };
 
 pub struct AppState(pub Arc<AppService>);
+
+pub struct SetupState(pub Arc<Setup>);
 
 // Every command hops to a blocking thread: Tauri runs command bodies on the
 // main thread, and the STT/LLM/TTS pipeline (and even the 2s engine health
@@ -29,6 +35,22 @@ where
 pub async fn bootstrap(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
     let service = state.0.clone();
     off_main_thread(move || service.bootstrap()).await
+}
+
+/// Where setup has got to, for a window that opened, or reloaded, after the
+/// event that said so. Only a lock and a clone, so it stays on the main thread.
+#[tauri::command]
+pub fn setup_state(setup: State<'_, SetupState>) -> SetupProgress {
+    setup.0.latest()
+}
+
+/// "Try again" on the setup screen. The run starts on its own thread and
+/// reports through the setup event; this answers at once with where things
+/// stand, which a second press while it runs leaves unchanged.
+#[tauri::command]
+pub fn retry_setup(setup: State<'_, SetupState>) -> SetupProgress {
+    setup.0.retry();
+    setup.0.latest()
 }
 
 #[tauri::command]
@@ -69,6 +91,14 @@ pub async fn start_session(
 ) -> Result<Session, String> {
     let service = state.0.clone();
     off_main_thread(move || service.start_session(&topic_id)).await
+}
+
+/// The placement chat: onboarding's first talk, or the one the level map
+/// offers a learner who never had it.
+#[tauri::command]
+pub async fn start_placement(state: State<'_, AppState>) -> Result<Session, String> {
+    let service = state.0.clone();
+    off_main_thread(move || service.start_placement()).await
 }
 
 #[tauri::command]
@@ -187,4 +217,23 @@ pub async fn complete_session(
 ) -> Result<SessionSummary, String> {
     let service = state.0.clone();
     off_main_thread(move || service.complete_session(&session_id)).await
+}
+
+/// What a finished talk did for the learner. Slow the first time — the model
+/// reads the talk — and kept, so asking again is instant and counts nothing
+/// twice.
+#[tauri::command]
+pub async fn assess_session(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Assessment, String> {
+    let service = state.0.clone();
+    off_main_thread(move || service.assess_session(&session_id)).await
+}
+
+/// The level map: every level, lowest first, as it stands for the learner.
+#[tauri::command]
+pub async fn levels(state: State<'_, AppState>) -> Result<Vec<LevelView>, String> {
+    let service = state.0.clone();
+    off_main_thread(move || service.levels()).await
 }

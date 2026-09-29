@@ -714,12 +714,15 @@ button { font-family: inherit; }
 .ella--stage-talk { bottom: -130px; }
 .ella--corner-ob,
 .ella--corner-boot { right: -130px; bottom: -150px; }
-.ella--corner-ob.is-peeking .ella__inner {
+.ella--corner-ob.is-peeking .ella__inner,
+.ella--corner-boot.is-peeking .ella__inner {
   transform-origin: 50% 50%;
   animation: peekUp 0.5s cubic-bezier(0.22, 1.1, 0.36, 1) forwards;
 }
-.ella--home-peek,
-.ella--summary-peek { top: -104px; right: 70px; }
+.ella--home-peek { top: -104px; right: 70px; }
+/* The summary keeps her room inside its own box (see `.summary`), so a card
+   that grows past the window scrolls rather than cutting her off. */
+.ella--summary-peek { top: 0; right: 70px; }
 .ella--mentor { right: 70px; bottom: -40px; }
 .ella--mentor .ella__inner { animation: bobIdle 4.2s ease-in-out infinite; }
 
@@ -1880,14 +1883,25 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 
 /* ------------------------------------------------------------ Summary ----- */
 
+/* Centred by the card's own auto margins rather than `justify-content`, which
+   would cut off the top of a card taller than the window instead of letting
+   it scroll: a talk that moved the learner on adds a celebration to it. */
 .screen--summary {
   padding: 44px;
   align-items: center;
-  justify-content: center;
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 /* Room above the card for Ella to peek over it. */
-.summary { position: relative; width: 100%; max-width: 680px; margin-top: 104px; }
+.summary {
+  position: relative;
+  flex: none;
+  width: 100%;
+  max-width: 680px;
+  margin: auto 0;
+  padding-top: 104px;
+}
 .summary__card {
   position: relative;
   padding: 32px 36px 34px;
@@ -1907,6 +1921,447 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 .summary__card .stats { margin-top: 22px; }
 .summary__home { margin-top: 26px; }
 
+/* "Step complete!" or "Level up!": the celebration Ella Mobile shows for
+   moving on, at the top of the card in the new level's colour. */
+.moved-on {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 0 0 22px;
+  padding: 16px 20px;
+  border-radius: var(--r-tile);
+  background: var(--lv-tint);
+  animation: fadeUp 0.35s ease-out;
+}
+.moved-on__badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--lv);
+  box-shadow: 0 0 0 6px rgba(255, 255, 255, 0.75);
+  color: var(--white);
+  font-family: var(--display);
+  font-size: 26px;
+  font-weight: 800;
+}
+.moved-on__badge svg { fill: none; stroke: currentColor; stroke-width: 3.5; stroke-linecap: round; stroke-linejoin: round; }
+.moved-on__title { font-size: 26px; color: var(--lv-deep); }
+.moved-on__line { margin: 4px 0 0; font-size: 14.5px; font-weight: 600; color: var(--ink-70); }
+
+/* What the talk did: the skills it counted, and where the learner stands. */
+.summary-progress { margin-top: 22px; }
+.summary-progress--waiting {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink-55);
+}
+.summary-progress--waiting .spin { color: var(--violet); }
+.summary-progress--failed { display: flex; align-items: center; gap: 14px; }
+
+.grown { margin-bottom: 14px; }
+.grown__list { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 0; padding: 0; list-style: none; }
+.grown__skill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-radius: var(--r-pill);
+  background: var(--lv-tint);
+  font-size: 13.5px;
+  font-weight: 700;
+}
+.grown__count { font-size: 12px; font-weight: 600; color: var(--ink-55); }
+
+.summary-level {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  width: 100%;
+  padding: 14px 18px;
+  border: 1.5px solid var(--ink-10);
+  border-radius: var(--r-tile);
+  background: var(--white);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+.summary-level:hover { border-color: var(--lv); }
+.summary-level__text { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
+.summary-level__text strong { font-size: 22px; line-height: 1.1; }
+.summary-level__text small { font-size: 12.5px; font-weight: 600; color: var(--ink-55); }
+.summary-level__meter { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex: none; width: 180px; }
+.summary-level__meter small { font-size: 12px; font-weight: 700; color: var(--lv-deep); }
+.summary-level__bar,
+.level-stop__bar {
+  display: block;
+  width: 100%;
+  height: 10px;
+  border-radius: var(--r-pill);
+  background: var(--lv-tint);
+  overflow: hidden;
+}
+.summary-level__bar > span,
+.level-stop__bar > span { display: block; height: 100%; border-radius: inherit; background: var(--lv); }
+
+/* -------------------------------------------------------------- Levels ---- */
+
+/* Each level's colour by its place on the ladder, as Ella Mobile v7 draws
+   them: `--lv` for the level, `--lv-deep` for type on its wash, `--lv-tint`
+   for the wash. Custom properties rather than backgrounds, because the
+   `tone-*` classes already paint the topic cards. */
+.ladder-green { --lv: var(--green); --lv-deep: #3f7a00; --lv-tint: #e7f4d6; }
+.ladder-violet { --lv: var(--violet); --lv-deep: var(--violet-deep); --lv-tint: var(--lilac); }
+.ladder-blue { --lv: #5b7def; --lv-deep: #3d5fcf; --lv-tint: #e4ecfb; }
+.ladder-orange { --lv: var(--orange); --lv-deep: #c25c00; --lv-tint: #ffe9d4; }
+.ladder-pink { --lv: var(--pink); --lv-deep: var(--pink-deep); --lv-tint: #ffe3ee; }
+.ladder-ink { --lv: var(--ink); --lv-deep: var(--ink); --lv-tint: #e6e8e0; }
+
+/* MY LEVEL: purple wherever it appears, as v7 draws it. */
+.card--level {
+  display: block;
+  width: 100%;
+  padding: 20px 20px 18px;
+  border: none;
+  background: var(--violet);
+  color: var(--white);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.card--level:hover { background: var(--violet-deep); }
+.card--level:active { transform: translateY(2px); }
+.card--level .eyebrow { color: rgba(255, 255, 255, 0.82); }
+.card--level__orb {
+  position: absolute;
+  top: -50px;
+  right: -44px;
+  width: 130px;
+  height: 130px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.14);
+  pointer-events: none;
+}
+.level-card__head { display: flex; align-items: center; gap: 14px; margin-top: 10px; }
+.level-card__number { font-size: 54px; line-height: 0.9; }
+.level-card__who { display: flex; flex-direction: column; min-width: 0; }
+.level-card__name { font-size: 22px; line-height: 1.05; }
+.level-card__who small { margin-top: 4px; font-size: 12.5px; font-weight: 600; color: rgba(255, 255, 255, 0.85); }
+.level-card__bar {
+  display: block;
+  height: 8px;
+  margin-top: 14px;
+  border-radius: var(--r-pill);
+  background: rgba(255, 255, 255, 0.25);
+  overflow: hidden;
+}
+.level-card__bar > span { display: block; height: 100%; border-radius: inherit; background: var(--white); }
+.level-card__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+  font-size: 13px;
+  font-weight: 700;
+}
+.level-card__chevron { fill: none; stroke: currentColor; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+
+.screen--levels { padding: 36px 44px 44px; }
+.levels-wait { display: flex; justify-content: center; padding: 80px 0; color: var(--violet); }
+.levels-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+  margin-top: 28px;
+}
+
+/* The path: a numbered stop per level, joined by a line that is solid once
+   the level is done and dashed before. */
+.level-path { margin: 0; padding: 0; list-style: none; }
+.level-stop { position: relative; }
+/* From just below this stop's node to just inside the next one's, which
+   starts 8px down its own row. */
+.level-stop::before {
+  content: "";
+  position: absolute;
+  top: 62px;
+  bottom: -10px;
+  left: 34px;
+  width: 4px;
+  border-radius: 2px;
+  background: repeating-linear-gradient(to bottom, var(--ink-18) 0 6px, transparent 6px 12px);
+}
+.level-stop.is-done::before { background: var(--lv); }
+.level-stop.is-last::before { display: none; }
+.level-stop__button {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  width: 100%;
+  padding: 8px 12px 22px 10px;
+  border: none;
+  border-radius: var(--r-tile);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.level-stop__button:hover { background: rgba(255, 255, 255, 0.6); }
+.level-stop.is-picked .level-stop__button { background: var(--white); box-shadow: 0 0 0 1.5px var(--ink-10); }
+.level-stop__node {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 52px;
+  height: 52px;
+  border: 2px solid var(--ink-12);
+  border-radius: 50%;
+  background: var(--white);
+  font-family: var(--display);
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--ink-40);
+}
+.level-stop.is-done .level-stop__node,
+.level-stop.is-current .level-stop__node { border-color: var(--lv); background: var(--lv); color: var(--white); }
+.level-stop.is-current .level-stop__node { box-shadow: 0 0 0 6px var(--lv-tint); }
+.level-stop__tick {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--white);
+  color: var(--lv);
+}
+.level-stop__tick svg { fill: none; stroke: currentColor; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
+.level-stop__text { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; padding-top: 6px; }
+.level-stop__name { font-size: 20px; line-height: 1.1; }
+.level-stop.is-next .level-stop__name,
+.level-stop.is-locked .level-stop__name { color: var(--ink-55); }
+.level-stop__status { font-size: 12.5px; font-weight: 700; color: var(--ink-50); }
+.level-stop.is-done .level-stop__status { color: #3f7a00; }
+.level-stop.is-current .level-stop__status { color: var(--lv-deep); }
+.level-stop__bar { margin-top: 8px; }
+.level-stop__progress { margin-top: 4px; font-size: 12px; font-weight: 500; color: var(--ink-55); }
+
+/* A level's page: its number huge in its colour on its wash, its goal, and
+   its steps as bars with a segment per skill. */
+.level-page { padding: 0; overflow: hidden; }
+.level-page__head {
+  display: flex;
+  align-items: flex-end;
+  gap: 22px;
+  padding: 28px 30px 24px;
+  background: var(--lv-tint);
+}
+.level-page__number { font-size: 104px; line-height: 0.8; letter-spacing: -0.02em; color: var(--lv); }
+.level-page.is-next .level-page__number,
+.level-page.is-locked .level-page__number { opacity: 0.5; }
+.level-page__title h2 { font-size: 32px; line-height: 1.05; }
+.level-page__pill {
+  display: inline-flex;
+  margin-top: 10px;
+  padding: 5px 12px;
+  border-radius: var(--r-pill);
+  background: var(--white);
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--ink-62);
+}
+.level-page.is-done .level-page__pill { background: var(--green); color: var(--white); }
+.level-page.is-current .level-page__pill { background: var(--lv); color: var(--white); }
+.level-page__title p { margin: 8px 0 0; font-size: 13.5px; font-weight: 500; color: var(--ink-70); }
+.level-page__heading { margin: 22px 30px 0; font-family: var(--display); font-size: 18px; font-weight: 700; }
+.level-page__heading--row { display: flex; align-items: baseline; justify-content: space-between; }
+.level-page__heading--row h3 { margin: 0; font: inherit; }
+.level-page__heading--row span { font-family: var(--body); font-size: 12.5px; font-weight: 600; color: var(--ink-50); }
+.level-page__goal {
+  position: relative;
+  margin: 8px 30px 0;
+  padding-left: 18px;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+.level-page__goal::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 7px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--lv);
+}
+
+.level-steps {
+  margin: 10px 30px 28px;
+  padding: 0;
+  list-style: none;
+  border: 1.5px solid var(--ink-10);
+  border-radius: var(--r-tile);
+}
+.level-page.is-current .level-steps { margin-bottom: 0; }
+.level-step { padding: 12px 16px; }
+.level-step + .level-step { border-top: 1.5px solid var(--ink-07); }
+.level-step__row { display: flex; align-items: center; gap: 12px; }
+.level-step__title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+.level-step__number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--ink-07);
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--ink-60);
+}
+.level-step.is-yours .level-step__number { background: var(--lv); color: var(--white); }
+.level-step__here {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  background: var(--lv-tint);
+  color: var(--lv-deep);
+  font-size: 11px;
+  font-weight: 700;
+}
+.level-step__bar { display: flex; gap: 4px; flex: none; width: 140px; }
+.level-step__bar i { flex: 1; height: 10px; border-radius: 3px; background: var(--ink-07); }
+.level-page.is-done .level-step__bar i,
+.level-page.is-current .level-step__bar i { background: var(--lv-tint); }
+/* After the washes above, and as specific as them, so a passed skill fills
+   on every level's page. */
+.level-page .level-step__bar i.is-passed { background: var(--lv); }
+.level-step__focus { margin: 8px 0 0 32px; font-size: 13px; font-weight: 500; color: var(--ink-60); }
+.level-step__skills {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 2px 32px;
+  padding: 0;
+  list-style: none;
+}
+.level-step__skills li { display: flex; gap: 10px; font-size: 13.5px; line-height: 1.4; }
+.level-step__check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border: 1.5px solid var(--ink-18);
+  border-radius: 50%;
+  color: transparent;
+}
+.level-step__check svg { fill: none; stroke: currentColor; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
+.level-step__skills li.is-passed .level-step__check { border-color: var(--lv); background: var(--lv); color: var(--white); }
+.level-page__note { margin: 10px 30px 0; font-size: 12.5px; font-weight: 500; line-height: 1.4; color: var(--ink-55); }
+.level-page__actions { display: flex; align-items: center; gap: 14px; margin: 20px 30px 28px; }
+.level-page__practise { height: 50px; }
+
+/* The placement's result: the level it found, in that level's colour. */
+.level-reveal {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 12px;
+  margin: 0;
+  padding: 12px 24px;
+  border-radius: var(--r-pill);
+  background: var(--lv-tint);
+  color: var(--lv-deep);
+  animation: fadeUp 0.35s ease-out;
+}
+.level-reveal__label { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; }
+.level-reveal__name { font-size: 28px; color: var(--lv); }
+.level-reveal__sub { margin: -6px 0 0; font-size: 14.5px; font-weight: 600; color: var(--ink-60); }
+.placement-frame { position: absolute; inset: 0; }
+.placement-error { max-width: 520px; text-align: center; }
+.placement-actions { display: flex; align-items: center; gap: 18px; }
+
+/* A step or level finished after the learner left the summary. */
+.moved-on-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 12px 12px 14px;
+  border: 1.5px solid var(--lv-tint);
+  border-radius: var(--r-tile);
+  background: var(--white);
+  box-shadow: 0 18px 40px rgba(38, 38, 38, 0.18);
+  transform: translateX(-50%);
+  animation: fadeUp 0.3s ease-out;
+}
+.moved-on__badge--small { width: 40px; height: 40px; font-size: 20px; box-shadow: 0 0 0 4px var(--lv-tint); }
+.moved-on-toast__text { display: flex; flex-direction: column; gap: 2px; }
+.moved-on-toast__text strong { font-size: 20px; color: var(--lv-deep); }
+.moved-on-toast__text span { font-size: 13.5px; font-weight: 600; color: var(--ink-70); }
+.moved-on-toast__close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 50%;
+  background: var(--ink-07);
+  color: var(--ink-62);
+  cursor: pointer;
+}
+.moved-on-toast__close:hover { background: var(--ink-12); color: var(--ink); }
+
+@media (max-width: 1320px) {
+  .screen--levels { padding: 32px 30px 36px; }
+  .levels-grid { grid-template-columns: minmax(260px, 300px) minmax(0, 1fr); gap: 22px; }
+  .level-page__number { font-size: 88px; }
+}
+
+/* "Your level" beside the first talk's name in its chip. */
+.talk-head__tag {
+  padding: 3px 10px;
+  border-radius: var(--r-pill);
+  background: var(--lilac);
+  color: var(--violet-deep);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
 /* --------------------------------------------------- boot / veil / toast -- */
 
 .boot {
@@ -1924,6 +2379,162 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 }
 .boot p { margin: 0; font-size: 15px; font-weight: 500; color: var(--ink-62); }
 .boot .spin { margin-top: 12px; color: var(--violet); }
+
+/* ------------------------------------------------------------ setup gate -- */
+
+/* The boot screen, held up until Ella can talk. The column hangs from a fixed
+   point rather than centring, so a card, a button or opened details below it
+   never shift what is already on screen when the state changes. */
+.gate {
+  justify-content: flex-start;
+  gap: 0;
+  padding: max(56px, calc(50vh - 210px)) 44px 40px;
+}
+.gate__column {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: min(560px, 100%);
+}
+.gate__copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  animation: fadeUp 0.22s ease-out;
+}
+.gate__title {
+  font-size: 44px;
+  line-height: 1.05;
+  color: var(--ink);
+  text-wrap: balance;
+}
+.boot .gate__body {
+  max-width: 480px;
+  min-height: 1.45em;
+  font-size: 17px;
+  line-height: 1.45;
+  color: var(--ink-70);
+  text-wrap: pretty;
+}
+.boot .gate__spinner { margin-top: 18px; }
+
+.gate-card {
+  width: 100%;
+  margin-top: 26px;
+  padding: 22px 26px 20px;
+  border: 1.5px solid var(--ink-10);
+  border-radius: var(--r-card);
+  background: var(--white);
+  box-shadow: 0 10px 30px rgba(38, 38, 38, 0.08);
+  text-align: left;
+}
+.gate-card__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 40px;
+}
+.gate-card__percent {
+  font-family: var(--display);
+  font-size: 40px;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--violet);
+  font-variant-numeric: tabular-nums;
+}
+.gate-card__percent--paused { color: var(--ink-45); }
+.gate-card__amount {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink-70);
+  font-variant-numeric: tabular-nums;
+}
+.boot .gate-card__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+  margin-top: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink-70);
+}
+.gate-card__meta svg { flex: none; color: var(--violet); }
+.boot .gate-card__meta--waiting { color: var(--ink); }
+.gate-card__meta--waiting svg { color: var(--orange); }
+
+.gate-bar {
+  position: relative;
+  height: 12px;
+  margin-top: 14px;
+  border-radius: var(--r-pill);
+  background: var(--lilac);
+  overflow: hidden;
+}
+/* A card that is only a bar: loading, and ready. */
+.gate-card > .gate-bar:only-child { margin-top: 0; }
+.gate-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--violet);
+  transition: width 0.4s ease-out, background-color 0.3s ease;
+}
+.gate-bar--waiting > span { background: var(--orange); }
+.gate-bar--paused { background: var(--ink-07); }
+.gate-bar--paused > span { background: var(--ink-40); }
+.gate-bar--done > span { background: var(--green); }
+/* No numbers to show while the model loads, so a segment drifts across. */
+.gate-bar--sweep > span {
+  width: 36%;
+  animation: gateSweep 1.8s ease-in-out infinite;
+}
+@keyframes gateSweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(280%); }
+}
+
+.gate__retry { min-width: 240px; margin-top: 24px; }
+.boot .gate__retry .spin { margin-top: 0; color: inherit; }
+.gate__retry[aria-disabled="true"] { opacity: 0.7; cursor: progress; }
+.gate__retry[aria-disabled="true"]:hover { background: var(--violet); }
+
+.gate__details {
+  width: 100%;
+  margin-top: 16px;
+  font-size: 13.5px;
+  color: var(--ink-70);
+}
+.gate__details summary {
+  cursor: pointer;
+  font-weight: 700;
+  list-style-position: inside;
+}
+.gate__details summary:hover { color: var(--ink); }
+.gate__details pre {
+  max-height: 104px;
+  margin: 10px 0 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border-radius: 12px;
+  background: var(--ink-07);
+  color: var(--ink-70);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+
+@media (prefers-reduced-motion: reduce) {
+  .gate-bar--sweep > span { width: 100%; opacity: 0.4; animation: none; transform: none; }
+}
 
 .veil {
   position: fixed;
@@ -2019,25 +2630,8 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
    First-run setup and self-update
    ------------------------------------------------------------------------ */
 
-/* Sits along the bottom of whatever screen the learner is on, because the
-   download runs behind the app rather than in front of it. */
-.setup-strip {
-  position: fixed;
-  left: 50%;
-  bottom: 18px;
-  z-index: 40;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: min(560px, calc(100vw - 48px));
-  padding: 12px 16px;
-  transform: translateX(-50%);
-  border: 1px solid var(--ink-10);
-  border-radius: 18px;
-  background: var(--white);
-  box-shadow: 0 10px 30px rgba(38, 38, 38, 0.12);
-}
-.setup-strip .spin { flex: none; color: var(--violet); }
+/* The update toast's text and bar. They kept the name of the first-run strip
+   they were first drawn for, which the setup screen has since replaced. */
 .setup-strip__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .setup-strip__text strong { font-size: 14px; font-weight: 700; color: var(--ink); }
 .setup-strip__text span {
@@ -2050,8 +2644,6 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.setup-strip--failed { border-color: rgba(255, 49, 129, 0.35); }
-.setup-strip--failed .setup-strip__text span { white-space: normal; }
 
 .setup-strip__bar {
   flex: none;
@@ -2069,8 +2661,7 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   background: var(--violet);
   transition: width 240ms ease-out;
 }
-/* A new version downloading behind the app. Same card as the setup strip, but
-   in the corner: it matters less than first-run setup, and it must not sit on
+/* A new version downloading behind the app, in the corner: it must not sit on
    the talk controls along the bottom. */
 .update-toast {
   position: fixed;
@@ -2088,8 +2679,6 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   box-shadow: 0 10px 30px rgba(38, 38, 38, 0.12);
   animation: update-toast-in 240ms ease-out;
 }
-/* Clears the setup strip when a fresh install is also fetching its models. */
-.update-toast--raised { bottom: 96px; }
 .update-toast__icon { flex: none; color: var(--violet); }
 .update-toast .setup-strip__bar { width: 64px; }
 .update-toast__restart {

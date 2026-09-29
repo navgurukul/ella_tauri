@@ -1,132 +1,41 @@
 pub mod application;
+pub mod curriculum;
 pub mod domain;
 pub mod error;
 pub mod infrastructure;
 mod ipc;
+pub mod progress;
+mod setup;
 mod telemetry;
 
 use std::sync::Arc;
-use std::thread;
 
 use application::{AppService, SpeechBroadcast};
 use domain::SpeechStreamEvent;
 use infrastructure::{
     database::Database,
-    engine_manager::{DeferredEngine, EngineSlot},
+    engine_manager::DeferredEngine,
     engines::{engine_from_environment, resolved_mode, EnginePaths},
-    models,
 };
-use ipc::AppState;
-use serde::Serialize;
+use ipc::{AppState, SetupState};
+use setup::{Setup, SetupProgress, SetupSink};
 use tauri::{AppHandle, Emitter, Manager};
 
 /// The event name the window listens on for mid-turn speech.
 pub const SPEECH_STREAM_EVENT: &str = "ella://speech-segment";
 
-/// Setup progress: model downloads on a first run, then the model load.
+/// Setup progress: model downloads on a first run, then the model load. See
+/// `setup` for why the window also asks for it.
 pub const SETUP_EVENT: &str = "ella://setup";
 
-#[derive(Clone, Serialize)]
-struct SetupProgress {
-    /// `downloading`, `loading`, `ready` or `failed`.
-    stage: String,
-    message: String,
-    downloaded_bytes: u64,
-    total_bytes: u64,
-    /// Which file of how many, for a first run that fetches more than one.
-    index: usize,
-    of: usize,
-    /// 1 on the first try; above that the transfer is being retried.
-    attempt: u32,
-}
+/// Sends each setup announcement to the window as it happens. The window
+/// also asks for the latest one when it opens, so a lost event costs nothing.
+struct WindowSetup(AppHandle);
 
-/// Fetch whatever weights this build needs, then bring the local engine up and
-/// hand it to the service.
-///
-/// Everything here is reported to the window and nothing here panics: a failed
-/// download or a model that will not load leaves the app open and explaining
-/// itself, which is what a tester on another machine can act on.
-fn prepare_engine(
-    window: AppHandle,
-    slot: EngineSlot,
-    paths: EnginePaths,
-    models_root: std::path::PathBuf,
-) {
-    let announce = |progress: SetupProgress| {
-        let _ = window.emit(SETUP_EVENT, &progress);
-    };
-
-    match models::outstanding(&models_root) {
-        Ok(work) if !work.is_empty() => {
-            let total: u64 = work.iter().map(|spec| spec.approximate_bytes).sum();
-            slot.waiting_on(format!(
-                "Ella is downloading her voice and language models ({} MB). This happens once.",
-                total / (1024 * 1024)
-            ));
-            let mut report = |progress: models::ModelProgress| {
-                announce(SetupProgress {
-                    stage: "downloading".into(),
-                    message: format!("Downloading {} ({} of {})", progress.key, progress.index, progress.of),
-                    downloaded_bytes: progress.downloaded_bytes,
-                    total_bytes: progress.total_bytes,
-                    index: progress.index,
-                    of: progress.of,
-                    attempt: progress.attempt,
-                });
-            };
-            if let Err(reason) = models::ensure(&models_root, &mut report) {
-                if models::all_on_disk(&models_root).unwrap_or(false) {
-                    // Only the download failed, and every model is already on
-                    // disk: its record was lost, or an update named a newer
-                    // file while the laptop is offline. Ella loads what she ran
-                    // on last time and tries the download again next launch.
-                    eprintln!(
-                        "[setup] could not refresh the models ({reason}); loading the ones already on disk"
-                    );
-                } else {
-                    // An interrupted download resumes on the next launch, so
-                    // this is a setback rather than a dead install.
-                    slot.waiting_on(format!("Ella could not finish downloading her models: {reason}"));
-                    announce(SetupProgress {
-                        stage: "failed".into(),
-                        message: reason.to_string(),
-                        downloaded_bytes: 0,
-                        total_bytes: 0,
-                        index: 0,
-                        of: 0,
-                        attempt: 1,
-                    });
-                    return;
-                }
-            }
-        }
-        Ok(_) => {}
-        Err(reason) => eprintln!("[setup] model manifest unreadable: {reason}"),
+impl SetupSink for WindowSetup {
+    fn announce(&self, progress: &SetupProgress) {
+        let _ = self.0.emit(SETUP_EVENT, progress);
     }
-
-    slot.waiting_on("Ella is loading her language model.");
-    announce(SetupProgress {
-        stage: "loading".into(),
-        message: "Loading the language model".into(),
-        downloaded_bytes: 0,
-        total_bytes: 0,
-        index: 0,
-        of: 0,
-        attempt: 1,
-    });
-
-    let engine = engine_from_environment(paths);
-    let status = engine.status();
-    slot.fill(engine);
-    announce(SetupProgress {
-        stage: if status.ready { "ready".into() } else { "failed".into() },
-        message: status.label,
-        downloaded_bytes: 0,
-        total_bytes: 0,
-        index: 0,
-        of: 0,
-        attempt: 1,
-    });
 }
 
 /// Pushes each synthesized sentence to the window the moment Piper finishes it,
@@ -201,18 +110,22 @@ pub fn run() {
                 models_root: Some(models_root.clone()),
             };
 
-            let service = if resolved_mode(&paths) == "local" {
+            let sink = Box::new(WindowSetup(app.handle().clone()));
+            let (service, setup) = if resolved_mode(&paths) == "local" {
                 // First run has 2.3 GB to fetch and a 2 GB model to load. The
-                // window opens now and the engine arrives underneath it.
+                // window opens now, on the setup screen, and the engine
+                // arrives underneath it.
                 let deferred = DeferredEngine::new("Ella is getting set up.");
-                let slot = deferred.slot();
-                let service = Arc::new(AppService::new(database, Box::new(deferred)));
-                let window = app.handle().clone();
-                thread::spawn(move || prepare_engine(window, slot, paths, models_root));
-                service
+                let setup = Setup::deferred(sink, deferred.slot(), paths, models_root);
+                (Arc::new(AppService::new(database, Box::new(deferred))), setup)
             } else {
-                Arc::new(AppService::new(database, engine_from_environment(paths)))
+                (
+                    Arc::new(AppService::new(database, engine_from_environment(paths))),
+                    Setup::ready(sink),
+                )
             };
+            setup.start();
+            app.manage(SetupState(setup));
             service.set_speech_broadcast(Arc::new(WindowSpeech(app.handle().clone())));
             app.manage(AppState(Arc::clone(&service)));
             app.resources_table().add(EngineShutdownGuard(service));
@@ -220,11 +133,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ipc::bootstrap,
+            ipc::setup_state,
+            ipc::retry_setup,
             ipc::save_learner,
             ipc::log_in,
             ipc::log_out,
             ipc::save_avatar_color,
             ipc::start_session,
+            ipc::start_placement,
             ipc::start_chore,
             ipc::speak_opening,
             ipc::speak_retry_prompt,
@@ -236,6 +152,8 @@ pub fn run() {
             ipc::cancel_voice_stream,
             ipc::finish_voice_stream_turn,
             ipc::complete_session,
+            ipc::assess_session,
+            ipc::levels,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Ella")
@@ -248,6 +166,11 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 if let Some(state) = app.try_state::<AppState>() {
                     state.0.shutdown();
+                }
+                // A model load cut short by the quit drops its half-built
+                // engine on the setup thread; give it the moment that takes.
+                if let Some(setup) = app.try_state::<SetupState>() {
+                    setup.0.wait_while_loading(std::time::Duration::from_secs(3));
                 }
             }
         });
