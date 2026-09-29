@@ -1,7 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import { addDays, dayKey } from "./days";
-import { badges, castFor, streak, talkTotals, weeklyDigest } from "./presentation";
-import type { DayActivity, LearnerProgress } from "../types";
+import {
+  badges,
+  castFor,
+  castName,
+  goalFigure,
+  nextTopicLabel,
+  reachedGoal,
+  streak,
+  streakRecap,
+  talkTotals,
+  weeklyDigest,
+} from "./presentation";
+import type { AppSnapshot, ChoreRecap, DayActivity, LearnerProgress } from "../types";
 
 /** Friday morning on whatever clock the tests run on. */
 const today = new Date(2026, 8, 25, 10);
@@ -19,6 +30,7 @@ function progressWith(days: DayActivity[], overrides: Partial<LearnerProgress> =
     talks_finished: days.reduce((sum, entry) => sum + entry.talks, 0),
     answers: days.reduce((sum, entry) => sum + entry.answers, 0),
     finished_topics: days.length > 0 ? ["street-food"] : [],
+    chores_met: [],
     ...overrides,
   };
 }
@@ -116,13 +128,24 @@ describe("badges", () => {
     ]);
   });
 
-  it("are earned by a running streak, a finished talk and a finished bargain", () => {
-    const progress = progressWith([day(0), day(1)], { finished_topics: ["market-cloth-price", "street-food"] });
+  it("are earned by a running streak, a finished talk and a stall price talked down", () => {
+    const progress = progressWith([day(0), day(1)], {
+      finished_topics: ["market-cloth-price", "street-food"],
+      chores_met: ["market-cloth-price"],
+    });
     expect(badges(progress, streak(progress, today))).toEqual([
       { id: "streak", label: "2-day streak", earned: true },
       { id: "first-talk", label: "First talk", earned: true },
       { id: "bargainer", label: "Bargainer", earned: true },
     ]);
+  });
+
+  it("keep the Bargainer for the stall price until its goal is met, as the recap says", () => {
+    const tried = progressWith([day(0)], { finished_topics: ["market-cloth-price"] });
+    expect(badges(tried, streak(tried, today)).find((badge) => badge.id === "bargainer")?.earned).toBe(false);
+    // Another chore's goal is not a bargain.
+    const deposit = progressWith([day(0)], { chores_met: ["deposit-refund"] });
+    expect(badges(deposit, streak(deposit, today)).find((badge) => badge.id === "bargainer")?.earned).toBe(false);
   });
 
   it("do not count talking without finishing", () => {
@@ -165,5 +188,63 @@ describe("the talk partners on offer", () => {
     expect(goals(9)).toEqual(["doctor-clinic", "take-a-stand"]);
     expect(goals(10)).toEqual(["market-cloth-price", "doctor-clinic", "take-a-stand"]);
     expect(goals(14)).toHaveLength(5);
+  });
+});
+
+describe("the recap", () => {
+  it("flips the streak up a day with the first answer of the day", () => {
+    const before = progressWith([day(1), day(2), day(3)]);
+    const run = streakRecap(before, true, today);
+    expect([run.from, run.to, run.counted, run.chip]).toEqual([3, 4, true, null]);
+    // Monday to Sunday of a Friday: Tuesday to Thursday done, Friday new.
+    expect(run.week.map((entry) => entry.state)).toEqual(["empty", "done", "done", "done", "new", "empty", "empty"]);
+    expect(run.week.map((entry) => entry.label).join("")).toBe("MTWTFSS");
+  });
+
+  it("starts a new streak after a gap, and leaves a day already counted as it was", () => {
+    const lapsed = streakRecap(progressWith([day(3)]), true, today);
+    expect([lapsed.from, lapsed.to, lapsed.chip]).toEqual([0, 1, "New streak"]);
+
+    const again = streakRecap(progressWith([day(0), day(1)]), true, today);
+    expect([again.from, again.to, again.counted, again.chip]).toEqual([2, 2, true, "Done for today"]);
+    expect(again.week[4].state).toBe("done");
+  });
+
+  it("changes nothing for a talk with nothing said in it", () => {
+    const run = streakRecap(progressWith([day(1)]), false, today);
+    expect([run.from, run.to, run.counted, run.chip]).toEqual([1, 1, false, null]);
+    expect(run.week[4].state).toBe("empty");
+  });
+
+  it("names the chore's goal by which way the figure was pushed", () => {
+    const stall: ChoreRecap = {
+      chore_id: "market-cloth-price",
+      character_id: "stall-owner",
+      unit: "Rs",
+      direction: "down",
+      target: 400,
+      figure: 420,
+      agreed: true,
+      met: false,
+      times_met: 0,
+    };
+    expect(goalFigure(stall)).toBe("Rs 400 or less");
+    expect(reachedGoal(stall)).toBe(false);
+    expect(reachedGoal({ ...stall, figure: 400 })).toBe(true);
+    const deposit: ChoreRecap = { ...stall, chore_id: "deposit-refund", character_id: "landlord", direction: "up", target: 3500, figure: 3600 };
+    expect(goalFigure(deposit)).toBe("Rs 3500 or more");
+    expect(reachedGoal(deposit)).toBe(true);
+    expect([castName("stall-owner"), castName("landlord")]).toEqual(["Bippo", "Grumble"]);
+  });
+
+  it("suggests a different topic for tomorrow", () => {
+    const snapshot = {
+      topics: [
+        { id: "street-food", label: "Street food", prompt: "", emoji: "", color: "" },
+        { id: "booking-a-cab", label: "Booking a cab", prompt: "", emoji: "", color: "" },
+      ],
+    } as unknown as AppSnapshot;
+    expect(nextTopicLabel(snapshot, "street-food")).toBe("Booking a cab");
+    expect(nextTopicLabel(snapshot, "market-cloth-price")).toBe("Street food");
   });
 });

@@ -4,6 +4,7 @@ pub mod domain;
 pub mod error;
 pub mod infrastructure;
 mod ipc;
+pub mod notes;
 pub mod progress;
 mod setup;
 mod telemetry;
@@ -144,6 +145,7 @@ pub fn run() {
             ipc::start_chore,
             ipc::speak_opening,
             ipc::speak_retry_prompt,
+            ipc::speak_fix,
             ipc::get_session,
             ipc::send_text_turn,
             ipc::send_voice_turn,

@@ -64,6 +64,10 @@ pub struct LearnerProgress {
     /// Topic and chore ids of the finished talks, each once. The two share the
     /// field because a chore session stores its chore id as its topic.
     pub finished_topics: Vec<String>,
+    /// Ledger chores whose goal a finished talk has met, each once: the
+    /// character agreed to a figure at or past the target.
+    #[serde(default)]
+    pub chores_met: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -217,6 +221,33 @@ pub struct Assessment {
     /// when there is no model to judge with, or when its answer could not be
     /// read — and none of those count against the learner.
     pub scored: bool,
+    /// Ella's notes for the recap. `None` for a placement, and for a talk too
+    /// short to say much about (`SessionSummary::short`). Assessments kept
+    /// before the recap had notes read as `None`.
+    #[serde(default)]
+    pub notes: Option<TalkNotes>,
+}
+
+/// What the recap says about a talk: what went well, and one thing to say
+/// better.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TalkNotes {
+    /// At most two short lines, read off what the learner actually said
+    /// (`notes::went_well`), so they hold with or without a model.
+    pub went_well: Vec<String>,
+    /// One of the learner's own phrases and how to say it, when the model found
+    /// a mistake worth fixing.
+    pub fix: Option<Fix>,
+    /// Whether a model looked for a mistake at all. Without one (demo mode, or
+    /// an answer that could not be read) no fix does not mean nothing to fix.
+    pub checked: bool,
+}
+
+/// A phrase the learner said, word for word, and the same phrase said right.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Fix {
+    pub said: String,
+    pub better: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -442,6 +473,30 @@ pub struct SessionSummary {
     pub turns: u32,
     pub headline: String,
     pub encouragement: String,
+    /// Too little said for notes (`notes::too_short`), which the recap says
+    /// at once rather than after the assessment.
+    pub short: bool,
+    /// How a ledger chore ended; `None` for a free talk and a rubric chore.
+    pub chore: Option<ChoreRecap>,
+}
+
+/// How a ledger chore ended, for the recap's role-play band.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChoreRecap {
+    pub chore_id: String,
+    pub character_id: String,
+    pub unit: String,
+    pub direction: Direction,
+    pub target: i32,
+    /// Where the figure stood when the talk ended.
+    pub figure: i32,
+    pub agreed: bool,
+    /// The goal met: agreed, at or past the target.
+    pub met: bool,
+    /// Finished talks that met this chore's goal, this one included.
+    pub times_met: u32,
+    /// The character's last line, for the speech bubble.
+    pub last_line: Option<String>,
 }
 
 #[derive(Debug, Clone)]

@@ -39,6 +39,8 @@ export interface LearnerProgress {
   answers: number;
   /** Topic and chore ids of the finished talks, each once. */
   finished_topics: string[];
+  /** Ledger chores whose goal a finished talk met, each once. */
+  chores_met: string[];
 }
 
 export interface Topic {
@@ -152,6 +154,26 @@ export interface Assessment {
   skills: SkillGrowth[];
   /** False when nothing judged the talk: nothing said, or no model to judge. */
   scored: boolean;
+  /** Ella's notes for the recap; null for a placement, and for a talk too
+   * short to say anything about (`SessionSummary.short`). */
+  notes?: TalkNotes | null;
+}
+
+/** What the recap says about a talk. */
+export interface TalkNotes {
+  /** At most two short lines, read off what the learner said. */
+  went_well: string[];
+  /** One of the learner's own phrases and how to say it. */
+  fix?: Fix | null;
+  /** Whether a model looked for a mistake; without one, no fix does not mean
+   * nothing to fix. */
+  checked: boolean;
+}
+
+export interface Fix {
+  /** Word for word what the learner said. */
+  said: string;
+  better: string;
 }
 
 export type LevelState = "done" | "current" | "next" | "locked";
@@ -279,6 +301,29 @@ export interface SessionSummary {
   turns: number;
   headline: string;
   encouragement: string;
+  /** Too little said for notes, known before the assessment is. */
+  short: boolean;
+  /** How a ledger chore ended; null for a free talk and a rubric chore. */
+  chore?: ChoreRecap | null;
+}
+
+/** How a ledger chore ended, for the recap's role-play band. */
+export interface ChoreRecap {
+  chore_id: string;
+  character_id: string;
+  unit: string;
+  /** Which way the learner pushed the figure: a price down, a refund up. */
+  direction: "down" | "up";
+  target: number;
+  /** Where the figure stood when the talk ended. */
+  figure: number;
+  agreed: boolean;
+  /** Agreed, at or past the target. */
+  met: boolean;
+  /** Finished talks that met this goal, this one included. */
+  times_met: number;
+  /** The character's last line. */
+  last_line?: string | null;
 }
 
 export interface VoiceTurnInput {
@@ -328,6 +373,9 @@ export interface EllaBridge {
    * learner hears that Ella missed them instead of only reading it. Tauri
    * bridge only; in the browser this falls back to system speech. */
   speakRetryPrompt?(sessionId: string): Promise<SpokenLine>;
+  /** The recap's fix said aloud, from the fix kept on the talk. Tauri bridge
+   * only; in the browser it falls back to system speech. */
+  speakFix?(sessionId: string): Promise<SpokenLine>;
   getSession(sessionId: string): Promise<Session>;
   sendTextTurn(sessionId: string, text: string): Promise<TurnResult>;
   sendVoiceTurn(input: VoiceTurnInput): Promise<TurnResult>;

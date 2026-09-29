@@ -18,7 +18,9 @@ import { addDays, dayKey } from "./days";
 import type {
   AppSnapshot,
   Badge,
+  CastId,
   CastMember,
+  ChoreRecap,
   LearnerProgress,
   SessionListItem,
   Streak,
@@ -262,14 +264,17 @@ export function talkTotals(progress: LearnerProgress): TalkTally {
   return { talks: progress.talks_finished, answers: progress.answers };
 }
 
-/** Topics and chores that count towards the Bargainer badge. */
-const BARGAINS = new Set(["market-bargaining", "market-cloth-price"]);
+/** The free talk that earns the Bargainer badge by being finished. The
+ * stall-price chore earns it too, once its goal is met (`CHORE_RECAP`). */
+const BARGAIN_TOPIC = "market-bargaining";
 
 /**
  * The profile's badges, earned from what the learner has actually done. Nothing
  * stores badges yet, so each is read off the learner's progress: a streak
- * badge while a streak is running, and the other two once a matching talk has
- * been finished. Those two stay earned however long ago that talk was.
+ * badge while a streak is running, the first-talk badge once a talk has been
+ * finished, and the Bargainer once the bargaining talk has been finished or
+ * the stall price talked down. Those two stay earned however long ago that
+ * talk was.
  */
 export function badges(progress: LearnerProgress, run: Streak): Badge[] {
   return [
@@ -282,7 +287,9 @@ export function badges(progress: LearnerProgress, run: Streak): Badge[] {
     {
       id: "bargainer",
       label: "Bargainer",
-      earned: progress.finished_topics.some((topicId) => BARGAINS.has(topicId)),
+      earned:
+        progress.finished_topics.includes(BARGAIN_TOPIC) ||
+        progress.chores_met.some((choreId) => CHORE_RECAP[choreId]?.badge === "Bargainer"),
     },
   ];
 }
@@ -298,4 +305,81 @@ export function recommendedTopicId(snapshot: AppSnapshot): string {
 /** The most recent conversation the learner never finished, if there is one. */
 export function unfinishedSession(snapshot: AppSnapshot): SessionListItem | undefined {
   return snapshot.recent_sessions.find((session) => session.status === "active");
+}
+
+/* ------------------------------------------------------------------ *
+ * The recap
+ * ------------------------------------------------------------------ */
+
+/**
+ * How the recap's role-play band tells each ledger chore: the second half of
+ * its mono label, what agreeing is called, and the badge meeting its goal
+ * earns, if it earns one.
+ *
+ * PLACEHOLDER — the design's wording. Only the Bargainer is a badge the
+ * profile shows.
+ */
+export const CHORE_RECAP: Record<string, { track: string; agrees: string; badge?: string }> = {
+  "market-cloth-price": { track: "STALL PRICE", agrees: "He agrees", badge: "Bargainer" },
+  "deposit-refund": { track: "DEPOSIT", agrees: "He agrees" },
+};
+
+/** The talk partner's name as the design gives it. */
+export function castName(characterId: string): string {
+  return CAST.find((member) => member.id === (characterId as CastId))?.name ?? "Your partner";
+}
+
+/** The chore's goal as a figure: `Rs 400 or less`, `Rs 3500 or more`. */
+export function goalFigure(chore: ChoreRecap): string {
+  return `${chore.unit} ${chore.target} or ${chore.direction === "down" ? "less" : "more"}`;
+}
+
+/** Whether the figure got to the target, agreed or not. */
+export function reachedGoal(chore: ChoreRecap): boolean {
+  return chore.direction === "down" ? chore.figure <= chore.target : chore.figure >= chore.target;
+}
+
+export type RecapDayState = "done" | "new" | "empty";
+
+/** What the recap's streak tile shows about the talk just finished. */
+export interface StreakRecap {
+  /** The streak before this talk, and after it. */
+  from: number;
+  to: number;
+  /** Today counts, now or from an earlier talk. */
+  counted: boolean;
+  chip: string | null;
+  week: Array<{ label: string; state: RecapDayState }>;
+}
+
+/**
+ * The streak as this talk left it, from the learner's progress before it.
+ * The first answer of the day adds today, which the tile flips up to; a day
+ * already counted stays as it was; a talk with nothing said in it changes
+ * nothing. Worked out from before the talk, rather than from the figures the
+ * backend sends after it, so the number the tile flips from is known the
+ * moment the recap opens.
+ */
+export function streakRecap(before: LearnerProgress, answered: boolean, today = new Date()): StreakRecap {
+  const run = streak(before, today);
+  const todayKey = dayKey(today);
+  const already = before.days.some((day) => day.day === todayKey);
+  const added = answered && !already;
+  const to = added ? run.days + 1 : run.days;
+  return {
+    from: run.days,
+    to,
+    counted: added || already,
+    chip: added ? (to === 1 ? "New streak" : null) : already ? "Done for today" : null,
+    week: run.week.map((day) => ({
+      label: day.label,
+      state: day.state === "done" ? "done" : day.state === "today" && added ? "new" : "empty",
+    })),
+  };
+}
+
+/** The topic the recap suggests for tomorrow: the first Ella offers that is
+ * not the one just talked about. */
+export function nextTopicLabel(snapshot: AppSnapshot, finishedTopicId: string | null): string | null {
+  return snapshot.topics.find((topic) => topic.id !== finishedTopicId)?.label ?? null;
 }

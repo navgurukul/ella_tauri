@@ -578,6 +578,10 @@ impl TutorEngine for DeferredEngine {
         self.with_engine(|engine| engine.score(skills, messages))
     }
 
+    fn correct(&self, answers: &[&str]) -> EllaResult<Option<Vec<String>>> {
+        self.with_engine(|engine| engine.correct(answers))
+    }
+
     fn opening_in_chore(&self, context: &ChoreContext, learner_name: &str) -> EllaResult<String> {
         match self.inner.read().ok().and_then(|slot| {
             slot.as_ref()

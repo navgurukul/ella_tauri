@@ -4,7 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, Transact
 
 use crate::{
     curriculum::{self, Position},
-    domain::{DayActivity, Learner, LearnerProgress, Message, Session, SessionListItem},
+    domain::{find_chore, DayActivity, Learner, LearnerProgress, Message, Session, SessionListItem, WinCondition},
     error::{EllaError, EllaResult},
     progress::SkillProgress,
 };
@@ -516,11 +516,33 @@ impl Database {
         finished_topics.sort();
         finished_topics.dedup();
 
+        // Read off the ledgers rather than stored, so every goal met before
+        // the recap existed counts as well.
+        let mut ledger_statement = connection.prepare(
+            "SELECT s.chore_id, l.current FROM ledger_state l JOIN sessions s ON s.id = l.session_id
+             WHERE s.status = 'complete' AND l.agreed = 1 AND s.chore_id IS NOT NULL",
+        )?;
+        let mut chores_met = ledger_statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|(chore_id, current)| {
+                find_chore(chore_id).is_some_and(|chore| match chore.win {
+                    WinCondition::Ledger(spec) => spec.reached_target(*current),
+                    WinCondition::Rubric { .. } => false,
+                })
+            })
+            .map(|(chore_id, _)| chore_id)
+            .collect::<Vec<_>>();
+        chores_met.sort();
+        chores_met.dedup();
+
         Ok(LearnerProgress {
             days,
             talks_finished,
             answers,
             finished_topics,
+            chores_met,
         })
     }
 
@@ -604,6 +626,20 @@ impl Database {
             Some((Some(chore), Some(character))) => Some((chore, character)),
             _ => None,
         })
+    }
+
+    /// Where each finished talk of a chore left its ledger: the figure, and
+    /// whether the character agreed to it.
+    pub fn finished_ledgers(&self, chore_id: &str) -> EllaResult<Vec<(i32, bool)>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT l.current, l.agreed FROM ledger_state l JOIN sessions s ON s.id = l.session_id
+             WHERE s.chore_id = ?1 AND s.status = 'complete'",
+        )?;
+        let ledgers = statement
+            .query_map(params![chore_id], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, i64>(1)? != 0)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ledgers)
     }
 
     pub fn ledger_state(&self, session_id: &str) -> EllaResult<Option<(i32, bool)>> {
