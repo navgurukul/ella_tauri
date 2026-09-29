@@ -1,0 +1,963 @@
+{
+  "_source": "Transcribed word for word from Ella Docs, \"Curriculum & Skills Mapping\" (ella.navgurukul.org/curriculum), by way of Ella Mobile's supabase/functions/ella/curriculum.ts. Each skill's short label is ours. Read by the Rust backend (src-tauri/src/curriculum.rs) and the browser preview (src/lib/curriculum.ts).",
+  "start": {
+    "level": "A2",
+    "step": 1
+  },
+  "levels": [
+    {
+      "code": "A0",
+      "name": "Pre-Beginner",
+      "goal": "I can talk about myself and things around me.",
+      "steps": [
+        {
+          "number": 1,
+          "title": "First words",
+          "focus": "Naming the things I can see.",
+          "skills": [
+            {
+              "id": "U1-VOC-01",
+              "strand": "VOC",
+              "label": "Colours, numbers",
+              "text": "I can name colours and say numbers 1–10."
+            },
+            {
+              "id": "U1-VOC-02",
+              "strand": "VOC",
+              "label": "Everyday things",
+              "text": "I can name familiar animals and everyday objects at school and home."
+            },
+            {
+              "id": "U1-GRA-01",
+              "strand": "GRA",
+              "label": "A and the",
+              "text": "I can use ‘a’ and ‘the’ in a simple phrase — a cat, the bag."
+            },
+            {
+              "id": "U1-FLU-01",
+              "strand": "FLU",
+              "label": "Naming things",
+              "text": "I can name things in English when someone points at them."
+            }
+          ]
+        },
+        {
+          "number": 2,
+          "title": "I am and I have got",
+          "focus": "Saying who I am and what I have.",
+          "skills": [
+            {
+              "id": "U2-VOC-01",
+              "strand": "VOC",
+              "label": "About me",
+              "text": "I can say my name, my age, and the name of my school and family members."
+            },
+            {
+              "id": "U2-GRA-01",
+              "strand": "GRA",
+              "label": "Saying I am",
+              "text": "I can say ‘I am’ and ‘I am not’ — I am happy. I am not tired."
+            },
+            {
+              "id": "U2-GRA-02",
+              "strand": "GRA",
+              "label": "I have got",
+              "text": "I can use ‘I have got’ — I have got a dog. I haven’t got a sister."
+            },
+            {
+              "id": "U2-FLU-01",
+              "strand": "FLU",
+              "label": "Introducing myself",
+              "text": "I can introduce myself in English in a few short phrases."
+            }
+          ]
+        },
+        {
+          "number": 3,
+          "title": "I like and I don’t like",
+          "focus": "Saying what I enjoy — and what I don’t.",
+          "skills": [
+            {
+              "id": "U3-VOC-01",
+              "strand": "VOC",
+              "label": "Things I like",
+              "text": "I can name things I like — food, sports, animals, colours."
+            },
+            {
+              "id": "U3-GRA-01",
+              "strand": "GRA",
+              "label": "Likes and dislikes",
+              "text": "I can say ‘I like’ and ‘I don’t like’ — I like cricket. I don’t like eggs."
+            },
+            {
+              "id": "U3-GRA-02",
+              "strand": "GRA",
+              "label": "Joining with and",
+              "text": "I can use ‘and’ to join two things — I like cats and dogs."
+            },
+            {
+              "id": "U3-FLU-01",
+              "strand": "FLU",
+              "label": "Full answers",
+              "text": "I can answer ‘Do you like…?’ with a short sentence, not just yes or no."
+            }
+          ]
+        },
+        {
+          "number": 4,
+          "title": "I can",
+          "focus": "Saying what I am able to do.",
+          "skills": [
+            {
+              "id": "U4-VOC-01",
+              "strand": "VOC",
+              "label": "Positions",
+              "text": "I can name positions — on, in, under, next to, behind."
+            },
+            {
+              "id": "U4-GRA-01",
+              "strand": "GRA",
+              "label": "Can and can't",
+              "text": "I can use ‘can’ to say what someone is able to do — I can run. She can’t fly."
+            },
+            {
+              "id": "U4-GRA-02",
+              "strand": "GRA",
+              "label": "Where things are",
+              "text": "I can say where things are — The bag is on the chair. There is a pen on the table."
+            },
+            {
+              "id": "U4-FLU-01",
+              "strand": "FLU",
+              "label": "My abilities",
+              "text": "I can answer ‘What can you do?’ with a simple sentence."
+            }
+          ]
+        },
+        {
+          "number": 5,
+          "title": "What is happening?",
+          "focus": "Using present continuous and putting it all together in a short exchange.",
+          "skills": [
+            {
+              "id": "U5-GRA-01",
+              "strand": "GRA",
+              "label": "Right now",
+              "text": "I can use present continuous for right now — She is running. They are eating."
+            },
+            {
+              "id": "U5-GRA-02",
+              "strand": "GRA",
+              "label": "What I'm doing",
+              "text": "I can answer questions in the present — What are you doing? I am reading."
+            },
+            {
+              "id": "U5-FLU-01",
+              "strand": "FLU",
+              "label": "Short exchanges",
+              "text": "I can keep a simple exchange going for 2–3 turns on a familiar topic."
+            },
+            {
+              "id": "U5-FLU-02",
+              "strand": "FLU",
+              "label": "Keeping going",
+              "text": "I can keep going even when I only have a few words."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "code": "A1",
+      "name": "First Words",
+      "goal": "I can have simple conversations on everyday topics.",
+      "steps": [
+        {
+          "number": 1,
+          "title": "Describing the world",
+          "focus": "Moving from naming things to describing them.",
+          "skills": [
+            {
+              "id": "U1-VOC-01",
+              "strand": "VOC",
+              "label": "Describing people",
+              "text": "I can describe what people look like and how they feel using simple adjectives."
+            },
+            {
+              "id": "U1-GRA-01",
+              "strand": "GRA",
+              "label": "Happening now",
+              "text": "I can use the present continuous to describe what is happening now — She is running."
+            },
+            {
+              "id": "U1-FLU-01",
+              "strand": "FLU",
+              "label": "Describing places",
+              "text": "I can describe a picture or a place using 3–4 connected sentences."
+            }
+          ]
+        },
+        {
+          "number": 2,
+          "title": "Talking about the past",
+          "focus": "Starting to use past tense to share what happened.",
+          "skills": [
+            {
+              "id": "U2-VOC-01",
+              "strand": "VOC",
+              "label": "Past time words",
+              "text": "I can use past time expressions — yesterday, last week, a long time ago."
+            },
+            {
+              "id": "U2-GRA-01",
+              "strand": "GRA",
+              "label": "Regular past",
+              "text": "I can use past simple with regular verbs — I walked, I watched, I played."
+            },
+            {
+              "id": "U2-GRA-02",
+              "strand": "GRA",
+              "label": "Irregular past",
+              "text": "I can use some irregular past verbs — I went, I saw, I ate, I had."
+            },
+            {
+              "id": "U2-FLU-01",
+              "strand": "FLU",
+              "label": "What I did",
+              "text": "I can talk about something I did recently in a few connected sentences."
+            }
+          ]
+        },
+        {
+          "number": 3,
+          "title": "Giving opinions and reasons",
+          "focus": "Beginning to say what I think and why.",
+          "skills": [
+            {
+              "id": "U3-VOC-01",
+              "strand": "VOC",
+              "label": "Opinion words",
+              "text": "I can use simple opinion words — I think, I feel, I prefer, I love, I hate."
+            },
+            {
+              "id": "U3-GRA-01",
+              "strand": "GRA",
+              "label": "Using because",
+              "text": "I can use ‘because’ to give a reason — I like cricket because it’s exciting."
+            },
+            {
+              "id": "U3-GRA-02",
+              "strand": "GRA",
+              "label": "Using but",
+              "text": "I can use ‘but’ to show contrast — I like football but not swimming."
+            },
+            {
+              "id": "U3-FLU-01",
+              "strand": "FLU",
+              "label": "Opinion and reason",
+              "text": "I can share a simple opinion and give at least one reason for it."
+            }
+          ]
+        },
+        {
+          "number": 4,
+          "title": "Talking about plans",
+          "focus": "Extending into the future — making and sharing plans.",
+          "skills": [
+            {
+              "id": "U4-VOC-01",
+              "strand": "VOC",
+              "label": "How often",
+              "text": "I can use frequency words — always, usually, sometimes, never, often."
+            },
+            {
+              "id": "U4-VOC-02",
+              "strand": "VOC",
+              "label": "Future time words",
+              "text": "I can use future time expressions — tomorrow, next week, soon, one day."
+            },
+            {
+              "id": "U4-GRA-01",
+              "strand": "GRA",
+              "label": "Going to",
+              "text": "I can use ‘going to’ to talk about a plan — I’m going to study tonight."
+            },
+            {
+              "id": "U4-FLU-01",
+              "strand": "FLU",
+              "label": "My plans",
+              "text": "I can talk about what I am going to do and give a simple reason why."
+            }
+          ]
+        },
+        {
+          "number": 5,
+          "title": "Holding a real conversation",
+          "focus": "Using everything together in a real back-and-forth.",
+          "skills": [
+            {
+              "id": "U5-VOC-01",
+              "strand": "VOC",
+              "label": "Sequence words",
+              "text": "I can use connecting phrases — first, then, after that, in the end."
+            },
+            {
+              "id": "U5-GRA-01",
+              "strand": "GRA",
+              "label": "Mixing tenses",
+              "text": "I can use present simple, present continuous, and past simple together in a story."
+            },
+            {
+              "id": "U5-FLU-01",
+              "strand": "FLU",
+              "label": "Back and forth",
+              "text": "I can hold a short back-and-forth conversation on a familiar topic without long pauses."
+            },
+            {
+              "id": "U5-FLU-02",
+              "strand": "FLU",
+              "label": "Pushing through",
+              "text": "I can keep going even when I’m not 100% sure of every word."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "code": "A2",
+      "name": "Finding My Voice",
+      "goal": "I can share my opinions and tell stories in English.",
+      "steps": [
+        {
+          "number": 1,
+          "title": "Finding better words",
+          "focus": "Moving from words that work to words that feel right.",
+          "skills": [
+            {
+              "id": "U1-VOC-01",
+              "strand": "VOC",
+              "label": "Describing words",
+              "text": "I can use a wider range of descriptive words to make my ideas more interesting."
+            },
+            {
+              "id": "U1-VOC-02",
+              "strand": "VOC",
+              "label": "Idioms",
+              "text": "I can understand and use common idioms I hear regularly."
+            },
+            {
+              "id": "U1-GRA-01",
+              "strand": "GRA",
+              "label": "Present perfect",
+              "text": "I can use present perfect to connect past and present — I’ve lived here for 3 years."
+            },
+            {
+              "id": "U1-FLU-01",
+              "strand": "FLU",
+              "label": "Rephrasing",
+              "text": "I can express an idea in more than one way when I’m not sure of a word."
+            }
+          ]
+        },
+        {
+          "number": 2,
+          "title": "Talking about the past with more precision",
+          "focus": "Describing not just what happened, but what was happening and what used to be.",
+          "skills": [
+            {
+              "id": "U2-VOC-01",
+              "strand": "VOC",
+              "label": "Contrast words",
+              "text": "I can use sequence and contrast words — however, although, even though."
+            },
+            {
+              "id": "U2-GRA-01",
+              "strand": "GRA",
+              "label": "Past continuous",
+              "text": "I can use past continuous with past simple — I was eating when she called."
+            },
+            {
+              "id": "U2-GRA-02",
+              "strand": "GRA",
+              "label": "Used to",
+              "text": "I can use ‘used to’ to talk about past habits."
+            },
+            {
+              "id": "U2-FLU-01",
+              "strand": "FLU",
+              "label": "Telling a story",
+              "text": "I can tell a story that moves naturally between past and present."
+            }
+          ]
+        },
+        {
+          "number": 3,
+          "title": "Expressing opinions with depth",
+          "focus": "Moving from simple opinions to supported arguments.",
+          "skills": [
+            {
+              "id": "U3-VOC-01",
+              "strand": "VOC",
+              "label": "Opinion phrases",
+              "text": "I can use reporting words — I think, I believe, in my opinion, it seems to me."
+            },
+            {
+              "id": "U3-GRA-01",
+              "strand": "GRA",
+              "label": "First conditional",
+              "text": "I can use first conditional — If I study hard, I will pass."
+            },
+            {
+              "id": "U3-GRA-02",
+              "strand": "GRA",
+              "label": "Modal verbs",
+              "text": "I can use modal verbs — might, could, should, must — with reasonable accuracy."
+            },
+            {
+              "id": "U3-FLU-01",
+              "strand": "FLU",
+              "label": "Reason and example",
+              "text": "I can give an opinion, support it with a reason, and add an example."
+            }
+          ]
+        },
+        {
+          "number": 4,
+          "title": "Speaking for longer without losing the thread",
+          "focus": "Building up to a full minute of organised, connected speech.",
+          "skills": [
+            {
+              "id": "U4-VOC-01",
+              "strand": "VOC",
+              "label": "Linking words",
+              "text": "I can use linking adverbials — as a result, in addition, on the other hand."
+            },
+            {
+              "id": "U4-GRA-01",
+              "strand": "GRA",
+              "label": "Relative clauses",
+              "text": "I can use relative clauses to add detail — the person who, the place where."
+            },
+            {
+              "id": "U4-FLU-01",
+              "strand": "FLU",
+              "label": "One-minute talk",
+              "text": "I can speak for about 1 minute on a familiar topic without stopping."
+            },
+            {
+              "id": "U4-FLU-02",
+              "strand": "FLU",
+              "label": "Organising ideas",
+              "text": "I can organise what I say so others can follow my thinking easily."
+            }
+          ]
+        },
+        {
+          "number": 5,
+          "title": "Handling unpredictable conversations",
+          "focus": "Communicating flexibly in varied situations.",
+          "skills": [
+            {
+              "id": "U5-VOC-01",
+              "strand": "VOC",
+              "label": "Formal and casual",
+              "text": "I can use formal and informal vocabulary depending on who I’m talking to."
+            },
+            {
+              "id": "U5-GRA-01",
+              "strand": "GRA",
+              "label": "Accurate tenses",
+              "text": "I can use a range of tenses together accurately in an extended story or explanation."
+            },
+            {
+              "id": "U5-FLU-01",
+              "strand": "FLU",
+              "label": "Switching topics",
+              "text": "I can switch between topics in a conversation without losing the thread."
+            },
+            {
+              "id": "U5-FLU-02",
+              "strand": "FLU",
+              "label": "Joining in",
+              "text": "I feel comfortable joining a conversation I didn’t prepare for."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "code": "B1",
+      "name": "Speaking Freely",
+      "goal": "I can speak for about a minute on many different topics.",
+      "steps": [
+        {
+          "number": 1,
+          "title": "Precision in vocabulary",
+          "focus": "Choosing more exact and sophisticated words.",
+          "skills": [
+            {
+              "id": "U1-VOC-01",
+              "strand": "VOC",
+              "label": "Precise words",
+              "text": "I can use a wider range of vocabulary including less common and more precise words."
+            },
+            {
+              "id": "U1-VOC-02",
+              "strand": "VOC",
+              "label": "Collocations",
+              "text": "I can use collocations naturally — make a decision, pay attention, take a risk."
+            },
+            {
+              "id": "U1-GRA-01",
+              "strand": "GRA",
+              "label": "Second conditional",
+              "text": "I can use second conditional fluently — If I had more time, I would travel more."
+            },
+            {
+              "id": "U1-FLU-01",
+              "strand": "FLU",
+              "label": "Complex ideas",
+              "text": "I can express a complex idea clearly without simplifying it too much."
+            }
+          ]
+        },
+        {
+          "number": 2,
+          "title": "Using complex grammar naturally",
+          "focus": "Using third conditional, reported speech, and hedging language with confidence.",
+          "skills": [
+            {
+              "id": "U2-VOC-01",
+              "strand": "VOC",
+              "label": "Hedging",
+              "text": "I can use hedging language — it could be argued, there is some evidence that."
+            },
+            {
+              "id": "U2-GRA-01",
+              "strand": "GRA",
+              "label": "Third conditional",
+              "text": "I can use third conditional — If I had studied harder, I would have passed."
+            },
+            {
+              "id": "U2-GRA-02",
+              "strand": "GRA",
+              "label": "Reported speech",
+              "text": "I can use reported speech fluidly — She said she would come. He asked if I was okay."
+            },
+            {
+              "id": "U2-FLU-01",
+              "strand": "FLU",
+              "label": "Complex sentences",
+              "text": "I can use complex sentences without losing the main point."
+            }
+          ]
+        },
+        {
+          "number": 3,
+          "title": "Speaking at length with coherence",
+          "focus": "Building extended, well-organised spoken responses.",
+          "skills": [
+            {
+              "id": "U3-VOC-01",
+              "strand": "VOC",
+              "label": "Discourse markers",
+              "text": "I can use discourse markers to organise speech — right, so, as I was saying, anyway."
+            },
+            {
+              "id": "U3-GRA-01",
+              "strand": "GRA",
+              "label": "Passive and active",
+              "text": "I can use passive and active voice flexibly depending on what I want to emphasise."
+            },
+            {
+              "id": "U3-FLU-01",
+              "strand": "FLU",
+              "label": "Talking at length",
+              "text": "I can speak for 3–5 minutes on a topic I care about with clear structure."
+            },
+            {
+              "id": "U3-FLU-02",
+              "strand": "FLU",
+              "label": "Staying coherent",
+              "text": "I can keep a conversation coherent even when the topic shifts."
+            }
+          ]
+        },
+        {
+          "number": 4,
+          "title": "Arguing and persuading",
+          "focus": "Moving from sharing opinions to defending and challenging ideas.",
+          "skills": [
+            {
+              "id": "U4-VOC-01",
+              "strand": "VOC",
+              "label": "Argument words",
+              "text": "I can use vocabulary for argumentation — claim, evidence, argue, counter, support."
+            },
+            {
+              "id": "U4-GRA-01",
+              "strand": "GRA",
+              "label": "Building arguments",
+              "text": "I can use a range of linking devices to build structured arguments."
+            },
+            {
+              "id": "U4-GRA-02",
+              "strand": "GRA",
+              "label": "Cleft sentences",
+              "text": "I can use cleft sentences for emphasis — What I mean is… It was she who…"
+            },
+            {
+              "id": "U4-FLU-01",
+              "strand": "FLU",
+              "label": "Disagreeing well",
+              "text": "I can challenge someone’s opinion respectfully and explain my own position clearly."
+            }
+          ]
+        },
+        {
+          "number": 5,
+          "title": "Natural, spontaneous fluency",
+          "focus": "Speaking without noticeable effort on a wide range of topics.",
+          "skills": [
+            {
+              "id": "U5-VOC-01",
+              "strand": "VOC",
+              "label": "Registers",
+              "text": "I can use different registers — casual, formal, persuasive — depending on context."
+            },
+            {
+              "id": "U5-GRA-01",
+              "strand": "GRA",
+              "label": "Accurate grammar",
+              "text": "I can use all B2 grammar structures accurately with very few errors."
+            },
+            {
+              "id": "U5-FLU-01",
+              "strand": "FLU",
+              "label": "Spontaneous talk",
+              "text": "I can speak naturally and spontaneously on almost any familiar topic."
+            },
+            {
+              "id": "U5-FLU-02",
+              "strand": "FLU",
+              "label": "Being myself",
+              "text": "I feel like English is a tool I can rely on to express who I really am."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "code": "B2",
+      "name": "Almost Fluent",
+      "goal": "I feel comfortable talking with peers about complex things.",
+      "steps": [
+        {
+          "number": 1,
+          "title": "Choosing words with more precision and feeling",
+          "focus": "Moving from a large vocabulary to a sensitive one — words chosen for effect, not just meaning.",
+          "skills": [
+            {
+              "id": "U1-VOC-01",
+              "strand": "VOC",
+              "label": "Academic words",
+              "text": "I can use sophisticated vocabulary across academic and professional contexts."
+            },
+            {
+              "id": "U1-VOC-02",
+              "strand": "VOC",
+              "label": "Abstract words",
+              "text": "I can use abstract vocabulary fluently — paradox, implication, integrity, legacy."
+            },
+            {
+              "id": "U1-GRA-01",
+              "strand": "GRA",
+              "label": "Inversion",
+              "text": "I can use inversion for emphasis naturally — Rarely have I heard such an argument."
+            },
+            {
+              "id": "U1-FLU-01",
+              "strand": "FLU",
+              "label": "Nuanced ideas",
+              "text": "I can express nuanced ideas, not just basic ones."
+            }
+          ]
+        },
+        {
+          "number": 2,
+          "title": "Complex grammar with ease",
+          "focus": "Using advanced grammar without effort or hesitation.",
+          "skills": [
+            {
+              "id": "U2-VOC-01",
+              "strand": "VOC",
+              "label": "Nominalisation",
+              "text": "I can use nominalisation to compress meaning — the rise in, the failure to act."
+            },
+            {
+              "id": "U2-GRA-01",
+              "strand": "GRA",
+              "label": "Modal perfects",
+              "text": "I can use all modal perfects — should have, could have, might have — appropriately."
+            },
+            {
+              "id": "U2-GRA-02",
+              "strand": "GRA",
+              "label": "Noun phrases",
+              "text": "I can use complex noun phrases and participle clauses fluently."
+            },
+            {
+              "id": "U2-FLU-01",
+              "strand": "FLU",
+              "label": "Clear and complex",
+              "text": "I can produce complex sentences that are still clear and easy to follow."
+            }
+          ]
+        },
+        {
+          "number": 3,
+          "title": "Sustained, coherent discourse",
+          "focus": "Holding the floor for extended periods.",
+          "skills": [
+            {
+              "id": "U3-VOC-01",
+              "strand": "VOC",
+              "label": "Fluent linking",
+              "text": "I can use linking adverbials and discourse markers fluently — consequently, nevertheless."
+            },
+            {
+              "id": "U3-GRA-01",
+              "strand": "GRA",
+              "label": "Substitution",
+              "text": "I can use reference and substitution to avoid repetition across long stretches of speech."
+            },
+            {
+              "id": "U3-FLU-01",
+              "strand": "FLU",
+              "label": "Extended talk",
+              "text": "I can speak for several minutes on any topic, organising ideas clearly as I go."
+            },
+            {
+              "id": "U3-FLU-02",
+              "strand": "FLU",
+              "label": "Holding my own",
+              "text": "I can hold my own in academic and professional discussions."
+            }
+          ]
+        },
+        {
+          "number": 4,
+          "title": "Register flexibility",
+          "focus": "Adapting instantly to any speaking context or audience.",
+          "skills": [
+            {
+              "id": "U4-VOC-01",
+              "strand": "VOC",
+              "label": "Mixing styles",
+              "text": "I can use figurative, idiomatic, and formal vocabulary naturally in the same conversation."
+            },
+            {
+              "id": "U4-GRA-01",
+              "strand": "GRA",
+              "label": "Emphasis and style",
+              "text": "I can use a range of emphatic and stylistic structures — clefts, fronting, ellipsis."
+            },
+            {
+              "id": "U4-FLU-01",
+              "strand": "FLU",
+              "label": "Shifting register",
+              "text": "I can shift instantly from casual conversation to formal debate without effort."
+            }
+          ]
+        },
+        {
+          "number": 5,
+          "title": "Speaking with real precision and effect",
+          "focus": "Language that creates the exact effect the student intends — in any situation.",
+          "skills": [
+            {
+              "id": "U5-VOC-01",
+              "strand": "VOC",
+              "label": "Irony and humour",
+              "text": "I can use vocabulary to convey attitude, irony, humour, and subtle meaning."
+            },
+            {
+              "id": "U5-GRA-01",
+              "strand": "GRA",
+              "label": "Self-correcting",
+              "text": "My grammar is essentially accurate — errors are rare, minor, and self-corrected."
+            },
+            {
+              "id": "U5-FLU-01",
+              "strand": "FLU",
+              "label": "Skilled speaking",
+              "text": "I can communicate complex ideas with the precision and confidence of a skilled speaker."
+            },
+            {
+              "id": "U5-FLU-02",
+              "strand": "FLU",
+              "label": "Feeling natural",
+              "text": "I feel completely natural when speaking English in any situation."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "code": "C1",
+      "name": "Fluent",
+      "goal": "I can communicate on any topic with accuracy, flexibility, and no hesitation.",
+      "steps": [
+        {
+          "number": 1,
+          "title": "Mastery of vocabulary",
+          "focus": "Moving towards native-level vocabulary range and sensitivity.",
+          "skills": [
+            {
+              "id": "U1-VOC-01",
+              "strand": "VOC",
+              "label": "Creative words",
+              "text": "I can use vocabulary with the precision and creativity of a skilled writer."
+            },
+            {
+              "id": "U1-VOC-02",
+              "strand": "VOC",
+              "label": "Cultural fit",
+              "text": "I can understand and produce language with perfect register and cultural fit."
+            },
+            {
+              "id": "U1-GRA-01",
+              "strand": "GRA",
+              "label": "Literary grammar",
+              "text": "I can use grammatical structures from literary and formal English fluently."
+            },
+            {
+              "id": "U1-FLU-01",
+              "strand": "FLU",
+              "label": "Any idea",
+              "text": "I can communicate any idea I have in English — complex, emotional, abstract, creative."
+            }
+          ]
+        },
+        {
+          "number": 2,
+          "title": "Grammar as craft",
+          "focus": "Using grammar not just accurately but artistically.",
+          "skills": [
+            {
+              "id": "U2-VOC-01",
+              "strand": "VOC",
+              "label": "Poetic language",
+              "text": "I can use figurative, symbolic, and poetic language naturally."
+            },
+            {
+              "id": "U2-GRA-01",
+              "strand": "GRA",
+              "label": "Stylistic effects",
+              "text": "I can use grammar to create stylistic effects — rhythm, emphasis, contrast."
+            },
+            {
+              "id": "U2-GRA-02",
+              "strand": "GRA",
+              "label": "Formal structures",
+              "text": "I can use any grammatical structure found in formal writing or oratory."
+            },
+            {
+              "id": "U2-FLU-01",
+              "strand": "FLU",
+              "label": "Off the cuff",
+              "text": "I can produce extended, well-structured discourse without any preparation."
+            }
+          ]
+        },
+        {
+          "number": 3,
+          "title": "Full communicative range",
+          "focus": "Handling any conversation, audience, or register effortlessly.",
+          "skills": [
+            {
+              "id": "U3-VOC-01",
+              "strand": "VOC",
+              "label": "Allusions",
+              "text": "I can understand cultural allusions, literary references, and historical vocabulary."
+            },
+            {
+              "id": "U3-GRA-01",
+              "strand": "GRA",
+              "label": "Complex passives",
+              "text": "I can use all forms of reported speech, conditionals, and complex passives naturally."
+            },
+            {
+              "id": "U3-FLU-01",
+              "strand": "FLU",
+              "label": "Native speakers",
+              "text": "I can follow and fully engage with native speakers in any context."
+            },
+            {
+              "id": "U3-FLU-02",
+              "strand": "FLU",
+              "label": "Taking the floor",
+              "text": "I can manage multiparty conversations and take the floor with skill."
+            }
+          ]
+        },
+        {
+          "number": 4,
+          "title": "Language as identity",
+          "focus": "English feels like yours — not a language you learned, but one you live in.",
+          "skills": [
+            {
+              "id": "U4-VOC-01",
+              "strand": "VOC",
+              "label": "Word instinct",
+              "text": "I can use English vocabulary with the same instinct and feeling as in my first language."
+            },
+            {
+              "id": "U4-GRA-01",
+              "strand": "GRA",
+              "label": "Automatic grammar",
+              "text": "My grammar is fully automatic — I communicate through it, not with it."
+            },
+            {
+              "id": "U4-FLU-01",
+              "strand": "FLU",
+              "label": "English as mine",
+              "text": "I feel that English is not a foreign language — it is simply a language I speak."
+            }
+          ]
+        },
+        {
+          "number": 5,
+          "title": "Full mastery",
+          "focus": "Arriving at the highest level of English proficiency.",
+          "skills": [
+            {
+              "id": "U5-VOC-01",
+              "strand": "VOC",
+              "label": "Native vocabulary",
+              "text": "I have mastery of English vocabulary equal to a highly educated native speaker."
+            },
+            {
+              "id": "U5-GRA-01",
+              "strand": "GRA",
+              "label": "Full command",
+              "text": "I have complete command of English grammar in all contexts and styles."
+            },
+            {
+              "id": "U5-FLU-01",
+              "strand": "FLU",
+              "label": "Full expression",
+              "text": "I can communicate with precision, warmth, authority, and creativity in English."
+            },
+            {
+              "id": "U5-FLU-02",
+              "strand": "FLU",
+              "label": "No barriers",
+              "text": "Language is no longer a barrier — it is a bridge to everything."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

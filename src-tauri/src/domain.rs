@@ -156,7 +156,183 @@ pub struct AppSnapshot {
     pub recent_sessions: Vec<SessionListItem>,
     /// The learner's lifetime figures; all zero when signed out.
     pub progress: LearnerProgress,
+    /// Where the learner stands in the curriculum; `None` when signed out.
+    pub standing: Option<Standing>,
     pub engine_status: EngineStatus,
+}
+
+/// Where the learner stands in the curriculum, as the window shows it: a
+/// level's name and its number on the ladder, never its CEFR code.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Standing {
+    /// 1 to `level_count`.
+    pub level_number: u8,
+    pub level_count: u8,
+    pub level_name: String,
+    /// The step within the level, 1 to `step_count`.
+    pub step: u8,
+    pub step_count: u8,
+    pub step_title: String,
+    /// How far through the level they are, as a whole percent: the steps
+    /// behind them and the share of this step's skills passed.
+    pub percent: u8,
+    /// False until a placement chat has read a level for them. A learner can
+    /// move on through talks without one; the window offers it until then.
+    pub placed: bool,
+}
+
+/// How far a talk moved the learner.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Advance {
+    Step,
+    Level,
+}
+
+/// One skill a talk counted, for the summary: its short label and how many
+/// talks have shown it so far.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillGrowth {
+    pub label: String,
+    pub count: u32,
+}
+
+/// What a finished talk did for the learner, worked out once and kept on the
+/// talk, so asking again answers the same and counts nothing twice.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Assessment {
+    pub session_id: String,
+    /// `placement` or `talk`.
+    pub kind: String,
+    /// Where the learner stands after this talk.
+    pub standing: Standing,
+    /// A placement's last word, for its result screen; `None` for a talk.
+    pub closing: Option<String>,
+    /// A step or a level this talk finished; `None` when it moved nobody on.
+    pub advanced: Option<Advance>,
+    /// The skills this talk counted: its aim first, then the surest, at most
+    /// three.
+    pub skills: Vec<SkillGrowth>,
+    /// Whether anything judged the talk. Not when the learner said nothing,
+    /// when there is no model to judge with, or when its answer could not be
+    /// read — and none of those count against the learner.
+    pub scored: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LevelState {
+    Done,
+    Current,
+    Next,
+    Locked,
+}
+
+/// One level of the ladder as it stands for the learner.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LevelView {
+    pub number: u8,
+    pub name: String,
+    /// The level's "I can …" headline.
+    pub goal: String,
+    pub state: LevelState,
+    /// 100 for a level behind them, their progress for their own, else 0.
+    pub percent: u8,
+    pub steps: Vec<StepView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StepView {
+    pub number: u8,
+    pub title: String,
+    pub focus: String,
+    pub skills: Vec<LevelSkillView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LevelSkillView {
+    pub label: String,
+    /// "I can …", word for word.
+    pub text: String,
+    pub passed: bool,
+}
+
+/// What a talk's instructions say about the learner: the level to pitch Ella's
+/// words at, and the one skill the talk quietly aims at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pitch {
+    /// The CEFR code. It goes to the model, never to the window.
+    pub level: String,
+    pub focus: Option<Focus>,
+}
+
+impl Pitch {
+    pub fn at(level: &str) -> Self {
+        Self {
+            level: level.into(),
+            focus: None,
+        }
+    }
+}
+
+/// The skill a talk aims at, and the step it comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Focus {
+    pub step_title: String,
+    pub step_focus: String,
+    /// "I can …", as the curriculum words it.
+    pub skill: String,
+}
+
+/// A turn of the placement chat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementBrief {
+    pub age: Option<u8>,
+    /// This reply ends the chat: a goodbye, not another question.
+    pub closing: bool,
+}
+
+/// How sure the judge would be of the learner's level, if asked now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confidence {
+    Low,
+    Medium,
+    High,
+}
+
+impl Confidence {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+}
+
+/// Whether the placement chat has heard enough to read a level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Readiness {
+    pub ready: bool,
+    pub confidence: Confidence,
+}
+
+/// A level read off a finished placement chat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementReading {
+    /// A CEFR code the curriculum has.
+    pub level: String,
+    /// One warm sentence to end on, when the model wrote a usable one.
+    pub closing: Option<String>,
+}
+
+/// A skill a finished talk is judged against: its progress key and what it
+/// says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scorable {
+    pub key: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -282,6 +458,12 @@ pub struct TutorRequest {
     /// `None` is a free conversation on a topic, the pre-chore behaviour.
     /// `Some` makes the engine somebody, with a setting and a hidden brief.
     pub chore: Option<ChoreContext>,
+    /// The learner's level and the talk's quiet aim. Held steady for a whole
+    /// session, so it can sit in llama.cpp's cached prefix.
+    pub pitch: Pitch,
+    /// `Some` for a turn of the placement chat, which asks its own questions
+    /// instead of playing a scene.
+    pub placement: Option<PlacementBrief>,
 }
 
 pub fn topics() -> Vec<Topic> {
@@ -541,6 +723,8 @@ pub enum TurnSignal {
 #[derive(Debug, Clone)]
 pub struct ChoreContext {
     pub chore_id: String,
+    /// The learner's CEFR level, which the character pitches its words at.
+    pub level: String,
     pub character: Character,
     pub setting: String,
     pub learner_goal: String,

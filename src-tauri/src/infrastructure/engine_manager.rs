@@ -353,7 +353,7 @@ mod tests {
             fn status(&self) -> EngineStatus {
                 EngineStatus { mode: "test".into(), label: "test".into(), ready: true, components: Vec::new() }
             }
-            fn opening(&self, _: &Topic, _: &str) -> EllaResult<String> {
+            fn opening(&self, _: &Topic, _: &str, _: &Pitch) -> EllaResult<String> {
                 Ok(String::new())
             }
             fn reply(&self, _: &TutorRequest) -> EllaResult<GeneratedReply> {
@@ -398,7 +398,12 @@ mod tests {
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
-use crate::domain::{ChoreContext, EngineComponent, EngineStatus, Topic, TutorRequest};
+use std::collections::HashMap;
+
+use crate::domain::{
+    ChoreContext, EngineComponent, EngineStatus, Message, Pitch, PlacementReading, Readiness,
+    Scorable, Topic, TutorRequest,
+};
 use crate::infrastructure::engines::{
     GeneratedReply, SpeechSink, SynthesizedAudio, TutorEngine,
 };
@@ -447,6 +452,20 @@ impl DeferredEngine {
 
     fn pending(&self) -> EllaError {
         EllaError::Engine(self.message())
+    }
+
+    /// Hands the call to the engine once it is there, and otherwise says what
+    /// the learner is still waiting for.
+    fn with_engine<T>(&self, call: impl FnOnce(&dyn TutorEngine) -> EllaResult<T>) -> EllaResult<T> {
+        match self
+            .inner
+            .read()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|engine| call(engine.as_ref())))
+        {
+            Some(result) => result,
+            None => Err(self.pending()),
+        }
     }
 
     fn message(&self) -> String {
@@ -522,13 +541,41 @@ impl TutorEngine for DeferredEngine {
         }
     }
 
-    fn opening(&self, topic: &Topic, learner_name: &str) -> EllaResult<String> {
-        match self.inner.read().ok().and_then(|slot| {
-            slot.as_ref().map(|engine| engine.opening(topic, learner_name))
-        }) {
-            Some(result) => result,
-            None => Err(self.pending()),
-        }
+    fn opening(&self, topic: &Topic, learner_name: &str, pitch: &Pitch) -> EllaResult<String> {
+        self.with_engine(|engine| engine.opening(topic, learner_name, pitch))
+    }
+
+    fn placement_opening(&self, learner_name: &str, age: Option<u8>) -> EllaResult<String> {
+        self.with_engine(|engine| engine.placement_opening(learner_name, age))
+    }
+
+    fn judges(&self) -> bool {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|engine| engine.judges()))
+            .unwrap_or(false)
+    }
+
+    fn placement_readiness(
+        &self,
+        learner_name: &str,
+        age: Option<u8>,
+        messages: &[Message],
+    ) -> EllaResult<Option<Readiness>> {
+        self.with_engine(|engine| engine.placement_readiness(learner_name, age, messages))
+    }
+
+    fn place(&self, learner_name: &str, messages: &[Message]) -> EllaResult<Option<PlacementReading>> {
+        self.with_engine(|engine| engine.place(learner_name, messages))
+    }
+
+    fn score(
+        &self,
+        skills: &[Scorable],
+        messages: &[Message],
+    ) -> EllaResult<Option<HashMap<String, f64>>> {
+        self.with_engine(|engine| engine.score(skills, messages))
     }
 
     fn opening_in_chore(&self, context: &ChoreContext, learner_name: &str) -> EllaResult<String> {

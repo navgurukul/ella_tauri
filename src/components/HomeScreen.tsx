@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { EllaMascot } from "./EllaMascot";
+import { LevelCard } from "./LevelCard";
 import { FlameGlyph } from "./Sidebar";
 import {
   recommendedTopicId,
@@ -28,11 +29,13 @@ export function HomeScreen({
   busy,
   onStart,
   onResume,
+  onLevels,
 }: {
   snapshot: AppSnapshot;
   busy: boolean;
   onStart: (topic: Topic) => void;
   onResume: (sessionId: string) => void;
+  onLevels: () => void;
 }) {
   const [showAll, setShowAll] = useState(false);
   const name = snapshot.learner?.name ?? "friend";
@@ -100,6 +103,8 @@ export function HomeScreen({
         </div>
 
         <aside className="rail">
+          {snapshot.standing && <LevelCard standing={snapshot.standing} onOpen={onLevels} />}
+
           {unfinished && (
             <section className="card card--resume">
               <p className="eyebrow">Unfinished talk</p>

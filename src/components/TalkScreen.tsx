@@ -55,11 +55,19 @@ const SPEAK_UP_DELAY_MS = 4000;
 
 export function TalkScreen({
   session,
+  variant = "talk",
   onSessionChange,
+  onClosing,
   onComplete,
 }: {
   session: Session;
+  /** `placement` is the first talk, which finds the learner's level: it says
+   * so in its chip, and its way out is Skip rather than End talk. */
+  variant?: "talk" | "placement";
   onSessionChange: (session: Session) => void;
+  /** The moment a turn arrives that closed the session, before Ella has said
+   * it: a placement starts reading the level then, while she talks. */
+  onClosing?: (summary: SessionSummary) => void;
   onComplete: (summary: SessionSummary) => void;
 }) {
   const [state, setState] = useState<EllaState>("resting");
@@ -605,7 +613,10 @@ export function TalkScreen({
     // The backend has already closed the session, but Ella's last line has not
     // been heard yet. Hold the summary until she has finished saying it — see
     // the effect below.
-    if (result.session_summary) setPendingSummary(result.session_summary);
+    if (result.session_summary) {
+      onClosing?.(result.session_summary);
+      setPendingSummary(result.session_summary);
+    }
     playElla(result.ella_message.content, result);
   }
 
@@ -703,14 +714,19 @@ export function TalkScreen({
       </div>
 
       <header className="talk-head">
-        <span className="pill pill--white">{session.topic_label}</span>
+        <span className="pill pill--white">
+          {session.topic_label}
+          {variant === "placement" && <span className="talk-head__tag">Your level</span>}
+        </span>
+        {/* Once the talk has closed itself there is nothing left to end: it
+            only waits for Ella to finish her last line. */}
         <button
           type="button"
           className="btn btn--quiet"
           onClick={() => void endConversation()}
-          disabled={sending || micStarting}
+          disabled={sending || micStarting || pendingSummary !== null}
         >
-          End talk
+          {variant === "placement" ? "Skip" : "End talk"}
         </button>
       </header>
 

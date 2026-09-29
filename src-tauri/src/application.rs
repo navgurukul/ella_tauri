@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{Local, Utc};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -8,21 +8,31 @@ use std::{
 use uuid::Uuid;
 
 use crate::{
+    curriculum::{self, Position},
     domain::{
-        find_character, find_chore, topics, topics_for_age, AppSnapshot, ChoreContext, LedgerTurn,
-        AudioPayload, LedgerView, Learner, LearnerProfile, LearnerProgress, Message, Session,
-        SessionSummary, SpeechStreamEvent, SpokenLine, TurnSignal, WinCondition, Speaker, Topic,
-        TurnResult, TutorRequest, WordSpan,
+        find_character, find_chore, topics, topics_for_age, Advance, AppSnapshot, Assessment,
+        ChoreContext, Focus, LedgerTurn, AudioPayload, LedgerView, Learner, LearnerProfile,
+        LearnerProgress, LevelSkillView, LevelState, LevelView, Message, Pitch, PlacementBrief,
+        PlacementReading, Readiness, Scorable, Session, SessionSummary, SpeechStreamEvent,
+        SpokenLine, Standing, StepView, TurnSignal, WinCondition, Speaker, Topic, TurnResult,
+        TutorRequest, WordSpan,
     },
     error::{EllaError, EllaResult},
     infrastructure::{
         audio::{quietest_cut_index, trim_to_speech, VadOutput},
-        database::Database,
+        database::{AssessmentWrite, Database},
         engines::{trailing_question, GeneratedReply, SpeechSegment, SpeechSink, TutorEngine, FREE_TOPIC_TURNS},
         safety,
     },
+    progress::{self, ProgressMap, SkillProgress},
     telemetry::LatencyTrace,
 };
+
+/// The placement chat is a session like any other, marked with this kind. Its
+/// topic id and label are what Home's list shows if it is ever left open.
+const PLACEMENT_KIND: &str = "placement";
+pub const PLACEMENT_TOPIC_ID: &str = "placement";
+const PLACEMENT_LABEL: &str = "First talk";
 
 /// How the shell delivers a finished sentence to the window mid-turn.
 ///
@@ -77,11 +87,29 @@ struct VoiceStream {
     chunks: Vec<thread::JoinHandle<StreamChunkOutcome>>,
 }
 
+/// A placement check started after the chat's latest exchange. It runs while
+/// Ella speaks and the learner thinks of an answer, and the next turn reads
+/// it: see `AppService::placement_closes`.
+struct PendingCheck {
+    /// How many answers it judged.
+    answers: u32,
+    verdict: Verdict,
+}
+
+enum Verdict {
+    Running(thread::JoinHandle<Option<Readiness>>),
+    /// Read by a turn that has not been saved yet. Kept, so that if the turn
+    /// fails, the answer tried again is judged the same.
+    Read(Option<Readiness>),
+}
+
 pub struct AppService {
     database: Database,
     engine: Arc<dyn TutorEngine>,
     streams: Mutex<HashMap<String, VoiceStream>>,
     speech: Mutex<Option<Arc<dyn SpeechBroadcast>>>,
+    /// At most one per placement chat in progress, by session id.
+    placement_checks: Mutex<HashMap<String, PendingCheck>>,
 }
 
 impl AppService {
@@ -91,6 +119,7 @@ impl AppService {
             engine: Arc::from(engine),
             streams: Mutex::new(HashMap::new()),
             speech: Mutex::new(None),
+            placement_checks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -137,10 +166,14 @@ impl AppService {
         let saved = self.database.learner()?;
         let saved_learner = saved.as_ref().map(|(learner, _)| LearnerProfile::from(learner));
         let learner = saved.and_then(|(learner, signed_in)| signed_in.then_some(learner));
-        let (recent_sessions, progress) = if learner.is_some() {
-            (self.database.recent_sessions(5)?, self.database.progress()?)
+        let (recent_sessions, progress, standing) = if learner.is_some() {
+            (
+                self.database.recent_sessions(5)?,
+                self.database.progress()?,
+                Some(self.standing()?),
+            )
         } else {
-            (Vec::new(), LearnerProgress::default())
+            (Vec::new(), LearnerProgress::default(), None)
         };
         Ok(AppSnapshot {
             topics: topics_for_age(learner.as_ref().and_then(|learner| learner.age)),
@@ -148,8 +181,31 @@ impl AppService {
             saved_learner,
             recent_sessions,
             progress,
+            standing,
             engine_status: self.engine.status(),
         })
+    }
+
+    /// Where the learner is, and whether a placement chat has read a level for
+    /// them. Someone nothing has put anywhere yet — or whose stored level the
+    /// curriculum no longer has — stands at the curriculum's start, as every
+    /// new learner does on the phone. A learner can move on through talks
+    /// without a placement, so the two are kept apart.
+    fn placement(&self) -> EllaResult<(Position, bool)> {
+        let position = self
+            .database
+            .position()?
+            .and_then(known_position)
+            .unwrap_or_else(curriculum::start);
+        Ok((position, self.database.placed()?))
+    }
+
+    /// The learner's place in the curriculum, as the window shows it.
+    fn standing(&self) -> EllaResult<Standing> {
+        let (position, placed) = self.placement()?;
+        let keys = keys_of(&progress::step_skills(&position));
+        let known = progress::by_key(&self.database.skill_progress(&keys)?);
+        Ok(standing_at(&position, placed, &known))
     }
 
     /// The onboarding name step, which also signs the learner in. There is
@@ -166,8 +222,11 @@ impl AppService {
             }
         }
         // Onboarding can be re-run without the age step; the database keeps
-        // the age it already knows when none is given.
-        self.database.save_learner(clean, age, "Morning Meadow", &now())
+        // the age it already knows when none is given. `level_name` is
+        // v0.1.6's column, kept to the level the learner is actually at.
+        let (position, _) = self.placement()?;
+        self.database
+            .save_learner(clean, age, &curriculum::level_name(&position.level), &now())
     }
 
     /// "Log in" on the welcome screen: the learner saved on this laptop
@@ -260,16 +319,25 @@ impl AppService {
         })
     }
 
+    /// A talk on a topic. Every one quietly aims at a skill of the learner's
+    /// step, picked here and kept on the session, so each turn's instructions
+    /// say the same and the talk is scored against it when it ends.
     pub fn start_session(&self, topic_id: &str) -> EllaResult<Session> {
         let topic = find_topic(topic_id)?;
         let learner = self.database.signed_in_learner()?.ok_or_else(|| {
             EllaError::Conflict("Tell Ella your name before starting a conversation.".into())
         })?;
+        let (position, _) = self.placement()?;
+        let target = self.choose_target(&position)?;
+        let pitch = Pitch {
+            level: position.level.clone(),
+            focus: target.as_deref().and_then(focus_for),
+        };
         let started_at = now();
         let opening = Message {
             id: Uuid::new_v4().to_string(),
             speaker: Speaker::Ella,
-            content: self.engine.opening(&topic, &learner.name)?,
+            content: self.engine.opening(&topic, &learner.name, &pitch)?,
             turn: 0,
             created_at: started_at.clone(),
         };
@@ -282,8 +350,56 @@ impl AppService {
             completed_at: None,
             messages: vec![opening.clone()],
         };
-        self.database.create_session(&session, &opening)?;
+        self.database.create_session(
+            &session,
+            &opening,
+            None,
+            target.as_deref(),
+            Some(&position.level),
+        )?;
         Ok(session)
+    }
+
+    /// The placement chat: a friendly first talk that climbs from easy
+    /// questions to harder ones until it has heard enough to read a level,
+    /// between five answers and twelve. Onboarding opens it, and so does the
+    /// level map for a learner who never had one.
+    pub fn start_placement(&self) -> EllaResult<Session> {
+        let learner = self.database.signed_in_learner()?.ok_or_else(|| {
+            EllaError::Conflict("Tell Ella your name before starting a conversation.".into())
+        })?;
+        let started_at = now();
+        let opening = Message {
+            id: Uuid::new_v4().to_string(),
+            speaker: Speaker::Ella,
+            content: self.engine.placement_opening(&learner.name, learner.age)?,
+            turn: 0,
+            created_at: started_at.clone(),
+        };
+        let session = Session {
+            id: Uuid::new_v4().to_string(),
+            topic_id: PLACEMENT_TOPIC_ID.into(),
+            topic_label: PLACEMENT_LABEL.into(),
+            status: "active".into(),
+            started_at,
+            completed_at: None,
+            messages: vec![opening.clone()],
+        };
+        self.database
+            .create_session(&session, &opening, Some(PLACEMENT_KIND), None, None)?;
+        Ok(session)
+    }
+
+    /// The skill a new talk at `position` aims at: the one that most wants
+    /// practice, with the latest talks' aims held back.
+    fn choose_target(&self, position: &Position) -> EllaResult<Option<String>> {
+        let in_play = keys_of(&progress::skills_in_play(position));
+        if in_play.is_empty() {
+            return Ok(None);
+        }
+        let known = progress::by_key(&self.database.skill_progress(&in_play)?);
+        let recent = self.database.recent_targets()?;
+        Ok(progress::choose_target(position, &known, &recent, &today()).map(|placed| placed.key))
     }
 
     /// Start a chore. The session row is the same shape as a free conversation;
@@ -306,8 +422,10 @@ impl AppService {
             WinCondition::Ledger(spec) => Some(spec.opening),
             WinCondition::Rubric { .. } => None,
         };
+        let (position, _) = self.placement()?;
         let context = ChoreContext {
             chore_id: chore.id.clone(),
+            level: position.level.clone(),
             character: character.clone(),
             setting: chore.setting.clone(),
             learner_goal: chore.learner_goal.clone(),
@@ -346,14 +464,16 @@ impl AppService {
             &chore.id,
             &character.id,
             ledger_opening,
+            &position.level,
             &now(),
         )?;
         Ok(session)
     }
 
     /// Rebuild the chore context for a turn, with the ledger figure as it
-    /// currently stands. `None` for a free-topic session.
-    fn chore_context_for(&self, session_id: &str) -> EllaResult<Option<ChoreContext>> {
+    /// currently stands and the character pitched at `level`. `None` for a
+    /// free-topic session.
+    fn chore_context_for(&self, session_id: &str, level: &str) -> EllaResult<Option<ChoreContext>> {
         let Some((chore_id, character_id)) = self.database.session_chore(session_id)? else {
             return Ok(None);
         };
@@ -375,6 +495,7 @@ impl AppService {
         };
         Ok(Some(ChoreContext {
             chore_id: chore.id,
+            level: level.into(),
             character,
             setting: chore.setting,
             learner_goal: chore.learner_goal,
@@ -776,9 +897,32 @@ impl AppService {
             .filter(|message| message.speaker == Speaker::Learner)
             .count() as u32
             + 1;
+        let curriculum_meta = self.database.session_curriculum(session_id)?;
+        // The level the talk began at, so its instructions read the same from
+        // the first turn to the last — and stay in llama.cpp's cached prefix —
+        // even when another talk's assessment moves the learner on meanwhile.
+        let level = match curriculum_meta.level_code.clone() {
+            Some(level) => level,
+            None => self.placement()?.0.level,
+        };
         // A chore session carries a character, a setting and a hidden brief; a
         // free-topic session carries none of that and behaves exactly as before.
-        let chore_context = self.chore_context_for(session_id)?;
+        let chore_context = self.chore_context_for(session_id, &level)?;
+        let flagged = safety::flagged(clean);
+        // A placement answer the filter flagged never ends the chat: the reply
+        // to it asks the dodged question again, which only makes sense if the
+        // chat carries on. The pending check is left for the next answer.
+        let brief = (curriculum_meta.kind.as_deref() == Some(PLACEMENT_KIND)).then(|| {
+            PlacementBrief {
+                age: learner.age,
+                closing: !flagged && self.placement_closes(session_id, turn),
+            }
+        });
+        let pitch = Pitch {
+            level,
+            focus: curriculum_meta.target_skill.as_deref().and_then(focus_for),
+        };
+        let (learner_name, learner_age) = (learner.name.clone(), learner.age);
         let request = TutorRequest {
             learner_name: learner.name,
             topic_id: session.topic_id.clone(),
@@ -787,8 +931,10 @@ impl AppService {
             learner_text: clean.into(),
             turn,
             chore: chore_context.clone(),
+            pitch,
+            placement: brief.clone(),
         };
-        let mut generated = if safety::flagged(clean) {
+        let mut generated = if flagged {
             // Skip the model entirely: a live session showed it does not
             // reliably self-correct once one turn slips into a soft,
             // validating register, so a flagged turn must never reach it.
@@ -911,13 +1057,16 @@ impl AppService {
         // gone as far as it goes, or when the turn budget runs out — not on a
         // fixed count. A free conversation has no decision to reach, so three
         // turns of practice remains the point at which stopping is fine.
-        let suggested_complete = match chore_context.as_ref() {
-            Some(context) => {
+        //
+        // The placement chat is its own: it ends when it has heard enough.
+        let suggested_complete = match (&brief, chore_context.as_ref()) {
+            (Some(brief), _) => brief.closing,
+            (None, Some(context)) => {
                 generated.signal.is_some()
                     || ledger_view.as_ref().is_some_and(|ledger| ledger.agreed)
                     || turn >= context.max_turns
             }
-            None => turn >= 3,
+            (None, None) => turn >= 3,
         };
 
         // Over for good, not merely a fine place to stop. Ella has just spoken
@@ -932,14 +1081,21 @@ impl AppService {
         // spent it on "Thank you for understanding", which is a conversation
         // ending the way conversations do. `suggested_complete` already offers
         // the learner the way out at that point.
-        let conversation_over = match chore_context.as_ref() {
-            Some(context) => turn >= context.max_turns,
-            None => turn >= FREE_TOPIC_TURNS,
+        //
+        // The placement chat closes on its goodbye, and its level is read
+        // afterwards, by `assess_session`, while Ella is still saying it.
+        let conversation_over = match (&brief, chore_context.as_ref()) {
+            (Some(brief), _) => brief.closing,
+            (None, Some(context)) => turn >= context.max_turns,
+            (None, None) => turn >= FREE_TOPIC_TURNS,
         };
         // `persist_turn` above already wrote this turn, so the summary counts it.
         let session_summary = if conversation_over {
             Some(self.complete_session(session_id)?)
         } else {
+            if brief.is_some() {
+                self.schedule_placement_check(session_id, &learner_name, learner_age, turn);
+            }
             None
         };
 
@@ -1010,6 +1166,11 @@ impl AppService {
     pub fn complete_session(&self, session_id: &str) -> EllaResult<SessionSummary> {
         let session = self.database.session(session_id)?;
         self.database.complete_session(session_id, &now())?;
+        // A placement chat ended early — Skip — has a check nobody will read.
+        self.placement_checks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(session_id);
         let turns = session
             .messages
             .iter()
@@ -1042,6 +1203,432 @@ impl AppService {
             encouragement,
         })
     }
+
+    /// Whether the learner's `answers`-th answer is the placement chat's last.
+    ///
+    /// Twelve answers end it regardless. Without a model it ends at the
+    /// shortest length allowed, as on the phone. Otherwise the check started
+    /// after the previous exchange decides, by `progress::placement_ends`.
+    ///
+    /// That check judged the answers before this one. The phone's model judges
+    /// the latest answer too, in the same reply; here that would put another
+    /// model call in front of every turn from the fifth, seconds on a laptop's
+    /// CPU. Asked a turn early it has had all of Ella's reply and the learner's
+    /// answer to finish in, so the turn rarely waits on it. The chat still ends
+    /// no sooner than the fifth answer and no later than the twelfth, and the
+    /// level is read off every answer. A check that failed, or never started,
+    /// keeps the chat going.
+    fn placement_closes(&self, session_id: &str, answers: u32) -> bool {
+        let pending = self
+            .placement_checks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(session_id);
+        if answers >= progress::PLACEMENT_MAX_TURNS {
+            return true;
+        }
+        if !self.engine.judges() {
+            return answers >= progress::PLACEMENT_MIN_TURNS;
+        }
+        let Some(pending) = pending else {
+            return false;
+        };
+        let readiness = match pending.verdict {
+            Verdict::Running(handle) => handle.join().ok().flatten(),
+            Verdict::Read(readiness) => readiness,
+        };
+        // Put back until this turn is saved: the next exchange's check
+        // replaces it, and closing the chat clears it.
+        self.placement_checks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                session_id.to_owned(),
+                PendingCheck {
+                    answers: pending.answers,
+                    verdict: Verdict::Read(readiness),
+                },
+            );
+        match readiness {
+            Some(readiness) => {
+                eprintln!(
+                    "[placement] the check after {} answers: ready={} confidence={:?}",
+                    pending.answers, readiness.ready, readiness.confidence
+                );
+                progress::placement_ends(answers, readiness.ready, readiness.confidence)
+            }
+            None => false,
+        }
+    }
+
+    /// Starts the check the next answer reads: has the chat heard enough? From
+    /// the fourth answer, so that the fifth can be the last, and only with a
+    /// model to ask. It runs on its own thread while the reply is played.
+    fn schedule_placement_check(
+        &self,
+        session_id: &str,
+        learner_name: &str,
+        age: Option<u8>,
+        answers: u32,
+    ) {
+        if !self.engine.judges() || answers + 1 < progress::PLACEMENT_MIN_TURNS {
+            return;
+        }
+        let Ok(session) = self.database.session(session_id) else {
+            return;
+        };
+        let engine = Arc::clone(&self.engine);
+        let name = learner_name.to_owned();
+        let handle = thread::spawn(move || {
+            match engine.placement_readiness(&name, age, &session.messages) {
+                Ok(readiness) => readiness,
+                Err(error) => {
+                    eprintln!("[placement] the check after {answers} answers failed: {error}");
+                    None
+                }
+            }
+        });
+        self.placement_checks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                session_id.to_owned(),
+                PendingCheck {
+                    answers,
+                    verdict: Verdict::Running(handle),
+                },
+            );
+    }
+
+    /// What a finished talk did for the learner. Worked out the first time it
+    /// is asked for and kept on the talk, so every later ask answers the same
+    /// and nothing is counted twice.
+    ///
+    /// A placement chat reads a level off the talk and puts the learner at
+    /// Step 1 of it. Once a placement has put them somewhere, another one only
+    /// moves them up: a short chat on a nervous day must not take back what
+    /// their talks have earned.
+    ///
+    /// Any other talk the learner spoke in is scored on the skills of their
+    /// step and the next. Each demonstration the judge is sure of raises that
+    /// skill, and a finished step moves them on: to the next step, or after
+    /// the last to Step 1 of the next level. Without a model nothing is
+    /// scored. A model whose answer cannot be read is an error, so the window
+    /// can ask again rather than have the talk count for nothing.
+    pub fn assess_session(&self, session_id: &str) -> EllaResult<Assessment> {
+        let learner = self
+            .database
+            .signed_in_learner()?
+            .ok_or_else(|| EllaError::Conflict("Tell Ella your name first.".into()))?;
+        let session = self.database.session(session_id)?;
+        let meta = self.database.session_curriculum(session_id)?;
+        if let Some(kept) = &meta.assessment {
+            return read_assessment(kept);
+        }
+        if session.status != "complete" {
+            return Err(EllaError::Conflict("This talk is still going.".into()));
+        }
+        let spoke = session
+            .messages
+            .iter()
+            .any(|message| message.speaker == Speaker::Learner);
+        let kept = if meta.kind.as_deref() == Some(PLACEMENT_KIND) {
+            self.assess_placement(&learner, &session)?
+        } else {
+            self.assess_talk(&session, meta.target_skill, spoke)?
+        };
+        read_assessment(&kept)
+    }
+
+    fn assess_placement(&self, learner: &Learner, session: &Session) -> EllaResult<String> {
+        let answers: Vec<&str> = session
+            .messages
+            .iter()
+            .filter(|message| message.speaker == Speaker::Learner)
+            .map(|message| message.content.as_str())
+            .collect();
+        // A chat ended before it could close itself — Skip, or End talk on one
+        // left open and picked up again from Home — places nobody unless it
+        // heard as many answers as the shortest placement does. The level is
+        // read before the transaction opens: the model takes a while, and the
+        // database is not held while it does.
+        let reading = if answers.len() as u32 >= progress::PLACEMENT_MIN_TURNS {
+            let read = self.engine.place(&learner.name, &session.messages).map_err(|error| {
+                eprintln!("[curriculum] placement {}: {error}", session.id);
+                // Shown as it is, so it says what to do.
+                EllaError::Conflict(
+                    "Ella could not work out your level just now. Try again in a moment.".into(),
+                )
+            })?;
+            // Without a model the chat still ends somewhere: where everyone
+            // starts, as on the phone.
+            let read = read.unwrap_or_else(|| PlacementReading {
+                level: curriculum::start().level,
+                closing: None,
+            });
+            // Very short answers are held down whatever was read off them.
+            Some(PlacementReading {
+                level: progress::at_most(&read.level, progress::level_ceiling(&answers)),
+                ..read
+            })
+        } else {
+            None
+        };
+        let closing = reading
+            .as_ref()
+            .and_then(|reading| reading.closing.clone())
+            .unwrap_or_else(|| format!("That was lovely, {}!", first_name(&learner.name)));
+        let session_id = session.id.clone();
+        self.database.commit_assessment(&session.id, move |store| {
+            let stored = store.position()?.and_then(known_position);
+            let moved = match (&reading, &stored) {
+                (None, _) => None,
+                (Some(reading), None) => Some(Position::new(&reading.level, 1)),
+                (Some(reading), Some(current)) => (curriculum::level_index(&reading.level)
+                    > curriculum::level_index(&current.level))
+                .then(|| Position::new(&reading.level, 1)),
+            };
+            let placed = store.placed()? || reading.is_some();
+            let position = moved.clone().or(stored).unwrap_or_else(curriculum::start);
+            let known = progress::by_key(&store.skill_progress(&keys_of(&progress::step_skills(&position)))?);
+            let assessment = Assessment {
+                session_id,
+                kind: PLACEMENT_KIND.into(),
+                standing: standing_at(&position, placed, &known),
+                closing: Some(closing),
+                advanced: None,
+                skills: Vec::new(),
+                scored: reading.is_some(),
+            };
+            Ok(AssessmentWrite {
+                skills: Vec::new(),
+                position: moved,
+                placed: reading.is_some(),
+                assessment: to_json(&assessment)?,
+            })
+        })
+    }
+
+    fn assess_talk(&self, session: &Session, target: Option<String>, spoke: bool) -> EllaResult<String> {
+        let (position, _) = self.placement()?;
+        let in_play = progress::skills_in_play(&position);
+        let scores = if spoke && !in_play.is_empty() {
+            let skills: Vec<Scorable> = in_play
+                .iter()
+                .map(|placed| Scorable {
+                    key: placed.key.clone(),
+                    text: placed.skill.text.clone(),
+                })
+                .collect();
+            self.engine.score(&skills, &session.messages).map_err(|error| {
+                eprintln!("[curriculum] scoring {}: {error}", session.id);
+                EllaError::Conflict(
+                    "Ella could not look back over this talk just now. Try again in a moment.".into(),
+                )
+            })?
+        } else {
+            None
+        };
+        let today = today();
+        let topic_id = session.topic_id.clone();
+        let session_id = session.id.clone();
+        self.database.commit_assessment(&session.id, move |store| {
+            // Where the learner stands as the transaction sees it: another
+            // talk may have moved them since this one's skills were picked.
+            let stored = store.position()?.and_then(known_position);
+            let placed = store.placed()?;
+            let position = stored.unwrap_or_else(curriculum::start);
+            let mut write = AssessmentWrite {
+                skills: Vec::new(),
+                position: None,
+                placed: false,
+                assessment: String::new(),
+            };
+            let mut advanced = None;
+            let mut grown = Vec::new();
+            let mut now_at = position.clone();
+            if let Some(scores) = &scores {
+                let mut keys = keys_of(&progress::skills_in_play(&position));
+                keys.extend(scores.keys().cloned());
+                keys.extend(target.clone());
+                let before = store.skill_progress(&distinct(keys))?;
+                let after = progress::apply_scores(&before, scores, target.as_deref(), &topic_id, &today);
+                grown = progress::grown_skills(&before, &after, scores, target.as_deref());
+                write.skills = after
+                    .iter()
+                    .zip(&before)
+                    .filter(|(now, then)| now != then)
+                    .map(|(now, _)| now.clone())
+                    .collect();
+                if progress::step_complete(&position, &progress::by_key(&after)) {
+                    if let Some(next) = curriculum::next(&position) {
+                        advanced = Some(if next.level == position.level {
+                            Advance::Step
+                        } else {
+                            Advance::Level
+                        });
+                        now_at = next.clone();
+                        write.position = Some(next);
+                    }
+                }
+            }
+            // Where they stand after it, with this talk's scores counted.
+            let mut known = progress::by_key(&store.skill_progress(&keys_of(&progress::step_skills(&now_at)))?);
+            for skill in &write.skills {
+                known.insert(skill.skill.clone(), skill.clone());
+            }
+            let assessment = Assessment {
+                session_id,
+                kind: "talk".into(),
+                standing: standing_at(&now_at, placed, &known),
+                closing: None,
+                advanced,
+                skills: grown,
+                scored: scores.is_some(),
+            };
+            write.assessment = to_json(&assessment)?;
+            Ok(write)
+        })
+    }
+
+    /// The level map: every level, lowest first, as it stands for the learner.
+    /// Those below theirs are done, theirs is current, the one above is next,
+    /// and the rest are locked. A step behind them is one they finished, so its
+    /// skills have passed; any other skill shows what it has been scored, since
+    /// a strong learner can pass one before they reach its step.
+    pub fn levels(&self) -> EllaResult<Vec<LevelView>> {
+        if self.database.signed_in_learner()?.is_none() {
+            return Err(EllaError::Conflict("Tell Ella your name first.".into()));
+        }
+        let (position, _) = self.placement()?;
+        let current = curriculum::level_index(&position.level).unwrap_or(0);
+        let behind =
+            |index: usize, step: u8| index < current || (index == current && step < position.step);
+
+        // One read for every skill still ahead: this step's, the steps after
+        // it, and every level above.
+        let mut ahead = Vec::new();
+        for (index, level) in curriculum::levels().iter().enumerate() {
+            for step in &level.steps {
+                if !behind(index, step.number) {
+                    ahead.extend(keys_of(&progress::step_skills(&Position::new(&level.code, step.number))));
+                }
+            }
+        }
+        let known = progress::by_key(&self.database.skill_progress(&ahead)?);
+        let percent = progress::level_percent(&position, &known);
+
+        let mut levels = Vec::new();
+        for (index, level) in curriculum::levels().iter().enumerate() {
+            let state = if index < current {
+                LevelState::Done
+            } else if index == current {
+                LevelState::Current
+            } else if index == current + 1 {
+                LevelState::Next
+            } else {
+                LevelState::Locked
+            };
+            let mut steps = Vec::new();
+            for step in &level.steps {
+                let mut skills = Vec::new();
+                for skill in &step.skills {
+                    let key = curriculum::skill_key(&level.code, &skill.id);
+                    let record = known
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_else(|| SkillProgress::fresh(&key));
+                    skills.push(LevelSkillView {
+                        label: skill.label.clone(),
+                        text: skill.text.clone(),
+                        passed: behind(index, step.number) || progress::passed(skill, &record),
+                    });
+                }
+                steps.push(StepView {
+                    number: step.number,
+                    title: step.title.clone(),
+                    focus: step.focus.clone(),
+                    skills,
+                });
+            }
+            levels.push(LevelView {
+                number: (index + 1) as u8,
+                name: level.name.clone(),
+                goal: level.goal.clone(),
+                state,
+                percent: match state {
+                    LevelState::Done => 100,
+                    LevelState::Current => percent,
+                    LevelState::Next | LevelState::Locked => 0,
+                },
+                steps,
+            });
+        }
+        Ok(levels)
+    }
+}
+
+/// A stored place the curriculum still has, its step kept inside its level;
+/// `None` for a level it does not have.
+fn known_position(position: Position) -> Option<Position> {
+    let level = curriculum::level(&position.level)?;
+    let last = u8::try_from(level.steps.len()).unwrap_or(u8::MAX).max(1);
+    Some(Position::new(&level.code, position.step.clamp(1, last)))
+}
+
+/// Where a learner at `position` stands, as the window shows it.
+fn standing_at(position: &Position, placed: bool, known: &ProgressMap) -> Standing {
+    let levels = curriculum::levels();
+    let index = curriculum::level_index(&position.level).unwrap_or(0);
+    let level = &levels[index];
+    Standing {
+        level_number: (index + 1) as u8,
+        level_count: levels.len() as u8,
+        level_name: level.name.clone(),
+        step: position.step,
+        step_count: level.steps.len() as u8,
+        step_title: curriculum::step(position)
+            .map(|step| step.title.clone())
+            .unwrap_or_default(),
+        percent: progress::level_percent(position, known),
+        placed,
+    }
+}
+
+/// What a talk's instructions say about the skill it aims at.
+fn focus_for(target: &str) -> Option<Focus> {
+    curriculum::skill_at(target).map(|(_, step, skill)| Focus {
+        step_title: step.title.clone(),
+        step_focus: step.focus.clone(),
+        skill: skill.text.clone(),
+    })
+}
+
+fn keys_of(placed: &[progress::Placed]) -> Vec<String> {
+    placed.iter().map(|placed| placed.key.clone()).collect()
+}
+
+/// `keys` with each one once, in the order they first came.
+fn distinct(keys: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    keys.into_iter().filter(|key| seen.insert(key.clone())).collect()
+}
+
+/// Today on the laptop's own calendar, the one the learner lives by.
+fn today() -> String {
+    Local::now().format("%Y-%m-%d").to_string()
+}
+
+fn first_name(name: &str) -> &str {
+    name.split_whitespace().next().unwrap_or(name)
+}
+
+fn to_json(assessment: &Assessment) -> EllaResult<String> {
+    Ok(serde_json::to_string(assessment)?)
+}
+
+fn read_assessment(kept: &str) -> EllaResult<Assessment> {
+    Ok(serde_json::from_str(kept)?)
 }
 
 /// What the name step accepts: two to forty characters once the spaces
@@ -1557,6 +2144,7 @@ mod tests {
             "progress",
             "recent_sessions",
             "saved_learner",
+            "standing",
             "topics",
         ];
         let service = service();
@@ -1564,6 +2152,7 @@ mod tests {
         assert_eq!(keys(&fresh), snapshot_keys, "no `learners` any more");
         assert_eq!(fresh["learner"], serde_json::Value::Null);
         assert_eq!(fresh["saved_learner"], serde_json::Value::Null);
+        assert_eq!(fresh["standing"], serde_json::Value::Null);
         assert_eq!(
             fresh["progress"],
             serde_json::json!({ "days": [], "talks_finished": 0, "answers": 0, "finished_topics": [] })
@@ -1596,6 +2185,20 @@ mod tests {
         assert!(snapshot["recent_sessions"].is_array());
         assert!(snapshot["topics"].is_array());
         assert!(snapshot["engine_status"].is_object());
+        assert_eq!(
+            snapshot["standing"],
+            serde_json::json!({
+                "level_number": 3,
+                "level_count": 6,
+                "level_name": "Finding My Voice",
+                "step": 1,
+                "step_count": 5,
+                "step_title": curriculum::step(&curriculum::start()).unwrap().title,
+                "percent": 0,
+                "placed": false,
+            }),
+            "no CEFR code: the window shows a level's name and number"
+        );
 
         // Signed out: the saved learner, and nothing of their history.
         let signed_out = serde_json::to_value(service.log_out().unwrap()).unwrap();
@@ -1727,5 +2330,559 @@ mod tests {
         assert!(timings.llm_ttft_ms.is_some());
         assert!(timings.tts_first_audio_ms.is_some());
         assert!(timings.total_ms > 0);
+    }
+}
+
+/// The placement chat and the curriculum, end to end through the service, with
+/// a scripted model standing in for llama.cpp wherever one is asked to judge.
+#[cfg(test)]
+mod curriculum_flow_tests {
+    use super::*;
+    use crate::{
+        domain::{Confidence, EngineStatus},
+        infrastructure::{
+            database::Database,
+            engines::{DemoEngine, SynthesizedAudio},
+            stt::Transcription,
+        },
+    };
+
+    /// What the scripted model has been asked, for the tests to read back.
+    #[derive(Default)]
+    struct Heard {
+        pitches: Vec<Pitch>,
+        requests: Vec<TutorRequest>,
+        checks: Vec<usize>,
+        scored: Vec<Vec<String>>,
+    }
+
+    /// A model that always answers the same: ready or not, one level, and the
+    /// same confidence for every skill it is shown.
+    struct Judge {
+        heard: Arc<Mutex<Heard>>,
+        readiness: Readiness,
+        reading: PlacementReading,
+        confidence: f64,
+        /// Set to make the next reply fail, as a model that falls over does.
+        fail_next_reply: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Judge {
+        fn new(heard: &Arc<Mutex<Heard>>) -> Self {
+            Self {
+                heard: Arc::clone(heard),
+                readiness: Readiness { ready: false, confidence: Confidence::Low },
+                reading: PlacementReading { level: "B1".into(), closing: Some("Lovely to meet you, Asha!".into()) },
+                confidence: 0.95,
+                fail_next_reply: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
+        }
+    }
+
+    impl TutorEngine for Judge {
+        fn status(&self) -> EngineStatus {
+            DemoEngine.status()
+        }
+        fn opening(&self, topic: &Topic, learner_name: &str, pitch: &Pitch) -> EllaResult<String> {
+            self.heard.lock().unwrap().pitches.push(pitch.clone());
+            Ok(format!("Hi {learner_name}, let us talk about {}.", topic.label))
+        }
+        fn reply(&self, request: &TutorRequest) -> EllaResult<GeneratedReply> {
+            if self.fail_next_reply.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Err(EllaError::Engine("the model fell over".into()));
+            }
+            self.heard.lock().unwrap().requests.push(request.clone());
+            let text = match &request.placement {
+                Some(brief) if brief.closing => "Thank you, I loved hearing about your family.",
+                _ => "That sounds lovely. What else do you enjoy?",
+            };
+            Ok(GeneratedReply::plain(text.into(), 1.0, 1.0))
+        }
+        fn judges(&self) -> bool {
+            true
+        }
+        fn placement_readiness(&self, _: &str, _: Option<u8>, messages: &[Message]) -> EllaResult<Option<Readiness>> {
+            let answers = messages.iter().filter(|message| message.speaker == Speaker::Learner).count();
+            self.heard.lock().unwrap().checks.push(answers);
+            Ok(Some(self.readiness))
+        }
+        fn place(&self, _: &str, _: &[Message]) -> EllaResult<Option<PlacementReading>> {
+            Ok(Some(self.reading.clone()))
+        }
+        fn score(&self, skills: &[Scorable], _: &[Message]) -> EllaResult<Option<HashMap<String, f64>>> {
+            self.heard.lock().unwrap().scored.push(skills.iter().map(|skill| skill.key.clone()).collect());
+            Ok(Some(skills.iter().map(|skill| (skill.key.clone(), self.confidence)).collect()))
+        }
+        fn uses_native_stt(&self) -> bool {
+            false
+        }
+        fn transcribe(&self, _: &[i16], _: u32) -> EllaResult<Transcription> {
+            Err(EllaError::Engine("no microphone in tests".into()))
+        }
+        fn synthesize(&self, _: &str) -> EllaResult<SynthesizedAudio> {
+            DemoEngine.synthesize("")
+        }
+    }
+
+    fn judged(judge: Judge) -> AppService {
+        let service = AppService::new(Database::in_memory().unwrap(), Box::new(judge));
+        service.save_learner("Asha", Some(14)).unwrap();
+        service
+    }
+
+    fn demo() -> AppService {
+        let service = AppService::new(Database::in_memory().unwrap(), Box::new(DemoEngine));
+        service.save_learner("Asha", Some(14)).unwrap();
+        service
+    }
+
+    /// Answers until the chat closes itself, and says how many that took.
+    fn answer_placement(service: &AppService, session_id: &str) -> (u32, TurnResult) {
+        for answer in 1..=progress::PLACEMENT_MAX_TURNS + 1 {
+            let result = service
+                .send_text_turn(session_id, "I live with my mother and two sisters in Pune")
+                .unwrap();
+            if result.session_summary.is_some() {
+                return (answer, result);
+            }
+        }
+        panic!("the placement chat never closed");
+    }
+
+    /// Puts the learner somewhere on the ladder, the way an assessment does.
+    fn place_at(service: &AppService, level: &str, step: u8) {
+        let session = service.start_placement().unwrap();
+        service.complete_session(&session.id).unwrap();
+        let position = Position::new(level, step);
+        service
+            .database
+            .commit_assessment(&session.id, |_| {
+                Ok(AssessmentWrite {
+                    skills: Vec::new(),
+                    position: Some(position),
+                    placed: true,
+                    assessment: "null".into(),
+                })
+            })
+            .unwrap();
+    }
+
+    fn talk_on(service: &AppService, topic_id: &str) -> Assessment {
+        let session = service.start_session(topic_id).unwrap();
+        service
+            .send_text_turn(&session.id, "Yesterday I walked to the market and bought red apples")
+            .unwrap();
+        service.complete_session(&session.id).unwrap();
+        service.assess_session(&session.id).unwrap()
+    }
+
+    #[test]
+    fn a_new_learner_stands_at_step_1_of_a2_until_a_placement_says_otherwise() {
+        let standing = demo().bootstrap().unwrap().standing.unwrap();
+        assert_eq!((standing.level_number, standing.level_count), (3, 6));
+        assert_eq!(standing.level_name, "Finding My Voice");
+        assert_eq!((standing.step, standing.step_count, standing.percent), (1, 5, 0));
+        assert!(!standing.placed);
+    }
+
+    #[test]
+    fn without_a_model_the_placement_runs_five_answers_and_places_where_everyone_starts() {
+        let service = demo();
+        let session = service.start_placement().unwrap();
+        assert_eq!(session.topic_label, "First talk");
+        assert_eq!(session.messages[0].content, "So Asha, tell me about your day so far!");
+
+        let (answers, last) = answer_placement(&service, &session.id);
+        assert_eq!(answers, progress::PLACEMENT_MIN_TURNS, "the shortest chat allowed");
+        assert!(!last.ella_message.content.ends_with('?'), "a goodbye, not a question");
+        assert!(last.suggested_complete);
+        assert_eq!(service.get_session(&session.id).unwrap().status, "complete");
+
+        let assessment = service.assess_session(&session.id).unwrap();
+        assert_eq!(assessment.kind, "placement");
+        assert_eq!(assessment.closing.as_deref(), Some("That was lovely, Asha!"));
+        assert_eq!(assessment.standing.level_name, "Finding My Voice");
+        assert!(assessment.standing.placed, "the chat happened, so the learner is placed");
+        assert_eq!(service.bootstrap().unwrap().standing.unwrap(), assessment.standing);
+        assert_eq!(service.assess_session(&session.id).unwrap(), assessment, "asked again, answered the same");
+    }
+
+    #[test]
+    fn a_judged_placement_ends_when_the_judge_is_sure_and_starts_the_learner_at_its_level() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let service = judged(Judge {
+            readiness: Readiness { ready: true, confidence: Confidence::High },
+            ..Judge::new(&heard)
+        });
+        let session = service.start_placement().unwrap();
+        let (answers, _) = answer_placement(&service, &session.id);
+        assert_eq!(answers, progress::PLACEMENT_MIN_TURNS);
+        assert_eq!(heard.lock().unwrap().checks, [4], "checked from the fourth answer, read by the fifth");
+        let turns = heard.lock().unwrap().requests.clone();
+        assert!(turns.iter().all(|request| request.placement.is_some() && request.chore.is_none()));
+        assert_eq!(
+            turns.iter().map(|request| request.placement.as_ref().unwrap().closing).collect::<Vec<_>>(),
+            [false, false, false, false, true]
+        );
+
+        let assessment = service.assess_session(&session.id).unwrap();
+        assert_eq!(assessment.closing.as_deref(), Some("Lovely to meet you, Asha!"));
+        assert_eq!(assessment.standing.level_name, "Speaking Freely");
+        assert_eq!((assessment.standing.level_number, assessment.standing.step), (4, 1));
+        assert!(assessment.standing.placed);
+        // Every talk from here is pitched at the level the placement found.
+        service.start_session("street-food").unwrap();
+        assert_eq!(heard.lock().unwrap().pitches.last().unwrap().level, "B1");
+    }
+
+    #[test]
+    fn a_judge_that_is_never_sure_lets_the_chat_run_to_twelve_answers() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let service = judged(Judge::new(&heard));
+        let session = service.start_placement().unwrap();
+        let (answers, _) = answer_placement(&service, &session.id);
+        assert_eq!(answers, progress::PLACEMENT_MAX_TURNS);
+        assert_eq!(heard.lock().unwrap().checks, (4..12).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_fairly_sure_judge_ends_the_chat_only_from_the_ninth_answer() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let service = judged(Judge {
+            readiness: Readiness { ready: true, confidence: Confidence::Medium },
+            ..Judge::new(&heard)
+        });
+        let session = service.start_placement().unwrap();
+        assert_eq!(answer_placement(&service, &session.id).0, 9);
+    }
+
+    #[test]
+    fn once_placed_a_placement_only_ever_moves_the_learner_up() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let lower = judged(Judge {
+            reading: PlacementReading { level: "A1".into(), closing: None },
+            ..Judge::new(&heard)
+        });
+        place_at(&lower, "B1", 3);
+        let session = lower.start_placement().unwrap();
+        answer_placement(&lower, &session.id);
+        let kept = lower.assess_session(&session.id).unwrap().standing;
+        assert_eq!((kept.level_name.as_str(), kept.step), ("Speaking Freely", 3), "a lower reading takes nothing back");
+
+        let higher = judged(Judge {
+            reading: PlacementReading { level: "B2".into(), closing: None },
+            ..Judge::new(&heard)
+        });
+        place_at(&higher, "B1", 3);
+        let session = higher.start_placement().unwrap();
+        answer_placement(&higher, &session.id);
+        let moved = higher.assess_session(&session.id).unwrap().standing;
+        assert_eq!((moved.level_name.as_str(), moved.step), ("Almost Fluent", 1));
+    }
+
+    #[test]
+    fn a_placement_of_one_word_answers_is_held_down_whatever_the_judge_reads() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let service = judged(Judge {
+            readiness: Readiness { ready: true, confidence: Confidence::High },
+            ..Judge::new(&heard)
+        });
+        let session = service.start_placement().unwrap();
+        for answer in ["college", "yes", "mother father", "cricket", "good"] {
+            service.send_text_turn(&session.id, answer).unwrap();
+        }
+        let placed = service.assess_session(&session.id).unwrap();
+        assert_eq!(
+            (placed.standing.level_number, placed.standing.level_name.as_str()),
+            (1, "Pre-Beginner"),
+            "the judge said B1; a word or two an answer is where everyone begins"
+        );
+    }
+
+    #[test]
+    fn a_placement_ended_before_it_heard_five_answers_places_nobody() {
+        // Left open, picked up again from Home, and ended with End talk after
+        // two answers: however sure a judge would be, that is not a placement.
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let service = judged(Judge {
+            readiness: Readiness { ready: true, confidence: Confidence::High },
+            ..Judge::new(&heard)
+        });
+        let session = service.start_placement().unwrap();
+        service.send_text_turn(&session.id, "yes").unwrap();
+        service.send_text_turn(&session.id, "I like cricket").unwrap();
+        service.complete_session(&session.id).unwrap();
+        let assessment = service.assess_session(&session.id).unwrap();
+        assert!(!assessment.scored);
+        assert!(!assessment.standing.placed);
+        assert_eq!(assessment.standing.level_name, "Finding My Voice");
+        assert!(!service.bootstrap().unwrap().standing.unwrap().placed);
+    }
+
+    #[test]
+    fn a_reply_that_fails_keeps_the_verdict_for_the_answer_tried_again() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let judge = Judge {
+            readiness: Readiness { ready: true, confidence: Confidence::High },
+            ..Judge::new(&heard)
+        };
+        let fail = Arc::clone(&judge.fail_next_reply);
+        let service = judged(judge);
+        let session = service.start_placement().unwrap();
+        for _ in 0..4 {
+            let turn = service.send_text_turn(&session.id, "I go to college in Pune every day").unwrap();
+            assert!(turn.session_summary.is_none());
+        }
+        fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(service.send_text_turn(&session.id, "My family runs a small shop").is_err());
+        let retried = service.send_text_turn(&session.id, "My family runs a small shop").unwrap();
+        assert!(retried.session_summary.is_some(), "the fifth answer is still the last");
+        assert_eq!(heard.lock().unwrap().checks, [4], "and the check was not asked twice");
+    }
+
+    #[test]
+    fn skipping_the_placement_places_nobody() {
+        let service = demo();
+        let session = service.start_placement().unwrap();
+        service.send_text_turn(&session.id, "I am fine").unwrap();
+        service.complete_session(&session.id).unwrap();
+        assert!(!service.bootstrap().unwrap().standing.unwrap().placed);
+    }
+
+    #[test]
+    fn every_talk_quietly_aims_at_a_skill_of_the_learners_step() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let service = judged(Judge::new(&heard));
+        place_at(&service, "A1", 2);
+        let session = service.start_session("street-food").unwrap();
+        let target = service.database.session_curriculum(&session.id).unwrap().target_skill.unwrap();
+        assert!(target.starts_with("A1:U2-"), "{target}");
+
+        let pitch = heard.lock().unwrap().pitches.last().unwrap().clone();
+        assert_eq!(pitch.level, "A1");
+        let focus = pitch.focus.expect("the opening's prompt carries the aim");
+        assert_eq!(focus.step_title, "Talking about the past");
+        assert_eq!(focus.skill, curriculum::skill_at(&target).unwrap().2.text);
+
+        service.send_text_turn(&session.id, "I watched a film").unwrap();
+        let turn = heard.lock().unwrap().requests.last().unwrap().clone();
+        assert_eq!(turn.pitch, Pitch { level: "A1".into(), focus: Some(focus) }, "every turn says the same");
+        assert!(turn.placement.is_none());
+
+        // The next talk aims somewhere else: the last aim is held back.
+        let next = service.start_session("booking-a-cab").unwrap();
+        let next_target = service.database.session_curriculum(&next.id).unwrap().target_skill.unwrap();
+        assert_ne!(next_target, target);
+    }
+
+    #[test]
+    fn talks_that_show_every_skill_finish_the_step_and_move_the_learner_on() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let service = judged(Judge::new(&heard));
+        place_at(&service, "A1", 1);
+
+        let first = talk_on(&service, "street-food");
+        assert!(first.scored);
+        assert_eq!(first.advanced, None, "one talk on one topic owns nothing yet");
+        assert_eq!(first.skills.len(), 3);
+        assert!(first.skills.iter().all(|skill| skill.count == 1));
+        assert_eq!(
+            heard.lock().unwrap().scored[0],
+            keys_of(&progress::skills_in_play(&Position::new("A1", 1))),
+            "scored on the step's skills and the next step's"
+        );
+        let second = talk_on(&service, "booking-a-cab");
+        assert_eq!(second.advanced, None, "mastery 0.62: not owned yet");
+        let third = talk_on(&service, "street-food");
+        assert_eq!(third.advanced, Some(Advance::Step));
+        assert_eq!((third.standing.level_name.as_str(), third.standing.step), ("First Words", 2));
+        assert_eq!(service.bootstrap().unwrap().standing.unwrap(), third.standing);
+        // Step 2's skills were scored in the same talks, so the new step is
+        // already under way.
+        assert!(third.standing.percent > 20, "{}", third.standing.percent);
+    }
+
+    #[test]
+    fn moving_on_through_talks_is_not_a_placement() {
+        // Nobody placed this learner, so the level map still offers them the
+        // chat, however far their talks take them.
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let service = judged(Judge::new(&heard));
+        let mut last = None;
+        for topic in ["street-food", "booking-a-cab", "doctor-clinic"] {
+            last = Some(talk_on(&service, topic));
+        }
+        let last = last.unwrap();
+        assert_eq!(last.advanced, Some(Advance::Step));
+        assert_eq!((last.standing.level_name.as_str(), last.standing.step), ("Finding My Voice", 2));
+        assert!(!last.standing.placed);
+        assert!(!service.bootstrap().unwrap().standing.unwrap().placed);
+    }
+
+    #[test]
+    fn a_talk_keeps_the_level_it_began_at_when_another_moves_the_learner_on() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let service = judged(Judge::new(&heard));
+        place_at(&service, "A1", 5);
+        let talk = service.start_session("street-food").unwrap();
+        // Another talk's assessment lands meanwhile and moves them up a level.
+        place_at(&service, "A2", 1);
+        service.send_text_turn(&talk.id, "I ate poha this morning").unwrap();
+        let turn = heard.lock().unwrap().requests.last().unwrap().clone();
+        assert_eq!(turn.pitch.level, "A1", "the prompt reads the same to the end of the talk");
+        // A new talk is pitched at the new level.
+        service.start_session("booking-a-cab").unwrap();
+        assert_eq!(heard.lock().unwrap().pitches.last().unwrap().level, "A2");
+    }
+
+    #[test]
+    fn finishing_the_last_step_of_a_level_is_a_level_up() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let service = judged(Judge::new(&heard));
+        place_at(&service, "A2", 5);
+        let mut advanced = None;
+        for topic in ["street-food", "booking-a-cab", "doctor-clinic"] {
+            advanced = talk_on(&service, topic).advanced;
+        }
+        assert_eq!(advanced, Some(Advance::Level));
+        let standing = service.bootstrap().unwrap().standing.unwrap();
+        assert_eq!((standing.level_number, standing.level_name.as_str(), standing.step), (4, "Speaking Freely", 1));
+        // v0.1.6 reads the level's name off the learner row.
+        assert_eq!(service.bootstrap().unwrap().learner.unwrap().level_name, "Speaking Freely");
+    }
+
+    #[test]
+    fn a_talk_is_counted_once_however_often_it_is_asked_about() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let service = judged(Judge::new(&heard));
+        place_at(&service, "A1", 1);
+        let session = service.start_session("street-food").unwrap();
+        service.send_text_turn(&session.id, "I like red and blue").unwrap();
+        service.complete_session(&session.id).unwrap();
+        let first = service.assess_session(&session.id).unwrap();
+        let before = service.database.skill_progress(&["A1:U1-VOC-01".to_string()]).unwrap();
+        assert_eq!(service.assess_session(&session.id).unwrap(), first);
+        assert_eq!(service.database.skill_progress(&["A1:U1-VOC-01".to_string()]).unwrap(), before);
+        assert_eq!(heard.lock().unwrap().scored.len(), 1, "the model reads the talk once");
+    }
+
+    #[test]
+    fn a_talk_is_only_assessed_once_it_is_over_and_counts_nothing_without_a_word() {
+        let service = demo();
+        let session = service.start_session("street-food").unwrap();
+        let still_going = service.assess_session(&session.id).unwrap_err();
+        assert_eq!(still_going.to_string(), "This talk is still going.");
+        service.complete_session(&session.id).unwrap();
+        let assessment = service.assess_session(&session.id).unwrap();
+        assert!(!assessment.scored);
+        assert_eq!((assessment.advanced, assessment.skills.len()), (None, 0));
+    }
+
+    #[test]
+    fn without_a_model_a_talk_is_kept_but_never_scored() {
+        let service = demo();
+        let assessment = talk_on(&service, "street-food");
+        assert!(!assessment.scored, "demo mode has no judge");
+        assert_eq!(assessment.standing.percent, 0);
+    }
+
+    #[test]
+    fn the_level_map_marks_each_level_and_every_skill_behind_the_learner() {
+        let service = demo();
+        place_at(&service, "A2", 3);
+        let levels = service.levels().unwrap();
+        assert_eq!(levels.len(), 6);
+        let states: Vec<LevelState> = levels.iter().map(|level| level.state).collect();
+        use LevelState::*;
+        assert_eq!(states, [Done, Done, Current, Next, Locked, Locked]);
+        assert_eq!(levels.iter().map(|level| level.percent).collect::<Vec<_>>(), [100, 100, 40, 0, 0, 0]);
+        let current = &levels[2];
+        assert_eq!((current.number, current.name.as_str()), (3, "Finding My Voice"));
+        assert!(current.steps[..2].iter().all(|step| step.skills.iter().all(|skill| skill.passed)));
+        assert!(current.steps[2..].iter().all(|step| step.skills.iter().all(|skill| !skill.passed)));
+        assert!(levels[0].steps.iter().all(|step| step.skills.iter().all(|skill| skill.passed)));
+        assert!(current.steps[0].skills[0].text.starts_with("I "));
+        // No CEFR code anywhere the window reads.
+        let json = serde_json::to_string(&levels).unwrap();
+        for code in ["\"A0\"", "\"A2\"", "\"B1\"", "\"C1\""] {
+            assert!(!json.contains(code), "{code} leaked");
+        }
+    }
+
+    /// The whole flow against a real model: a placement chat that the model
+    /// ends by its own judgement, the level it reads, and a talk it scores.
+    /// Needs a llama-server with Ella's model at `ELLA_LLM_BASE_URL`:
+    ///
+    /// ELLA_LLM_BASE_URL=http://127.0.0.1:39191/v1 cargo test --lib live_model -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn live_model_places_the_learner_and_scores_a_talk() {
+        use crate::infrastructure::engines::{EnginePaths, LocalEngine};
+        assert!(std::env::var("ELLA_LLM_BASE_URL").is_ok(), "point ELLA_LLM_BASE_URL at llama-server");
+        std::env::set_var("ELLA_PIPER_DAEMON", "0");
+        let service = AppService::new(
+            Database::in_memory().unwrap(),
+            Box::new(LocalEngine::from_environment(EnginePaths::default())),
+        );
+        service.save_learner("Asha", Some(16)).unwrap();
+
+        // Answers a confident intermediate speaker might give, climbing as
+        // the questions do.
+        let answers = [
+            "Hi Ella! My day was quite busy. I went to college in the morning and after that I helped my father in his shop.",
+            "I live with my parents and my younger brother in Nagpur. My brother is twelve and he is crazy about cricket.",
+            "Last weekend we visited my aunt in Pune. We took the train, and in the evening we walked by the river and ate pani puri.",
+            "I think online classes are useful, but I prefer the classroom, because I can ask questions and discuss things with my friends.",
+            "If I could change one thing in my city, I would build more libraries, because many students have no quiet place to study.",
+            "My favourite place is my grandmother's village. There are mango trees everywhere, and in summer the whole house smells of fresh mangoes.",
+            "I would like to become a software engineer, because I enjoy solving problems and I want to build apps that help farmers.",
+            "When I feel stressed, I usually go for a long walk or listen to old Hindi songs, and that helps me calm down.",
+            "Honestly, I think social media has good and bad sides. It connects people, but it also wastes a lot of our time.",
+            "Next year I hope to do an internship in Bangalore, so I am practising English to feel confident in interviews.",
+            "I have been learning English since school, but speaking was always difficult for me because I felt shy.",
+            "Thank you, Ella. I really enjoyed talking with you today.",
+        ];
+        let placement = service.start_placement().unwrap();
+        println!("Ella: {}", placement.messages[0].content);
+        let mut closed_after = None;
+        for (index, answer) in answers.iter().enumerate() {
+            let turn = service.send_text_turn(&placement.id, answer).unwrap();
+            println!("Asha: {answer}\nElla: {}", turn.ella_message.content);
+            if turn.session_summary.is_some() {
+                closed_after = Some(index as u32 + 1);
+                break;
+            }
+        }
+        let answers_heard = closed_after.expect("the placement closed within twelve answers");
+        println!("-- placement closed after {answers_heard} answers");
+        assert!((progress::PLACEMENT_MIN_TURNS..=progress::PLACEMENT_MAX_TURNS).contains(&answers_heard));
+        let placed = service.assess_session(&placement.id).unwrap();
+        println!("-- placed: {:?}", placed);
+        assert!(placed.standing.placed && placed.scored);
+        assert_eq!(placed.standing.step, 1);
+
+        let talk = service.start_session("street-food").unwrap();
+        let target = service.database.session_curriculum(&talk.id).unwrap().target_skill;
+        println!("-- the talk aims at {target:?}\nElla: {}", talk.messages[0].content);
+        for answer in [
+            "Yesterday I ate vada pav near the railway station. It was spicy and crispy, and it cost only fifteen rupees.",
+            "The stall belongs to an old man who has been selling it for twenty years. He always adds extra chutney for students.",
+            "I would recommend it to anyone who visits Mumbai, because it tastes better than anything in a fancy restaurant.",
+        ] {
+            let turn = service.send_text_turn(&talk.id, answer).unwrap();
+            println!("Asha: {answer}\nElla: {}", turn.ella_message.content);
+        }
+        service.complete_session(&talk.id).unwrap();
+        let scored = service.assess_session(&talk.id).unwrap();
+        println!("-- talk assessed: {:?}", scored);
+        assert!(scored.scored, "the model's scores were read");
+    }
+
+    #[test]
+    fn nobody_signed_in_has_no_level_map_and_no_placement() {
+        let service = demo();
+        service.log_out().unwrap();
+        assert!(service.levels().is_err());
+        assert!(service.start_placement().is_err());
     }
 }

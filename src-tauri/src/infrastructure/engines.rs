@@ -1,6 +1,6 @@
 // Local tutor engines with native Canary STT and HTTP Whisper fallback.
 use std::{
-    collections::{hash_map::DefaultHasher, BTreeSet},
+    collections::{hash_map::DefaultHasher, BTreeSet, HashMap},
     env, fs,
     hash::{Hash, Hasher},
     io::{BufRead, BufReader, Read, Write},
@@ -17,8 +17,9 @@ use serde_json::{json, Value};
 
 use crate::{
     domain::{
-        AudioPayload, ChoreContext, Direction, EngineComponent, EngineStatus, LedgerSpec,
-        Speaker, Topic, TurnSignal, TutorRequest, WordSpan,
+        AudioPayload, ChoreContext, Confidence, Direction, EngineComponent, EngineStatus, Focus,
+        LedgerSpec, Message, Pitch, PlacementReading, Readiness, Scorable, Speaker, Topic,
+        TurnSignal, TutorRequest, WordSpan,
     },
     error::{EllaError, EllaResult},
     infrastructure::{
@@ -779,11 +780,29 @@ fn scene_clause(prompt: &str) -> &str {
         .unwrap_or(prompt)
 }
 
-fn ella_system_prompt(learner_name: &str, topic_id: &str, topic_label: &str) -> String {
+/// The skill a talk quietly aims at, from the step the learner is on, as Ella
+/// Mobile words it. Empty without one, so such a prompt reads exactly as it
+/// did before the curriculum.
+fn focus_brief(learner_name: &str, focus: Option<&Focus>) -> String {
+    let Some(focus) = focus else {
+        return String::new();
+    };
+    format!(
+        "\n\n{learner_name} is on the step \"{title}\": {step_focus} This conversation \
+         quietly aims at one skill from it: {skill} Where it fits the scene, ask questions \
+         that give them a reason to use it. Never name the skill, teach it or quiz them on \
+         it: the conversation comes first.",
+        title = focus.step_title,
+        step_focus = focus.step_focus,
+        skill = focus.skill,
+    )
+}
+
+fn ella_system_prompt(learner_name: &str, topic_id: &str, topic_label: &str, pitch: &Pitch) -> String {
     let scene = scene_for(topic_id);
     format!(
         "You are Ella, a warm speaking buddy for an Indian learner named {learner_name}, \
-         who is practising English at about A1 level. In this conversation you are also \
+         who is practising English at about {level} level. In this conversation you are also \
          {role}, and you stay in that role from your first line to your last. {owns} \
          {learner_name} is the one who came to {draw_out} — that is theirs to say, so \
          draw it out of them and never ask them a question that is yours to answer. \
@@ -801,11 +820,12 @@ fn ella_system_prompt(learner_name: &str, topic_id: &str, topic_label: &str) -> 
          plainly, that you can only help with {topic_label} here, then ask that exact \
          same question again. That is not the same as an ordinary, on-topic way of \
          asking your question — decline only what is genuinely unrelated, never an \
-         on-topic request just because it is phrased unusually.\n\n\
+         on-topic request just because it is phrased unusually.{focus}\n\n\
          Every reply is one or two short sentences and then exactly one question, with \
          nothing after the question. Say it the way a person says it out loud, in whole \
          sentences — never a bare word, a bare number, or a fragment on its own. Use \
-         everyday words and keep each sentence under about twelve words. Answer the \
+         everyday words pitched at their level or a shade above, and keep each sentence \
+         under about twelve words. Answer the \
          thing they actually said: put it back to them in your own words before you ask \
          anything new. Ask about one thing at a time, and never ask a question you have \
          already asked — unless they never actually answered it, in which case ask that \
@@ -838,6 +858,8 @@ fn ella_system_prompt(learner_name: &str, topic_id: &str, topic_label: &str) -> 
          \"you're hot\"). Treat a new way of saying one of these the same as the \
          examples themselves — the exact words are never the point, what they are \
          asking for or saying to you is.",
+        level = pitch.level,
+        focus = focus_brief(learner_name, pitch.focus.as_ref()),
         role = scene.role,
         owns = scene.owns,
         draw_out = scene.draw_out,
@@ -855,8 +877,8 @@ fn chore_system_prompt(learner_name: &str, context: &ChoreContext) -> String {
     prompt.push_str(&context.character.persona);
     prompt.push_str(&format!(
         " You are talking with {learner_name}, who is practising English at about \
-         A1 level. Setting: {}. ",
-        context.setting
+         {} level. Setting: {}. ",
+        context.level, context.setting
     ));
     prompt.push_str(&format!("Your own position: {} ", context.character_brief));
     if let Some(ledger) = &context.ledger {
@@ -1076,6 +1098,358 @@ fn free_closing_note(turn: u32) -> Option<String> {
         1 => Some("The conversation is nearly over. Ask your last question now.".into()),
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// The placement chat, and the three things the model is asked to judge: when
+// the placement has heard enough, which level it heard, and which skills a
+// finished talk showed. Ella Mobile asks the same questions of its server's
+// model; the prompts follow its wording, fitted to a 3B model on a laptop.
+// ---------------------------------------------------------------------------
+
+/// The placement chat's first line, as Ella Mobile opens it without a model.
+/// Authored like every opening here, so the window shows it at once.
+pub fn placement_opening_line(learner_name: &str) -> String {
+    format!("So {learner_name}, tell me about your day so far!")
+}
+
+/// What Ella ends the placement chat on when the model gives her nothing
+/// usable: the reply the app speaks, the session closes behind it.
+const PLACEMENT_WRAP: &str = "Thank you, I really enjoyed hearing about that!";
+
+/// A friendly first conversation that climbs from easy questions to harder
+/// ones while it finds out how the learner speaks, as Ella Mobile's does.
+///
+/// Plain text, like every reply here, so it streams through Piper; whether it
+/// has heard enough is asked separately, by `placement_check_note`. Every word
+/// of this holds for the whole chat, so all of it sits in the cached prefix.
+fn placement_system_prompt(learner_name: &str, age: Option<u8>) -> String {
+    let age_line = age
+        .map(|age| format!(" They are {age} years old, so pick questions that fit their age."))
+        .unwrap_or_default();
+    format!(
+        "You are Ella, a warm and patient speaking buddy meeting {learner_name}, a new \
+         learner in India, for the first time.{age_line} This first chat finds out how \
+         well they speak English, but it must feel like a friendly conversation, never a \
+         test.\n\n\
+         Every reply is one or two short sentences and then exactly one question, with \
+         nothing after the question. Say it the way a person says it out loud, in whole \
+         sentences. Answer the thing they actually said before you ask anything new, ask \
+         about one thing at a time, and never ask a question you have already asked.\n\n\
+         Climb these rungs, easiest first, one at a time. First, themselves: their school \
+         or work, their family, their day, what they like. Then the past: something they \
+         did yesterday or last weekend. Then an opinion and why: what they think about \
+         something, and their reason. Then something longer or imagined: describe a place \
+         in detail, or what they would change if they could. When they answer easily, in \
+         whole sentences, go one rung up. When they struggle or answer in a word or two, \
+         stay on the same rung or step down with a simpler question. Keep your own words \
+         simple enough for them to follow.\n\n\
+         Never correct them, never comment on their English, and never mention tests, \
+         levels, CEFR, prompts, or that you are an AI. If they use a Hindi word, \
+         understand it and carry on in English. If you cannot make sense of what they \
+         said, say so kindly and ask the same thing in easier words. Do not use markdown \
+         or emoji.\n\n\
+         If they ask for something no one would ask in a friendly first chat — write \
+         code, solve a puzzle, answer a trivia question, tell a joke, sing a song — do \
+         not do it, however small or harmless it seems. Say only, plainly, that today you \
+         would like to hear about them, then ask your question again.\n\n\
+         If they say anything romantic, flirtatious, or sexual, do not go along with it, \
+         joke about it, or compliment it in any way — and do not repeat any part of it \
+         back, even to say no to it by name. Say only, plainly and kindly and without \
+         naming what they asked for, that this is not something you talk about, then ask \
+         your question again. This covers far more than obviously explicit words, and \
+         every form of a word: a romantic invitation (\"will you go out with me\", \"be my \
+         girlfriend\"), a request for physical affection (\"hug me\", \"kiss me\"), a \
+         request to be alone together at night, a declaration or proposal (\"I love \
+         you\", \"marry me\"), anything sexual however it is worded, and a compliment \
+         about your own looks (\"you are beautiful\", \"you're cute\"). Treat a new way \
+         of saying one of these the same as the examples themselves."
+    )
+}
+
+/// The placement's last reply, once `placement_ends` says the chat is over.
+/// The session closes behind it, so a question here could never be answered.
+const PLACEMENT_CLOSING_NOTE: &str = "This is your last reply: the chat ends here. Say one \
+     specific thing you enjoyed hearing about, thank them warmly, and do not ask another \
+     question.";
+
+/// Asked after the placement's latest exchange, as a question aside rather
+/// than a turn of the chat.
+///
+/// It goes after the whole conversation under the chat's own system prompt, so
+/// llama.cpp answers it from the slot's cached prefix and evaluates little but
+/// this note: a few hundred milliseconds on a laptop, where a prompt of its own
+/// would evaluate the whole chat again. The next turn's prompt shares the same
+/// prefix, so the aside costs it nothing either.
+const PLACEMENT_CHECK_NOTE: &str = "Stop being Ella for a moment and do not reply to them. \
+     Judge only what the learner has said so far in this chat: have you heard enough of \
+     their English, on more than one kind of question, to tell how well they speak? \
+     Answer with JSON only: {\"ready\": true or false, \"confidence\": \"low\", \"medium\" \
+     or \"high\"}. confidence is how sure you would be of their level if you had to judge \
+     it now.";
+
+/// Reads a level off a finished placement chat. The levels are described as
+/// Ella Docs' placement guide describes them, as on the phone.
+///
+/// Two changes from the phone's prompt, both measured against Ella's 3B model
+/// on four transcripts from single words to fluent. The phone's reply template
+/// showed `"level":"A2"`, and the 3B model copied it: every transcript came
+/// back A2. With a placeholder there instead, and only the learner's answers
+/// to read, the four came back A1, A2, B2 and B2 — in order, and at most one
+/// level out.
+const PLACEMENT_ASSESSOR_PROMPT: &str = "You assess spoken English for a learning app in \
+     India.\n\n\
+     Read the learner's answers and estimate their speaking level on the CEFR scale, from \
+     A0 to C1:\n\
+     - A0: single words only, no phrases yet.\n\
+     - A1: short phrases, mostly present tense, very few words.\n\
+     - A2: simple sentences about everyday things, no extended opinions.\n\
+     - B1: connected sentences with because and but, opinions with reasons, past tense \
+     mostly right.\n\
+     - B2: fluent on familiar topics, varied tenses, argues with reasons.\n\
+     - C1: articulate and nuanced, handles abstract topics, near-natural flow.\n\n\
+     Weigh range of vocabulary, grammatical control, fluency and how well they developed \
+     their answers. Ignore transcription noise and accent. Indian English is not a \
+     mistake: \"I am having two sisters\", \"my good name is\", \"I am from Kanpur only\". \
+     Mixing in Hindi is fine. When the sample is very short, do not guess high.\n\n\
+     Reply with JSON:\n\
+     {\"level\":\"<one of A0, A1, A2, B1, B2, C1>\",\"closing\":\"...\"}\n\
+     - level: the description above that fits their answers best.\n\
+     - closing: one warm sentence ending the talk, addressed to the learner by name. No \
+     more than 14 words.";
+
+/// The learner's answers alone, numbered, for the placement's assessor.
+fn answers_of(messages: &[Message]) -> String {
+    messages
+        .iter()
+        .filter(|message| message.speaker == Speaker::Learner)
+        .enumerate()
+        .map(|(index, message)| {
+            format!("{}. {}", index + 1, message.content.split_whitespace().collect::<Vec<_>>().join(" "))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Checks a finished talk against the skills in play. The skills are numbered
+/// rather than keyed, because a 3B model copies `2` back far more reliably than
+/// `A1:U2-GRA-01`.
+///
+/// Every skill it claims comes with the learner's own words, which
+/// `read_scores` then looks for in what they said. Asked only for scores, as
+/// the phone asks its much larger model, Ella's 3B model marked six skills out
+/// of eight at 0.9 for a talk of "yes", "samosa" and "good. I like". Asked for
+/// quotes, it claimed nothing for that talk, and the right three for a story
+/// told with "used to", "was batting when" and "however … although".
+fn score_prompt(skills: &[Scorable]) -> String {
+    let listed = skills
+        .iter()
+        .enumerate()
+        .map(|(index, skill)| format!("- {}: {}", index + 1, skill.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "You check a spoken-English practice talk for a learning app in India.\n\n\
+         The learner is working on these skills:\n{listed}\n\n\
+         Read only the learner's words, never Ella's. A skill counts only when the \
+         learner's own words clearly show it. For each skill that does, copy the exact \
+         words from one learner line that show it, and say how sure you are, from 0 to 1: \
+         about 0.7 for one clear but simple example, 0.9 or more for confident, natural \
+         use. Most talks show only one or two of these skills, and a short or simple talk \
+         shows none. Leave out every skill you cannot quote. Ignore transcription noise \
+         and accent. Indian English is not a mistake: \"I am having two sisters\", \"I am \
+         from Kanpur only\".\n\n\
+         Reply with JSON:\n\
+         {{\"shown\":[{{\"skill\":<number>,\"quote\":\"<the learner's exact words>\",\"sure\":<0 to 1>}}]}}\n\
+         Use {{\"shown\":[]}} when the learner showed none of them."
+    )
+}
+
+/// A session's messages as chat turns: Ella's are the model's own.
+fn chat_messages(messages: &[Message]) -> Vec<Value> {
+    messages
+        .iter()
+        .map(|message| {
+            json!({
+                "role": if message.speaker == Speaker::Ella { "assistant" } else { "user" },
+                "content": message.content,
+            })
+        })
+        .collect()
+}
+
+/// A talk as the judges read it, one line per turn: a typed turn with a line
+/// break in it must not read as a line of Ella's.
+fn transcript_of(messages: &[Message]) -> String {
+    messages
+        .iter()
+        .map(|message| {
+            let who = match message.speaker {
+                Speaker::Ella => "Ella",
+                Speaker::Learner => "Learner",
+            };
+            format!("{who}: {}", message.content.split_whitespace().collect::<Vec<_>>().join(" "))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The JSON object in a model's answer. Constrained generation already asks
+/// for bare JSON; a stray code fence or a sentence around it is forgiven.
+fn json_object_in(text: &str) -> Option<Value> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    (start < end)
+        .then(|| serde_json::from_str::<Value>(&text[start..=end]).ok())
+        .flatten()
+        .filter(Value::is_object)
+}
+
+fn read_readiness(value: &Value) -> Option<Readiness> {
+    let ready = value.get("ready")?.as_bool()?;
+    let confidence = value
+        .get("confidence")
+        .and_then(Value::as_str)
+        .and_then(Confidence::parse)
+        .unwrap_or(Confidence::Low);
+    Some(Readiness { ready, confidence })
+}
+
+/// The level and closing line out of the assessor's JSON. A level the
+/// curriculum does not have means the answer was not read.
+fn read_placement(value: &Value) -> Option<PlacementReading> {
+    let level = value.get("level")?.as_str()?.trim().to_uppercase();
+    if !crate::curriculum::is_level(&level) {
+        return None;
+    }
+    let closing = value
+        .get("closing")
+        .and_then(Value::as_str)
+        .map(|closing| closing.trim().trim_matches('"').trim().to_owned())
+        .filter(|closing| {
+            let words = closing.split_whitespace().count();
+            (1..=20).contains(&words)
+        });
+    Some(PlacementReading { level, closing })
+}
+
+/// The judge's scores, by progress key, for the skills whose quote the learner
+/// really said. `learner` is what they said, turn by turn.
+///
+/// A claim counts only when its quote is the learner's own words, as the
+/// transcript and the quote compare, punctuation and case aside (see
+/// `find_quote`). Each stretch of what they said counts once: a claim whose
+/// quote overlaps one already counted is dropped, because a 3B model will
+/// credit one sentence to every skill it half fits, while two skills shown in
+/// different parts of one answer both count. A claim naming a skill it was not
+/// shown, or without a score from 0 to 1, is dropped on its own. An answer
+/// without the `shown` list at all is not read.
+fn read_scores(value: &Value, skills: &[Scorable], learner: &[&str]) -> Option<HashMap<String, f64>> {
+    let claims = value.get("shown")?.as_array()?;
+    let said: Vec<String> = learner.iter().map(|line| comparable(line)).collect();
+    let said: Vec<Vec<&str>> = said.iter().map(|line| line.split(' ').collect()).collect();
+    let mut scores = HashMap::new();
+    let mut counted: Vec<Span> = Vec::new();
+    for claim in claims {
+        let Some(skill) = claim
+            .get("skill")
+            .and_then(Value::as_u64)
+            .and_then(|number| usize::try_from(number).ok()?.checked_sub(1))
+            .and_then(|index| skills.get(index))
+        else {
+            continue;
+        };
+        let Some(sure) = claim.get("sure").and_then(Value::as_f64).filter(|sure| (0.0..=1.0).contains(sure)) else {
+            continue;
+        };
+        let quote = comparable(claim.get("quote").and_then(Value::as_str).unwrap_or_default());
+        let Some(span) = find_quote(&quote, &said) else {
+            continue;
+        };
+        if counted.iter().any(|seen| seen.overlaps(&span)) {
+            continue;
+        }
+        counted.push(span);
+        let best = scores.get(&skill.key).copied().unwrap_or(0.0_f64);
+        scores.insert(skill.key.clone(), best.max(sure));
+    }
+    Some(scores)
+}
+
+/// Words as a transcript and a quote of it can be compared: lower case, with
+/// apostrophes dropped and any other punctuation read as a space.
+fn comparable(text: &str) -> String {
+    text.to_lowercase()
+        .replace(['\'', '’', '‘'], "")
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Where a quote sits in what the learner said: which answer, and which of its
+/// words, as a half-open range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Span {
+    line: usize,
+    start: usize,
+    end: usize,
+}
+
+impl Span {
+    fn overlaps(&self, other: &Span) -> bool {
+        self.line == other.line && self.start < other.end && other.start < self.end
+    }
+}
+
+/// Where `quote` — already `comparable` — is in the learner's `said` answers,
+/// as a run of their words; `None` when they never said it. A quote needs two
+/// words at least. A model copying one often changes a pronoun at its edge ("he
+/// has been selling" for "who has been selling"), so for a quote of four words
+/// or more one word may go from either end, leaving three at least to match.
+fn find_quote(quote: &str, said: &[Vec<&str>]) -> Option<Span> {
+    let words: Vec<&str> = quote.split(' ').filter(|word| !word.is_empty()).collect();
+    let mut runs: Vec<&[&str]> = vec![&words];
+    if words.len() > 3 {
+        runs.push(&words[1..]);
+        runs.push(&words[..words.len() - 1]);
+    }
+    runs.into_iter().filter(|run| run.len() >= 2).find_map(|run| {
+        said.iter().enumerate().find_map(|(line, answer)| {
+            answer
+                .windows(run.len())
+                .position(|window| window == run)
+                .map(|start| Span { line, start, end: start + run.len() })
+        })
+    })
+}
+
+/// The placement's goodbye without a question tacked on the end. The model is
+/// told not to ask one; when it does anyway, the question goes, because
+/// nobody will be there to answer it. `None` when nothing but a question was
+/// said.
+fn without_trailing_question(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if !trimmed.ends_with('?') {
+        return Some(trimmed.to_owned());
+    }
+    let body = &trimmed[..trimmed.len() - 1];
+    let cut = body.rfind(['.', '!'])?;
+    let kept = trimmed[..=cut].trim();
+    (!kept.is_empty()).then(|| kept.to_owned())
+}
+
+/// Demo mode's placement questions, climbing the same rungs the model is told
+/// to climb, so the whole chat can be walked without one.
+fn scripted_placement_question(answers: u32) -> &'static str {
+    const QUESTIONS: [&str; 5] = [
+        "That sounds nice. Who do you usually spend your day with?",
+        "Lovely. What did you do last weekend?",
+        "That sounds fun. What is your favourite food, and why do you like it?",
+        "Good reason! If you could visit any place, where would you go?",
+        "Wonderful. What would you like to do there first?",
+    ];
+    QUESTIONS[(answers.saturating_sub(1) as usize) % QUESTIONS.len()]
 }
 
 /// Function words that say nothing about what a question is *about*. The
@@ -1467,7 +1841,56 @@ fn mentions_alias(text: &str, aliases: &[String]) -> bool {
 
 pub trait TutorEngine: Send + Sync {
     fn status(&self) -> EngineStatus;
-    fn opening(&self, topic: &Topic, learner_name: &str) -> EllaResult<String>;
+
+    /// A free conversation's first line. `pitch` is what every reply of the
+    /// session is told about the learner, so the engine can warm the prompt
+    /// those replies share.
+    fn opening(&self, topic: &Topic, learner_name: &str, pitch: &Pitch) -> EllaResult<String>;
+
+    /// The placement chat's first line. Authored, like every opening: the
+    /// default is what demo mode says, and `LocalEngine` warms the chat's
+    /// prompt with it as well.
+    fn placement_opening(&self, learner_name: &str, _age: Option<u8>) -> EllaResult<String> {
+        Ok(placement_opening_line(learner_name))
+    }
+
+    /// Whether there is a model to judge with. Without one — demo mode — the
+    /// placement chat runs to its shortest length and talks are not scored.
+    fn judges(&self) -> bool {
+        false
+    }
+
+    /// Whether the placement chat has heard enough, asked after its latest
+    /// exchange. `messages` is the chat so far, opening first. `None` without
+    /// a judge.
+    fn placement_readiness(
+        &self,
+        _learner_name: &str,
+        _age: Option<u8>,
+        _messages: &[Message],
+    ) -> EllaResult<Option<Readiness>> {
+        Ok(None)
+    }
+
+    /// The level a finished placement chat shows. `None` without a judge; an
+    /// error when the judge's answer could not be read, so it can be asked
+    /// again.
+    fn place(&self, _learner_name: &str, _messages: &[Message]) -> EllaResult<Option<PlacementReading>> {
+        Ok(None)
+    }
+
+    /// How sure the judge is that the learner showed each of `skills` in a
+    /// finished talk, by progress key; a skill not shown is left out. `None`
+    /// without a judge, which is not the same as nothing shown: nothing is
+    /// recorded against the learner. An error when the judge's answer could
+    /// not be read, so it can be asked again.
+    fn score(
+        &self,
+        _skills: &[Scorable],
+        _messages: &[Message],
+    ) -> EllaResult<Option<HashMap<String, f64>>> {
+        Ok(None)
+    }
 
     /// Generate one reply.
     ///
@@ -1577,12 +2000,21 @@ impl TutorEngine for DemoEngine {
         }
     }
 
-    fn opening(&self, topic: &Topic, learner_name: &str) -> EllaResult<String> {
+    fn opening(&self, topic: &Topic, learner_name: &str, _pitch: &Pitch) -> EllaResult<String> {
         Ok(opening_for(&topic.id, learner_name))
     }
 
     fn reply(&self, request: &TutorRequest) -> EllaResult<GeneratedReply> {
         let started = Instant::now();
+        if let Some(brief) = &request.placement {
+            let text = if brief.closing {
+                PLACEMENT_WRAP.to_owned()
+            } else {
+                scripted_placement_question(request.turn).to_owned()
+            };
+            let completion_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            return Ok(GeneratedReply::plain(text, completion_ms, completion_ms));
+        }
         let lead = request
             .learner_text
             .split_whitespace()
@@ -1807,13 +2239,75 @@ impl TutorEngine for LocalEngine {
         }
     }
 
-    fn opening(&self, topic: &Topic, learner_name: &str) -> EllaResult<String> {
+    fn opening(&self, topic: &Topic, learner_name: &str, pitch: &Pitch) -> EllaResult<String> {
         let text = opening_for(&topic.id, learner_name);
         self.warm_prompt_cache(
-            ella_system_prompt(learner_name, &topic.id, &topic.label),
+            ella_system_prompt(learner_name, &topic.id, &topic.label, pitch),
             text.clone(),
         );
         Ok(text)
+    }
+
+    fn placement_opening(&self, learner_name: &str, age: Option<u8>) -> EllaResult<String> {
+        let text = placement_opening_line(learner_name);
+        self.warm_prompt_cache(placement_system_prompt(learner_name, age), text.clone());
+        Ok(text)
+    }
+
+    fn judges(&self) -> bool {
+        true
+    }
+
+    fn placement_readiness(
+        &self,
+        learner_name: &str,
+        age: Option<u8>,
+        messages: &[Message],
+    ) -> EllaResult<Option<Readiness>> {
+        // The chat's own prompt and history, then the question aside: see
+        // `PLACEMENT_CHECK_NOTE` for why it is asked this way.
+        let mut request = vec![json!({"role": "system", "content": placement_system_prompt(learner_name, age)})];
+        request.extend(chat_messages(messages));
+        request.push(json!({"role": "system", "content": PLACEMENT_CHECK_NOTE}));
+        self.judge("check whether the placement has heard enough", request, 30, read_readiness)
+            .map(Some)
+    }
+
+    fn place(&self, learner_name: &str, messages: &[Message]) -> EllaResult<Option<PlacementReading>> {
+        let request = vec![
+            json!({"role": "system", "content": PLACEMENT_ASSESSOR_PROMPT}),
+            json!({
+                "role": "user",
+                "content": format!(
+                    "Learner's name: {learner_name}\n\nThe learner's answers, in order:\n{}",
+                    answers_of(messages)
+                ),
+            }),
+        ];
+        self.judge("read a level off the placement", request, 80, read_placement)
+            .map(Some)
+    }
+
+    fn score(
+        &self,
+        skills: &[Scorable],
+        messages: &[Message],
+    ) -> EllaResult<Option<HashMap<String, f64>>> {
+        if skills.is_empty() {
+            return Ok(None);
+        }
+        let request = vec![
+            json!({"role": "system", "content": score_prompt(skills)}),
+            json!({"role": "user", "content": format!("Conversation:\n{}", transcript_of(messages))}),
+        ];
+        let learner: Vec<&str> = messages
+            .iter()
+            .filter(|message| message.speaker == Speaker::Learner)
+            .map(|message| message.content.as_str())
+            .collect();
+        // A quote per claim makes the answer longer than a bare score did.
+        self.judge("score the talk", request, 320, |value| read_scores(value, skills, &learner))
+            .map(Some)
     }
 
     fn opening_in_chore(&self, context: &ChoreContext, learner_name: &str) -> EllaResult<String> {
@@ -1825,21 +2319,24 @@ impl TutorEngine for LocalEngine {
     }
 
     fn reply(&self, request: &TutorRequest) -> EllaResult<GeneratedReply> {
-        let system = match &request.chore {
-            Some(context) => chore_system_prompt(&request.learner_name, context),
-            None => ella_system_prompt(
+        let system = match (&request.placement, &request.chore) {
+            (Some(brief), _) => placement_system_prompt(&request.learner_name, brief.age),
+            (None, Some(context)) => chore_system_prompt(&request.learner_name, context),
+            (None, None) => ella_system_prompt(
                 &request.learner_name,
                 &request.topic_id,
                 &request.topic_label,
+                &request.pitch,
             ),
         };
         let mut history = self.history_messages(request);
         // Everything that moves between turns goes here, after the whole
         // cached conversation, so the prefix llama.cpp has already evaluated
         // stays byte-identical from the first turn to the last.
-        let turn_note = match &request.chore {
-            Some(context) => chore_turn_message(context, request.turn),
-            None => free_closing_note(request.turn),
+        let turn_note = match (&request.placement, &request.chore) {
+            (Some(brief), _) => brief.closing.then(|| PLACEMENT_CLOSING_NOTE.to_owned()),
+            (None, Some(context)) => chore_turn_message(context, request.turn),
+            (None, None) => free_closing_note(request.turn),
         };
         if let Some(note) = turn_note {
             history.insert(
@@ -1872,7 +2369,10 @@ impl TutorEngine for LocalEngine {
                 );
             }
         }
-        let (text, signal) = take_signal(&first.text);
+        let (mut text, signal) = take_signal(&first.text);
+        if request.placement.as_ref().is_some_and(|brief| brief.closing) {
+            text = without_trailing_question(&text).unwrap_or_else(|| PLACEMENT_WRAP.to_owned());
+        }
 
         // Free conversation: no ledger to enforce, but a question Ella has
         // already asked is its own failure. The cab transcript locked up on one
@@ -2163,15 +2663,68 @@ impl LocalEngine {
     /// deliberate: a sliding window changes the prompt prefix and defeats
     /// llama.cpp's prompt cache (TTFT 0.5s -> 3.5s).
     fn history_messages(&self, request: &TutorRequest) -> Vec<Value> {
-        let mut messages = Vec::new();
-        for message in &request.messages {
-            messages.push(json!({
-                "role": if message.speaker == Speaker::Ella { "assistant" } else { "user" },
-                "content": message.content,
-            }));
-        }
+        let mut messages = chat_messages(&request.messages);
         messages.push(json!({"role": "user", "content": request.learner_text}));
         messages
+    }
+
+    /// One JSON answer from the model, for the judges. Not streamed, because
+    /// nothing of it is spoken, and `response_format` has llama.cpp constrain
+    /// the output to JSON. `read` says whether the answer is usable; one that
+    /// is not is asked for once more before giving up with an error, so the
+    /// caller can ask again later rather than record a guess.
+    ///
+    /// Same slot as the conversation. The placement check shares the chat's
+    /// prefix, so it reuses the slot's cache; the other two run once a talk is
+    /// over, when the next session re-warms the slot anyway.
+    fn judge<T>(
+        &self,
+        label: &str,
+        messages: Vec<Value>,
+        max_tokens: u32,
+        read: impl Fn(&Value) -> Option<T>,
+    ) -> EllaResult<T> {
+        let url = format!("{}/chat/completions", self.llm_base_url.trim_end_matches('/'));
+        let mut failure = String::new();
+        for attempt in 1..=2 {
+            let started = Instant::now();
+            let body = self
+                .client
+                .post(&url)
+                .json(&json!({
+                    "model": "local",
+                    "messages": messages,
+                    "temperature": 0.1,
+                    "max_tokens": max_tokens,
+                    "stream": false,
+                    "cache_prompt": true,
+                    "id_slot": self.llm_slot,
+                    "response_format": {"type": "json_object"},
+                }))
+                .send()
+                .and_then(|response| response.error_for_status())
+                .and_then(|response| response.json::<Value>());
+            let took_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            let body = match body {
+                Ok(body) => body,
+                Err(error) => {
+                    eprintln!("[LATENCY]     judge> {label}: attempt {attempt} failed after {took_ms:.0}ms: {error}");
+                    failure = error.to_string();
+                    continue;
+                }
+            };
+            let content = body["choices"][0]["message"]["content"].as_str().unwrap_or_default();
+            eprintln!(
+                "[LATENCY]     judge> {label}: attempt {attempt} took {took_ms:.0}ms (evaluated {} prompt tokens): {}",
+                body["timings"]["prompt_n"].as_i64().map_or_else(|| "?".into(), |n| n.to_string()),
+                content.trim()
+            );
+            if let Some(read) = json_object_in(content).as_ref().and_then(&read) {
+                return Ok(read);
+            }
+            failure = format!("an answer that could not be read: {}", content.trim());
+        }
+        Err(EllaError::Engine(format!("The model could not {label}: {failure}")))
     }
 
     /// One streamed generation. `corrective` is appended as a system turn when
@@ -2613,6 +3166,8 @@ mod tests {
                 learner_text: "I played football with friends".into(),
                 turn: 1,
                 chore: None,
+                pitch: Pitch::at("A1"),
+                placement: None,
             })
             .unwrap();
         assert!(reply.text.ends_with('?'));
@@ -2650,6 +3205,8 @@ mod tests {
                 learner_text: transcript.text,
                 turn: 1,
                 chore: None,
+                pitch: Pitch::at("A1"),
+                placement: None,
             })
             .unwrap();
         assert!(!reply.text.is_empty());
@@ -2694,6 +3251,7 @@ mod ledger_tests {
         ChoreContext {
             character: crate::domain::find_character(&chore.character_id).unwrap(),
             chore_id: chore.id,
+            level: "A1".into(),
             setting: chore.setting,
             learner_goal: chore.learner_goal,
             character_brief: chore.character_brief,
@@ -2710,7 +3268,7 @@ mod ledger_tests {
         // the smell like?" — inventing a stall that was never named and
         // moving to a deeper question, as though the dodge had answered the
         // original one.
-        let prompt = ella_system_prompt("Asha", "restaurant-order", "Ordering at a restaurant");
+        let prompt = ella_system_prompt("Asha", "restaurant-order", "Ordering at a restaurant", &Pitch::at("A1"));
         assert!(
             prompt.contains("ask the exact same question again"),
             "a dodge must be met with the same question, not a new one that assumes it was answered"
@@ -2729,7 +3287,7 @@ mod ledger_tests {
         // about restaurants in the abstract.
         let opener = opening_for("restaurant-order", "Asha");
         assert!(opener.contains("waiter"));
-        let prompt = ella_system_prompt("Asha", "restaurant-order", "Ordering at a restaurant");
+        let prompt = ella_system_prompt("Asha", "restaurant-order", "Ordering at a restaurant", &Pitch::at("A1"));
         assert!(prompt.contains("waiter"), "the prompt drops the role the opener promised");
         assert!(prompt.contains("Asha"));
         assert!(prompt.contains("Ordering at a restaurant"), "the topic has to be named");
@@ -2746,7 +3304,7 @@ mod ledger_tests {
         // lovely", "that's wonderful") instead of declining. Nothing in the
         // prompt distinguished "wandered off topic" from "said something
         // inappropriate", so the off-topic redirect rule was all the model had.
-        let prompt = ella_system_prompt("Asha", "restaurant-order", "Ordering at a restaurant");
+        let prompt = ella_system_prompt("Asha", "restaurant-order", "Ordering at a restaurant", &Pitch::at("A1"));
         assert!(
             prompt.contains("romantic") && prompt.contains("sexual"),
             "the prompt has no instruction covering romantic or sexual advances"
@@ -2773,7 +3331,7 @@ mod ledger_tests {
         // categories and several phrasings of each, in the prompt itself,
         // is the only remaining lever once the deterministic floor cannot
         // reach every wording.
-        let prompt = ella_system_prompt("Asha", "restaurant-order", "Ordering at a restaurant");
+        let prompt = ella_system_prompt("Asha", "restaurant-order", "Ordering at a restaurant", &Pitch::at("A1"));
         for example in [
             "give me a hug",
             "kiss me",
@@ -2970,7 +3528,7 @@ mod ledger_tests {
         for topic in crate::domain::topics() {
             let scene = scene_for(&topic.id);
             assert!(!scene.owns.is_empty(), "{} has no owned ground", topic.id);
-            let prompt = ella_system_prompt("Souvik", &topic.id, &topic.label);
+            let prompt = ella_system_prompt("Souvik", &topic.id, &topic.label, &Pitch::at("A1"));
             assert!(prompt.contains(scene.owns), "{} drops what the role owns", topic.id);
             assert!(
                 prompt.contains("never ask them a question that is yours to answer"),
@@ -3036,7 +3594,7 @@ mod ledger_tests {
         // regression documented in `chore-bench.rs`. This is the guard
         // against that regression happening again: the instruction must
         // name what does *not* count as off-topic, not just what does.
-        let prompt = ella_system_prompt("Asha", "restaurant-order", "Ordering at a restaurant");
+        let prompt = ella_system_prompt("Asha", "restaurant-order", "Ordering at a restaurant", &Pitch::at("A1"));
         assert!(
             prompt.contains("nothing to do with"),
             "the prompt has no instruction covering a genuinely unrelated request"
@@ -3059,7 +3617,7 @@ mod ledger_tests {
         // a first fix that only added the joke example without an
         // explicit generalization, and without overriding "answer the
         // thing they actually said", still did not hold.
-        let prompt = ella_system_prompt("Asha", "job-interview", "A job interview");
+        let prompt = ella_system_prompt("Asha", "job-interview", "A job interview", &Pitch::at("A1"));
         assert!(
             prompt.contains("tell a joke"),
             "the prompt does not name joke-telling as an example of the entertain category"
@@ -3387,6 +3945,7 @@ mod ledger_tests {
         let spec = market_spec();
         let context = ChoreContext {
             chore_id: chore.id,
+            level: "A1".into(),
             character: crate::domain::find_character("stall-owner").unwrap(),
             setting: chore.setting,
             learner_goal: chore.learner_goal,
@@ -3415,6 +3974,7 @@ mod ledger_tests {
         let chore = find_chore("market-cloth-price").unwrap();
         let context = ChoreContext {
             chore_id: chore.id,
+            level: "A1".into(),
             character: crate::domain::find_character("stall-owner").unwrap(),
             setting: chore.setting,
             learner_goal: chore.learner_goal,
@@ -3457,6 +4017,7 @@ mod ledger_tests {
         let chore = find_chore("market-cloth-price").unwrap();
         let context = ChoreContext {
             chore_id: chore.id,
+            level: "A1".into(),
             character: crate::domain::find_character("stall-owner").unwrap(),
             setting: chore.setting,
             learner_goal: chore.learner_goal,
@@ -3484,6 +4045,7 @@ mod ledger_tests {
         let chore = find_chore("market-cloth-price").unwrap();
         let context = ChoreContext {
             chore_id: chore.id,
+            level: "A1".into(),
             character: crate::domain::find_character("stall-owner").unwrap(),
             setting: chore.setting,
             learner_goal: chore.learner_goal,
@@ -3720,5 +4282,268 @@ mod speech_stream_tests {
         let (audio, played) = aborted.resolve("Hello there. How was your day?");
         assert!(audio.is_none(), "aborted audio must not be reused");
         assert_eq!(played, 0, "the window must not think it has the whole reply");
+    }
+}
+
+#[cfg(test)]
+mod curriculum_prompt_tests {
+    use super::*;
+
+    fn skills() -> Vec<Scorable> {
+        ["A1:U1-VOC-01", "A1:U1-GRA-01", "A1:U1-FLU-01"]
+            .iter()
+            .map(|key| Scorable {
+                key: (*key).into(),
+                text: crate::curriculum::skill_at(key).unwrap().2.text.clone(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_talk_is_pitched_at_the_learners_level_and_names_its_aim_only_to_the_model() {
+        let plain = ella_system_prompt("Asha", "street-food", "Street food stories", &Pitch::at("B1"));
+        assert!(plain.contains("practising English at about B1 level"));
+        assert!(!plain.contains("quietly aims"), "no aim, no brief");
+
+        let aimed = ella_system_prompt(
+            "Asha",
+            "street-food",
+            "Street food stories",
+            &Pitch {
+                level: "A1".into(),
+                focus: Some(Focus {
+                    step_title: "Talking about the past".into(),
+                    step_focus: "Starting to use past tense to share what happened.".into(),
+                    skill: "I can use past simple with regular verbs — I walked, I watched, I played.".into(),
+                }),
+            },
+        );
+        assert!(aimed.contains("Asha is on the step \"Talking about the past\""));
+        assert!(aimed.contains("quietly aims at one skill from it: I can use past simple"));
+        assert!(aimed.contains("Never name the skill, teach it or quiz them on it"));
+        // The rest of the scene is untouched, so the cached prefix stays one
+        // scene's for the whole session.
+        assert!(aimed.contains("In this conversation you are also yourself, sitting with them over a cup of chai"));
+    }
+
+    #[test]
+    fn a_chore_character_pitches_its_words_at_the_learners_level_too() {
+        let chore = crate::domain::find_chore("market-cloth-price").unwrap();
+        let context = ChoreContext {
+            chore_id: chore.id.clone(),
+            level: "B2".into(),
+            character: crate::domain::find_character(&chore.character_id).unwrap(),
+            setting: chore.setting,
+            learner_goal: chore.learner_goal,
+            character_brief: chore.character_brief,
+            max_turns: chore.max_turns,
+            ledger: None,
+        };
+        assert!(chore_system_prompt("Asha", &context).contains("at about B2 level"));
+    }
+
+    #[test]
+    fn the_placement_chat_climbs_rungs_and_never_feels_like_a_test() {
+        let prompt = placement_system_prompt("Asha", Some(12));
+        assert!(prompt.contains("meeting Asha, a new learner in India"));
+        assert!(prompt.contains("They are 12 years old"));
+        assert!(prompt.contains("never a test"));
+        for rung in ["First, themselves", "Then the past", "Then an opinion and why", "something longer or imagined"] {
+            assert!(prompt.contains(rung), "{rung}");
+        }
+        assert!(prompt.contains("Never correct them"));
+        assert!(!placement_system_prompt("Asha", None).contains("years old"));
+        assert_eq!(placement_opening_line("Asha"), "So Asha, tell me about your day so far!");
+    }
+
+    #[test]
+    fn the_placement_check_is_read_off_json_and_a_missing_confidence_is_low() {
+        let read = |text: &str| json_object_in(text).as_ref().and_then(read_readiness);
+        assert_eq!(
+            read(r#"{"ready": true, "confidence": "High"}"#),
+            Some(Readiness { ready: true, confidence: Confidence::High })
+        );
+        assert_eq!(
+            read("```json\n{\"ready\": false}\n```"),
+            Some(Readiness { ready: false, confidence: Confidence::Low })
+        );
+        assert_eq!(read(r#"{"ready": "yes"}"#), None, "only a real boolean counts");
+        assert_eq!(read("I think so."), None);
+    }
+
+    #[test]
+    fn a_placement_reads_only_a_level_the_curriculum_has() {
+        let read = |text: &str| json_object_in(text).as_ref().and_then(read_placement);
+        assert_eq!(
+            read(r#"{"level": "b1", "closing": "\"Wonderful talking with you, Asha!\""}"#),
+            Some(PlacementReading { level: "B1".into(), closing: Some("Wonderful talking with you, Asha!".into()) })
+        );
+        assert_eq!(read(r#"{"level": "C2", "closing": "Bye"}"#), None, "C2 is not a level here");
+        assert_eq!(
+            read(r#"{"level": "A0", "closing": ""}"#),
+            Some(PlacementReading { level: "A0".into(), closing: None }),
+            "an empty closing falls back to the app's own"
+        );
+    }
+
+    #[test]
+    fn a_skill_counts_only_with_a_quote_the_learner_really_said() {
+        let skills = skills();
+        let learner = [
+            "My sister is tall and she looks very happy today.",
+            "She is running to the bus stop because she is late.",
+        ];
+        let read = |text: &str| {
+            json_object_in(text)
+                .as_ref()
+                .and_then(|value| read_scores(value, &skills, &learner))
+        };
+        let scores = read(
+            r#"{"shown":[
+                {"skill":1,"quote":"she looks very happy today","sure":0.8},
+                {"skill":2,"quote":"She is running to the bus stop!","sure":0.9},
+                {"skill":3,"quote":"I described the whole park in detail","sure":0.9}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(scores.len(), 2, "a quote nobody said credits nothing: {scores:?}");
+        assert_eq!(scores["A1:U1-VOC-01"], 0.8);
+        assert_eq!(scores["A1:U1-GRA-01"], 0.9, "punctuation and case aside");
+        assert_eq!(read(r#"{"shown":[]}"#).unwrap().len(), 0, "nothing shown is an answer too");
+        assert!(read(r#"{"skills":{"1":0.8}}"#).is_none(), "no list of claims, nothing read");
+    }
+
+    #[test]
+    fn one_stretch_of_speech_credits_one_skill_and_a_bad_claim_is_dropped_on_its_own() {
+        let skills = skills();
+        let learner = [
+            "When I was a child I used to play cricket every evening with my cousins.",
+            "My sister is tall and she is running to school now.",
+        ];
+        let read = |text: &str| {
+            json_object_in(text)
+                .as_ref()
+                .and_then(|value| read_scores(value, &skills, &learner))
+                .unwrap()
+        };
+        let scores = read(
+            r#"{"shown":[
+                {"skill":3,"quote":"I used to play cricket every evening","sure":0.9},
+                {"skill":1,"quote":"I used to play cricket every evening","sure":0.9},
+                {"skill":2,"quote":"used to play cricket every evening with my cousins","sure":0.9},
+                {"skill":2,"quote":"with my cousins","sure":1.4}
+            ]}"#,
+        );
+        assert_eq!(scores.keys().collect::<Vec<_>>(), ["A1:U1-FLU-01"], "overlapping quotes count once: {scores:?}");
+
+        // Two skills shown in different parts of one answer both count.
+        let scores = read(
+            r#"{"shown":[
+                {"skill":1,"quote":"my sister is tall","sure":0.8},
+                {"skill":2,"quote":"she is running to school","sure":0.9}
+            ]}"#,
+        );
+        assert_eq!(scores.len(), 2, "{scores:?}");
+    }
+
+    #[test]
+    fn a_quote_may_change_one_word_at_its_edge_but_not_become_a_paraphrase() {
+        let line = comparable("The stall belongs to an old man who has been selling it for twenty years.");
+        let said = vec![line.split(' ').collect::<Vec<_>>()];
+        let found = |quote: &str| find_quote(&comparable(quote), &said);
+        assert_eq!(found("he has been selling it for twenty years"), Some(Span { line: 0, start: 8, end: 15 }));
+        assert!(found("who has been selling it for twenty").is_some());
+        assert!(found("he has sold it for twenty years").is_none());
+        assert!(found("old man").is_some(), "two words is a quote");
+        assert!(found("selling").is_none(), "one word shows nothing");
+        assert!(found("").is_none());
+        assert_eq!(comparable("Don’t STOP—now!"), "dont stop now");
+    }
+
+    #[test]
+    fn the_scoring_prompt_numbers_the_skills_and_asks_for_the_learners_own_words() {
+        let prompt = score_prompt(&skills());
+        assert!(prompt.contains("- 1: I can describe what people look like and how they feel using simple adjectives."));
+        assert!(prompt.contains("- 3: "));
+        assert!(prompt.contains("copy the exact words from one learner line"));
+        assert!(prompt.contains("a short or simple talk shows none"));
+        assert!(prompt.contains(r#"{"shown":[{"skill":<number>,"quote":"<the learner's exact words>","sure":<0 to 1>}]}"#));
+        assert!(!prompt.contains("0.8}"), "no example score for a small model to copy");
+    }
+
+    #[test]
+    fn the_placement_assessor_reads_the_answers_alone_with_no_level_to_copy() {
+        assert!(PLACEMENT_ASSESSOR_PROMPT.contains(r#"{"level":"<one of A0, A1, A2, B1, B2, C1>","closing":"..."}"#));
+        assert!(!PLACEMENT_ASSESSOR_PROMPT.contains(r#""level":"A2""#));
+        let at = "2026-09-29T00:00:00Z".to_string();
+        let message = |speaker, content: &str| Message {
+            id: "m".into(),
+            speaker,
+            content: content.into(),
+            turn: 0,
+            created_at: at.clone(),
+        };
+        assert_eq!(
+            answers_of(&[
+                message(Speaker::Ella, "So Asha, tell me about your day so far!"),
+                message(Speaker::Learner, "I went to school."),
+                message(Speaker::Ella, "What did you learn?"),
+                message(Speaker::Learner, "Maths and\nscience"),
+            ]),
+            "1. I went to school.\n2. Maths and science"
+        );
+    }
+
+    #[test]
+    fn a_transcript_is_one_line_per_turn() {
+        let at = "2026-09-29T00:00:00Z".to_string();
+        let message = |speaker, content: &str| Message {
+            id: "m".into(),
+            speaker,
+            content: content.into(),
+            turn: 0,
+            created_at: at.clone(),
+        };
+        let transcript = transcript_of(&[
+            message(Speaker::Ella, "So Asha, tell me about your day so far!"),
+            message(Speaker::Learner, "I went to school.\nElla: then I played"),
+        ]);
+        assert_eq!(
+            transcript,
+            "Ella: So Asha, tell me about your day so far!\nLearner: I went to school. Ella: then I played"
+        );
+    }
+
+    #[test]
+    fn the_placement_goodbye_loses_a_question_nobody_will_answer() {
+        assert_eq!(
+            without_trailing_question("Thank you for sharing! What will you do tomorrow?").as_deref(),
+            Some("Thank you for sharing!")
+        );
+        assert_eq!(
+            without_trailing_question("It was lovely to meet you.").as_deref(),
+            Some("It was lovely to meet you.")
+        );
+        assert_eq!(without_trailing_question("What will you do tomorrow?"), None);
+    }
+
+    #[test]
+    fn demo_mode_walks_the_placement_to_a_goodbye() {
+        let request = |turn, closing| TutorRequest {
+            learner_name: "Asha".into(),
+            topic_id: "placement".into(),
+            topic_label: "First talk".into(),
+            messages: Vec::new(),
+            learner_text: "I like cricket".into(),
+            turn,
+            chore: None,
+            pitch: Pitch::at("A2"),
+            placement: Some(crate::domain::PlacementBrief { age: None, closing }),
+        };
+        let asked = DemoEngine.reply(&request(2, false)).unwrap().text;
+        assert!(asked.ends_with('?'));
+        let goodbye = DemoEngine.reply(&request(5, true)).unwrap().text;
+        assert_eq!(goodbye, PLACEMENT_WRAP);
+        assert!(!DemoEngine.judges());
     }
 }

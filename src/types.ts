@@ -102,7 +102,83 @@ export interface AppSnapshot {
   recent_sessions: SessionListItem[];
   /** All zero and empty when nobody is signed in. */
   progress: LearnerProgress;
+  /** Where the signed-in learner stands in the curriculum; null when signed out. */
+  standing?: Standing | null;
   engine_status: EngineStatus;
+}
+
+/**
+ * Where the learner stands in the curriculum: six levels of five steps, as on
+ * Ella Mobile. The window shows a level's name and its number on the ladder,
+ * never its CEFR code, which stays in the backend.
+ */
+export interface Standing {
+  /** 1 to `level_count`. */
+  level_number: number;
+  level_count: number;
+  level_name: string;
+  /** 1 to `step_count`. */
+  step: number;
+  step_count: number;
+  step_title: string;
+  /** How far through the level, 0-100: the steps behind and this step's share. */
+  percent: number;
+  /** False until a placement chat has read a level for them. A learner can
+   * move on through talks without one; the level map offers it until then. */
+  placed: boolean;
+}
+
+/** How far a talk moved the learner. */
+export type Advance = "step" | "level";
+
+/** One skill a talk counted: its short label and how many talks have shown it. */
+export interface SkillGrowth {
+  label: string;
+  count: number;
+}
+
+/** What a finished talk did for the learner. Worked out once by the backend
+ * and kept on the talk, so asking again answers the same. */
+export interface Assessment {
+  session_id: string;
+  kind: "placement" | "talk";
+  /** Where the learner stands after this talk. */
+  standing: Standing;
+  /** A placement's closing line, for its result. */
+  closing?: string | null;
+  /** A step or level this talk finished. */
+  advanced?: Advance | null;
+  /** Skills the talk counted, its aim first, at most three. */
+  skills: SkillGrowth[];
+  /** False when nothing judged the talk: nothing said, or no model to judge. */
+  scored: boolean;
+}
+
+export type LevelState = "done" | "current" | "next" | "locked";
+
+export interface LevelSkill {
+  label: string;
+  /** "I can …", word for word from the curriculum. */
+  text: string;
+  passed: boolean;
+}
+
+export interface LevelStep {
+  number: number;
+  title: string;
+  focus: string;
+  skills: LevelSkill[];
+}
+
+/** One level of the ladder as it stands for the learner. */
+export interface LevelView {
+  number: number;
+  name: string;
+  /** The level's "I can …" headline. */
+  goal: string;
+  state: LevelState;
+  percent: number;
+  steps: LevelStep[];
 }
 
 export interface AudioPayload {
@@ -231,6 +307,17 @@ export interface EllaBridge {
   /** Stores a `#RRGGBB` avatar colour on the signed-in learner. */
   saveAvatarColor(color: string): Promise<Learner>;
   startSession(topicId: string): Promise<Session>;
+  /** The placement chat: a friendly first talk that ends once Ella has heard
+   * enough to read a level, between five answers and twelve. Its last turn
+   * closes the session, as a conversation's last turn does. */
+  startPlacement(): Promise<Session>;
+  /** What a finished talk did: a placement's level, or a talk's skills and any
+   * step or level it finished. Slow the first time (the model reads the talk),
+   * then kept. Rejects while the talk is still going, or when the model could
+   * not be read — asking again later is safe. */
+  assessSession(sessionId: string): Promise<Assessment>;
+  /** Every level, lowest first, as it stands for the learner. */
+  levels(): Promise<LevelView[]>;
   /** Start a talk partner's goal: a chore from the Rust catalog, played by its
    * character and scored by the backend. The session reads like any other. */
   startChore(choreId: string): Promise<Session>;

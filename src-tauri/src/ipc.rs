@@ -4,7 +4,10 @@ use tauri::State;
 
 use crate::{
     application::AppService,
-    domain::{AppSnapshot, Learner, Session, SessionSummary, SpokenLine, TurnResult},
+    domain::{
+        AppSnapshot, Assessment, Learner, LevelView, Session, SessionSummary, SpokenLine,
+        TurnResult,
+    },
     error::EllaResult,
     setup::{Setup, SetupProgress},
 };
@@ -88,6 +91,14 @@ pub async fn start_session(
 ) -> Result<Session, String> {
     let service = state.0.clone();
     off_main_thread(move || service.start_session(&topic_id)).await
+}
+
+/// The placement chat: onboarding's first talk, or the one the level map
+/// offers a learner who never had it.
+#[tauri::command]
+pub async fn start_placement(state: State<'_, AppState>) -> Result<Session, String> {
+    let service = state.0.clone();
+    off_main_thread(move || service.start_placement()).await
 }
 
 #[tauri::command]
@@ -206,4 +217,23 @@ pub async fn complete_session(
 ) -> Result<SessionSummary, String> {
     let service = state.0.clone();
     off_main_thread(move || service.complete_session(&session_id)).await
+}
+
+/// What a finished talk did for the learner. Slow the first time — the model
+/// reads the talk — and kept, so asking again is instant and counts nothing
+/// twice.
+#[tauri::command]
+pub async fn assess_session(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Assessment, String> {
+    let service = state.0.clone();
+    off_main_thread(move || service.assess_session(&session_id)).await
+}
+
+/// The level map: every level, lowest first, as it stands for the learner.
+#[tauri::command]
+pub async fn levels(state: State<'_, AppState>) -> Result<Vec<LevelView>, String> {
+    let service = state.0.clone();
+    off_main_thread(move || service.levels()).await
 }

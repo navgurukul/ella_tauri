@@ -1,12 +1,25 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  atMost,
+  levelCeiling,
+  levelIndex,
+  levelName,
+  levelsAt,
+  START,
+  standingAt,
+  stepCount,
+  type Position,
+} from "./curriculum";
 import { dayKey } from "./days";
 import type {
   AppSnapshot,
+  Assessment,
   DayActivity,
   EllaBridge,
   Learner,
   LearnerProgress,
+  LevelView,
   Message,
   Session,
   SessionSummary,
@@ -17,6 +30,20 @@ import type {
   VoiceStreamFinishInput,
   VoiceTurnInput,
 } from "../types";
+
+/** Mirrors `PLACEMENT_MIN_TURNS` in `progress.rs`: without a model the
+ * placement chat runs to the shortest length allowed. */
+const PLACEMENT_MIN_TURNS = 5;
+
+/** Mirrors `scripted_placement_question` and `PLACEMENT_WRAP` in engines.rs. */
+const PLACEMENT_QUESTIONS = [
+  "That sounds nice. Who do you usually spend your day with?",
+  "Lovely. What did you do last weekend?",
+  "That sounds fun. What is your favourite food, and why do you like it?",
+  "Good reason! If you could visit any place, where would you go?",
+  "Wonderful. What would you like to do there first?",
+];
+const PLACEMENT_WRAP = "Thank you, I really enjoyed hearing about that!";
 
 const topics: Topic[] = [
   {
@@ -114,6 +141,19 @@ function topicsForAge(age?: number | null): Topic[] {
  * backend's column defaults to 0. */
 interface StoredLearner extends Learner {
   signed_out?: boolean;
+  /** Where they are, as the backend's `level_code` and `step`; absent until
+   * something has put them anywhere. */
+  level_code?: string | null;
+  step?: number | null;
+  /** Whether a placement chat has read a level for them. */
+  placed?: boolean;
+}
+
+/** A session as the preview keeps it: what the app sees, plus the kind and
+ * assessment the backend keeps on the same row. */
+interface StoredSession extends Session {
+  kind?: "placement" | null;
+  assessment?: Assessment | null;
 }
 
 /**
@@ -124,7 +164,20 @@ interface StoredLearner extends Learner {
  */
 interface BrowserState {
   learner?: StoredLearner;
-  sessions: Session[];
+  sessions: StoredSession[];
+}
+
+/** Where the learner is; `null` until something has put them anywhere. The
+ * step is kept inside the level, as the backend keeps it. */
+function positionOf(learner: StoredLearner): Position | null {
+  if (!learner.level_code || levelIndex(learner.level_code) < 0) return null;
+  const steps = stepCount(learner.level_code);
+  return { level: learner.level_code, step: Math.min(Math.max(learner.step ?? 1, 1), steps) };
+}
+
+/** The session without what only the preview's storage keeps. */
+function publicSession({ kind: _kind, assessment: _assessment, ...session }: StoredSession): Session {
+  return structuredClone(session);
 }
 
 /**
@@ -157,6 +210,9 @@ class TauriBridge implements EllaBridge {
   saveLearner = (name: string, age?: number | null) =>
     invoke<Learner>("save_learner", { name, age: age ?? null });
   startSession = (topicId: string) => invoke<Session>("start_session", { topicId });
+  startPlacement = () => invoke<Session>("start_placement");
+  assessSession = (sessionId: string) => invoke<Assessment>("assess_session", { sessionId });
+  levels = () => invoke<LevelView[]>("levels");
   startChore = (choreId: string) => invoke<Session>("start_chore", { choreId });
   getSession = (sessionId: string) => invoke<Session>("get_session", { sessionId });
   speakOpening = (sessionId: string) => invoke<SpokenLine>("speak_opening", { sessionId });
@@ -257,7 +313,13 @@ function progressOf(sessions: Session[]): LearnerProgress {
 
 /** The stored learner without the flag, and with the fields a preview from
  * before they existed left out filled in as the backend fills them. */
-function publicLearner({ signed_out: _, ...learner }: StoredLearner): Learner {
+function publicLearner({
+  signed_out: _,
+  level_code: _code,
+  step: _step,
+  placed: _placed,
+  ...learner
+}: StoredLearner): Learner {
   return { ...structuredClone(learner), age: learner.age ?? null, avatar_color: learner.avatar_color ?? null };
 }
 
@@ -345,6 +407,7 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
             }))
         : [],
       progress: learner ? progressOf(state.sessions) : emptyProgress(),
+      standing: learner ? standingAt(positionOf(learner) ?? START, Boolean(learner.placed)) : null,
       engine_status: {
         mode: "demo",
         label: "Browser demo",
@@ -359,8 +422,15 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
   };
 
   /** A new conversation that has only Ella's (or her stand-in's) opening line. */
-  const openSession = (state: BrowserState, topicId: string, label: string, opening: string) => {
-    const session: Session = {
+  const openSession = (
+    state: BrowserState,
+    topicId: string,
+    label: string,
+    opening: string,
+    kind: StoredSession["kind"] = null,
+  ) => {
+    const session: StoredSession = {
+      kind,
       id: crypto.randomUUID(),
       topic_id: topicId,
       topic_label: label,
@@ -378,7 +448,7 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
     };
     state.sessions.push(session);
     write(state);
-    return structuredClone(session);
+    return publicSession(session);
   };
 
   const getSessionOrThrow = (state: BrowserState, sessionId: string) => {
@@ -425,10 +495,19 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
       turn,
       created_at: now,
     };
+    // The placement chat asks its own questions and, with no model to say it
+    // has heard enough, ends at the shortest length allowed, as the backend's
+    // demo mode does.
+    const placement = session.kind === "placement";
+    const lastPlacementTurn = placement && turn >= PLACEMENT_MIN_TURNS;
     const ellaMessage: Message = {
       id: crypto.randomUUID(),
       speaker: "ella",
-      content: demoReply(session.topic_id, clean, turn),
+      content: placement
+        ? lastPlacementTurn
+          ? PLACEMENT_WRAP
+          : PLACEMENT_QUESTIONS[(turn - 1) % PLACEMENT_QUESTIONS.length]
+        : demoReply(session.topic_id, clean, turn),
       turn,
       created_at: new Date().toISOString(),
     };
@@ -436,13 +515,14 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
 
     // Mirrors FREE_TOPIC_TURNS in engines.rs: the sixth turn is the last one,
     // and the session closes itself rather than saying goodbye again.
-    const sessionSummary = turn >= 6 ? closeSession(state, session.id) : null;
+    const over = placement ? lastPlacementTurn : turn >= 6;
+    const sessionSummary = over ? closeSession(state, session.id) : null;
     write(state);
     return {
       learner_message: learnerMessage,
       ella_message: ellaMessage,
       correction: gentleCorrection(clean),
-      suggested_complete: turn >= 3,
+      suggested_complete: placement ? lastPlacementTurn : turn >= 3,
       session_summary: sessionSummary,
       // The browser bridge has no Piper, so nothing streams ahead of the turn
       // and there are no timings to highlight against.
@@ -462,16 +542,20 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
       }
       const state = read();
       const kept = state.learner;
+      const position = kept ? positionOf(kept) : null;
       state.learner = {
         name: clean,
         // Onboarding can be re-run without the age step; keep what we know.
         age: age ?? kept?.age ?? null,
-        level_name: "Morning Meadow",
+        level_name: levelName((position ?? START).level),
         created_at: kept?.created_at ?? new Date().toISOString(),
         avatar_color: kept?.avatar_color ?? null,
         // Saving signs in. After a log out, "Let's start" is the same learner
         // onboarding again, so every talk stays theirs.
         signed_out: false,
+        level_code: position?.level ?? null,
+        step: position?.step ?? null,
+        placed: kept?.placed ?? false,
       };
       write(state);
       return publicLearner(state.learner);
@@ -513,8 +597,78 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
       talker(state);
       return openSession(state, chore.id, chore.title, chore.opening);
     },
+    async startPlacement() {
+      const state = read();
+      const learner = talker(state);
+      return openSession(
+        state,
+        "placement",
+        "First talk",
+        `So ${learner.name}, tell me about your day so far!`,
+        "placement",
+      );
+    },
+    /**
+     * As the backend assesses a talk with no model to judge it: a placement
+     * the learner spoke in places them where everyone starts (only ever
+     * moving an already-placed learner up), and a talk is kept unscored.
+     */
+    async assessSession(sessionId) {
+      const state = read();
+      const learner = signedIn(state);
+      if (!learner) throw new Error("Tell Ella your name first.");
+      const session = getSessionOrThrow(state, sessionId);
+      if (session.assessment) return structuredClone(session.assessment);
+      if (session.status !== "complete") throw new Error("This talk is still going.");
+      const stored = positionOf(learner);
+      let assessment: Assessment;
+      if (session.kind === "placement") {
+        const answers = session.messages
+          .filter((message) => message.speaker === "learner")
+          .map((message) => message.content);
+        // As the backend: a chat that heard fewer answers than the shortest
+        // placement places nobody.
+        const heard = answers.length >= PLACEMENT_MIN_TURNS;
+        const found: Position = { level: atMost(START.level, levelCeiling(answers)), step: 1 };
+        const moved =
+          heard && (!stored || levelIndex(found.level) > levelIndex(stored.level)) ? found : null;
+        if (moved) {
+          learner.level_code = moved.level;
+          learner.step = moved.step;
+          learner.level_name = levelName(moved.level);
+        }
+        if (heard) learner.placed = true;
+        assessment = {
+          session_id: session.id,
+          kind: "placement",
+          standing: standingAt(moved ?? stored ?? START, Boolean(learner.placed)),
+          closing: `That was lovely, ${learner.name.split(/\s+/)[0]}!`,
+          advanced: null,
+          skills: [],
+          scored: heard,
+        };
+      } else {
+        assessment = {
+          session_id: session.id,
+          kind: "talk",
+          standing: standingAt(stored ?? START, Boolean(learner.placed)),
+          closing: null,
+          advanced: null,
+          skills: [],
+          scored: false,
+        };
+      }
+      session.assessment = assessment;
+      write(state);
+      return structuredClone(assessment);
+    },
+    async levels() {
+      const learner = signedIn(read());
+      if (!learner) throw new Error("Tell Ella your name first.");
+      return levelsAt(positionOf(learner) ?? START);
+    },
     async getSession(sessionId) {
-      return structuredClone(getSessionOrThrow(read(), sessionId));
+      return publicSession(getSessionOrThrow(read(), sessionId));
     },
     sendTextTurn: send,
     async sendVoiceTurn(input) {

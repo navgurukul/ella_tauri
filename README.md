@@ -66,15 +66,17 @@ design's window chrome — title bar and traffic lights — is left to the OS.
   and sways while she thinks; when the mic opens she dives away and comes back
   from a random side, ears pricked (or looming, if she came from above).
 - Onboarding is the five-step flow — welcome, name, age, mic check, placement
-  talk — in
+  chat — in
   [`src/components/OnboardingFlow.tsx`](src/components/OnboardingFlow.tsx). The
-  mic check and the placement talk open the real microphone. The profile can run
-  the mic check again.
+  mic check and the placement chat open the real microphone. The profile can run
+  the mic check again. The placement chat finds the learner's level: see
+  [Levels](#levels-the-placement-chat-and-moving-on).
 - Then the sidebar screens: **Home**, **Talk partners** and the **Profile**
-  (from the name at the foot of the sidebar), plus the conversation and its
-  summary. A conversation hides the sidebar and fills the window; Space works
-  its microphone. The summary is not in the design and is built from Home's
-  parts.
+  (from the name at the foot of the sidebar), plus the conversation, its
+  summary and the level map. A conversation hides the sidebar and fills the
+  window; Space works its microphone. The summary and the level map are not in
+  the Ella Desktop design: the summary is built from Home's parts, and the level
+  map follows Ella Mobile v7's Levels and level pages, laid side by side.
 - Talk partners are real where the backend is: Bippo's and Grumble's goals start
   the chores in `chores()` through `start_chore`, which plays the character and
   keeps the score. Dr Wobble's goal opens the doctor topic, and Zig's debate has
@@ -106,6 +108,95 @@ design's window chrome — title bar and traffic lights — is left to the OS.
 
 The intended window is 1440x900; the layout holds down to the 1240x740 minimum,
 with the tallest mascots scaling down on short windows.
+
+## Levels, the placement chat and moving on
+
+The same curriculum and rules as Ella Mobile, run on the laptop. Learners never
+see a CEFR code: the window shows a level's name ("Finding My Voice") and its
+number on the ladder, 1 to 6.
+
+- **The curriculum** is Ella Docs' six levels, A0 to C1, of five steps each —
+  117 skills, word for word, with Ella Mobile's short labels. It lives in
+  [`shared/curriculum.json`](shared/curriculum.json), which the backend
+  ([`curriculum.rs`](src-tauri/src/curriculum.rs)) and the browser preview
+  ([`src/lib/curriculum.ts`](src/lib/curriculum.ts)) both read. Everyone
+  starts at Step 1 of A2 until a placement says otherwise.
+- **The placement chat** replaces the one-question first talk. Ella climbs from
+  easy questions (themselves) to harder ones (the past, an opinion and why,
+  something imagined), and the chat ends by `progress::placement_ends`, as on
+  the phone: never before the fifth answer, from the fifth when the model is
+  ready and highly confident, from the ninth when it is fairly confident, and
+  at the twelfth regardless. Its last turn is a goodbye and closes the session;
+  the level is read while Ella says it, and the learner starts at Step 1 of it.
+  A chat ended before it heard five answers — Skip, or End talk on one left
+  open and picked up again from Home — places nobody. A learner who never had
+  one — everybody upgrading from 0.1.7 — is offered it on the level map, even
+  after moving on through talks. Once a learner stands anywhere above the
+  start, a placement only ever moves them up.
+- **Every talk quietly aims at one skill** of the learner's step, picked when it
+  starts by the phone's priority (need, uncertainty, review due, curriculum
+  order, variety, and a cooldown for the latest aims), kept on the session, and
+  named in Ella's instructions as an aim, never a lesson. The prompts pitch
+  Ella's words at the learner's level instead of the old fixed A1, and a talk
+  keeps the level it began at, so its instructions stay in llama.cpp's cached
+  prefix even when another talk's assessment moves the learner on meanwhile.
+- **Ending a talk scores it** (`assess_session`) on the skills of the step and
+  the next. A demonstration the judge is at least 0.70 sure of raises that
+  skill's mastery; a skill is owned at 0.75, shown in two talks on two topics.
+  A step is done when its vocabulary and fluency skills are owned and its
+  grammar skills have started to show; then the learner moves to the next step,
+  or after Step 5 to Step 1 of the next level. If every skill left has missed
+  twice running, the next step's skills join in. See
+  [`progress.rs`](src-tauri/src/progress.rs).
+- **The summary** shows the skills a talk counted, where the learner stands,
+  and "Step complete!" or "Level up!" when a talk moved them on. It opens at
+  once and fills in when the model has read the talk. The app owns that
+  question, so leaving early loses nothing: Home catches up, and a step or
+  level finished meanwhile is celebrated in a toast. Home and the profile carry
+  a MY LEVEL card, and both open the level map.
+
+Assessments are worked out once and kept on the talk (`sessions.assessment`),
+in one transaction with the skills and the level they change, so asking again
+is instant and counts nothing twice. A model whose answer cannot be read is an
+error the summary offers to retry, never a talk that silently counts for
+nothing. Without a model (demo mode, the browser preview) the placement runs to
+five answers and places at A2, and talks are kept unscored.
+
+**Asking a 3B model to judge.** The phone asks a much larger model, and three
+of its prompts had to change to work with Qwen2.5-3B. Each was measured against
+the model on sample transcripts, and the prompts' doc comments keep the numbers:
+
+- *Has the placement heard enough?* This is asked after each exchange from the
+  fourth, on its own thread while the reply is played. The next answer reads
+  the verdict, so it judges the answers before that one. The phone's model
+  judges the latest answer too, but only because it writes the verdict in the
+  same reply; here that would put a model call in front of every turn. The chat
+  still ends between the fifth answer and the twelfth, and the level is read
+  off all of them. It is sent as an aside
+  after the chat under the chat's own system prompt, so llama.cpp answers it
+  from the slot's cached prefix: about 100 prompt tokens and half a second on
+  an M-series Mac, where a prompt of its own would evaluate the whole chat
+  again, and the next turn's cache would go with it.
+- *Which level?* The phone's reply template shows `"level":"A2"`, and the 3B
+  model copied it: every sample came back A2, from single words to fluent. With
+  a placeholder in the template, and only the learner's answers to read, the
+  samples came back A1, A2, B2, B2 — in order, and at most one level out. The
+  phone's "when the sample is very short, do not guess high" is enforced by
+  counting instead (`progress::level_ceiling`). Answers averaging under three
+  words stay at A0, under five at A1, and under seven at A2.
+- *Which skills did the talk show?* Asked for scores alone, the model marked
+  six skills of eight at 0.9 for a talk of "yes", "samosa" and "good. I like".
+  So it now has to quote the learner's own words for every skill it claims, and
+  a claim counts only if they really said it, with one skill per quote. For
+  that talk it now claims nothing.
+
+To run the whole flow against a real model, start llama-server with Ella's
+model and run the ignored end-to-end test:
+
+```bash
+ELLA_LLM_BASE_URL=http://127.0.0.1:39091/v1 \
+cargo test --manifest-path src-tauri/Cargo.toml --lib live_model -- --ignored --nocapture
+```
 
 ## Run the complete local voice POC
 
@@ -349,9 +440,15 @@ before Ella moves on (`synchronous = FULL`, plus `fullfsync` on macOS), so it
 survives a crash, a force-quit or a battery that dies.
 
 A development build has the same identifier, so it opens the same database and
-sees the installed app's learner. Opening a v0.1.6 database only adds two
-columns to its learner (the avatar colour and whether they are signed out), so
-v0.1.6 can still open it afterwards. A database from an unreleased development
+sees the installed app's learner. Opening a v0.1.6 database only adds columns
+and one table, so v0.1.6 can still open it afterwards. The learner gains the
+avatar colour, whether they are signed out, their level and step, and whether a
+placement has read a level for them. Each session gains whether it was the
+placement chat, the skill it aimed at, the level it was pitched at and its kept
+assessment. The new table is `skill_mastery`, one row per skill a talk has
+been scored on. It is a new name on purpose, because the first releases' garden
+left a `skill_progress` table of its own on some laptops. `level_name` keeps
+the learner's real level name, which is what v0.1.6 shows. A database from an unreleased development
 build that briefly kept several learners on one laptop is converted back once:
 it keeps the learner who was signed in, or else whoever was about most recently
 (still signed out), and every talk. Before running a development build on a

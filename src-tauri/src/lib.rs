@@ -1,8 +1,10 @@
 pub mod application;
+pub mod curriculum;
 pub mod domain;
 pub mod error;
 pub mod infrastructure;
 mod ipc;
+pub mod progress;
 mod setup;
 mod telemetry;
 
@@ -138,6 +140,7 @@ pub fn run() {
             ipc::log_out,
             ipc::save_avatar_color,
             ipc::start_session,
+            ipc::start_placement,
             ipc::start_chore,
             ipc::speak_opening,
             ipc::speak_retry_prompt,
@@ -149,6 +152,8 @@ pub fn run() {
             ipc::cancel_voice_stream,
             ipc::finish_voice_stream_turn,
             ipc::complete_session,
+            ipc::assess_session,
+            ipc::levels,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Ella")

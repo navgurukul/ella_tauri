@@ -380,3 +380,89 @@ describe("the preview's learner", () => {
     expect((await bridge.logIn()).avatar_color).toBe("#ff7a00");
   });
 });
+
+describe("the placement chat and the level map in the browser preview", () => {
+  it("runs the placement to the shortest length and places the learner where everyone starts", async () => {
+    const bridge = createBrowserBridge(memoryStorage());
+    await bridge.saveLearner("Asha Rao", 12);
+    expect((await bridge.bootstrap()).standing).toMatchObject({
+      level_number: 3,
+      level_name: "Finding My Voice",
+      step: 1,
+      placed: false,
+    });
+
+    const session = await bridge.startPlacement();
+    expect(session.topic_label).toBe("First talk");
+    expect(session.messages[0].content).toBe("So Asha Rao, tell me about your day so far!");
+    expect(session).not.toHaveProperty("kind");
+
+    for (let answer = 1; answer < 5; answer += 1) {
+      const turn = await bridge.sendTextTurn(session.id, "I go to school with my brother");
+      expect(turn.session_summary).toBeNull();
+      expect(turn.ella_message.content.endsWith("?")).toBe(true);
+    }
+    const last = await bridge.sendTextTurn(session.id, "We play cricket after school");
+    expect(last.session_summary).not.toBeNull();
+    expect(last.ella_message.content.endsWith("?")).toBe(false);
+
+    await expect(bridge.assessSession(session.id)).resolves.toMatchObject({
+      kind: "placement",
+      closing: "That was lovely, Asha!",
+      standing: { level_name: "Finding My Voice", placed: true },
+      scored: true,
+    });
+    // Asked again, the same answer, and the learner is placed from now on.
+    expect((await bridge.assessSession(session.id)).session_id).toBe(session.id);
+    expect((await bridge.bootstrap()).standing?.placed).toBe(true);
+  });
+
+  it("holds a placement of one-word answers down, as the backend does", async () => {
+    const bridge = createBrowserBridge(memoryStorage());
+    await bridge.saveLearner("Dev");
+    const session = await bridge.startPlacement();
+    for (const answer of ["college", "yes", "mother father", "cricket", "good"]) {
+      await bridge.sendTextTurn(session.id, answer);
+    }
+    await expect(bridge.assessSession(session.id)).resolves.toMatchObject({
+      standing: { level_number: 1, level_name: "Pre-Beginner", placed: true },
+    });
+  });
+
+  it("assesses a talk only once it is over, and without a model never scores it", async () => {
+    const bridge = createBrowserBridge(memoryStorage());
+    await bridge.saveLearner("Riya");
+    const session = await bridge.startSession("street-food");
+    await bridge.sendTextTurn(session.id, "I ate poha");
+    await expect(bridge.assessSession(session.id)).rejects.toThrow("This talk is still going.");
+    await bridge.completeSession(session.id);
+    await expect(bridge.assessSession(session.id)).resolves.toMatchObject({
+      kind: "talk",
+      scored: false,
+      advanced: null,
+      skills: [],
+    });
+  });
+
+  it("draws the ladder with the learner's level current and everything below done", async () => {
+    const bridge = createBrowserBridge(memoryStorage());
+    await bridge.saveLearner("Kabir");
+    const levels = await bridge.levels();
+    expect(levels.map((level) => level.state)).toEqual(["done", "done", "current", "next", "locked", "locked"]);
+    expect(levels.map((level) => level.name)).toEqual([
+      "Pre-Beginner",
+      "First Words",
+      "Finding My Voice",
+      "Speaking Freely",
+      "Almost Fluent",
+      "Fluent",
+    ]);
+    expect(levels[0].steps.every((step) => step.skills.every((skill) => skill.passed))).toBe(true);
+    expect(levels[2].steps[0].skills.some((skill) => skill.passed)).toBe(false);
+    // The window never sees a CEFR code.
+    expect(JSON.stringify(levels)).not.toMatch(/"(A0|A1|A2|B1|B2|C1)"/);
+
+    await bridge.logOut();
+    await expect(bridge.levels()).rejects.toThrow("Tell Ella your name first.");
+  });
+});
