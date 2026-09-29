@@ -97,9 +97,9 @@ const FIGURE_PARTS: Record<Exclude<CastId, "doctor" | "debater" | "landlord">, s
 };
 
 /** A talk partner, bobbing on their card after flying in with the screen. */
-function PartnerFigure({ id }: { id: CastId }) {
+export function PartnerFigure({ id, entrance = true }: { id: CastId; entrance?: boolean }) {
   const entry = useRef<HTMLDivElement>(null);
-  useEntrance(entry);
+  useEntrance(entry, entrance);
   return (
     <div ref={entry} className="partner__entry" aria-hidden="true">
       <div className={`figure figure--${id}`}>

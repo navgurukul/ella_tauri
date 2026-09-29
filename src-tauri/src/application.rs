@@ -11,11 +11,11 @@ use crate::{
     curriculum::{self, Position},
     domain::{
         find_character, find_chore, topics, topics_for_age, Advance, AppSnapshot, Assessment,
-        ChoreContext, Focus, LedgerTurn, AudioPayload, LedgerView, Learner, LearnerProfile,
+        ChoreContext, ChoreRecap, Focus, LedgerTurn, AudioPayload, LedgerView, Learner, LearnerProfile,
         LearnerProgress, LevelSkillView, LevelState, LevelView, Message, Pitch, PlacementBrief,
         PlacementReading, Readiness, Scorable, Session, SessionSummary, SpeechStreamEvent,
-        SpokenLine, Standing, StepView, TurnSignal, WinCondition, Speaker, Topic, TurnResult,
-        TutorRequest, WordSpan,
+        SpokenLine, Standing, StepView, TalkNotes, TurnSignal, WinCondition, Speaker, Topic,
+        TurnResult, TutorRequest, WordSpan,
     },
     error::{EllaError, EllaResult},
     infrastructure::{
@@ -24,6 +24,7 @@ use crate::{
         engines::{trailing_question, GeneratedReply, SpeechSegment, SpeechSink, TutorEngine, FREE_TOPIC_TURNS},
         safety,
     },
+    notes,
     progress::{self, ProgressMap, SkillProgress},
     telemetry::LatencyTrace,
 };
@@ -312,6 +313,27 @@ impl AppService {
             }) as Arc<dyn SpeechSink>
         });
         let synthesized = self.engine.speak(text, speech)?;
+        Ok(SpokenLine {
+            streamed_segments: synthesized.segments,
+            audio: synthesized.audio,
+            speech_words: synthesized.words,
+        })
+    }
+
+    /// The recap's one fix, said the right way, so the learner can hear it.
+    /// Only ever the fix kept on the talk: the window names the talk, not the
+    /// words. Synthesized whole, since nothing is waiting to highlight it.
+    pub fn speak_fix(&self, session_id: &str) -> EllaResult<SpokenLine> {
+        let meta = self.database.session_curriculum(session_id)?;
+        let fix = meta
+            .assessment
+            .as_deref()
+            .map(read_assessment)
+            .transpose()?
+            .and_then(|assessment| assessment.notes)
+            .and_then(|notes| notes.fix)
+            .ok_or_else(|| EllaError::NotFound("There is nothing to hear for this talk.".into()))?;
+        let synthesized = self.engine.speak(&fix.better, None)?;
         Ok(SpokenLine {
             streamed_segments: synthesized.segments,
             audio: synthesized.audio,
@@ -1171,11 +1193,8 @@ impl AppService {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(session_id);
-        let turns = session
-            .messages
-            .iter()
-            .filter(|message| message.speaker == Speaker::Learner)
-            .count() as u32;
+        let answers = answers_in(&session);
+        let turns = answers.len() as u32;
         let headline = if turns >= 3 {
             "You kept that conversation going".into()
         } else {
@@ -1195,13 +1214,84 @@ impl AppService {
                 if conversations == 1 { "" } else { "s" }
             )
         };
+        let short = notes::too_short(&answers);
+        let chore = self.chore_recap(&session)?;
         Ok(SessionSummary {
             session_id: session.id,
             topic_label: session.topic_label,
             turns,
             headline,
             encouragement,
+            short,
+            chore,
         })
+    }
+
+    /// How a ledger chore's talk ended, read off its ledger. Asked for once the
+    /// talk is closed, so `times_met` counts it too.
+    fn chore_recap(&self, session: &Session) -> EllaResult<Option<ChoreRecap>> {
+        let Some((chore_id, character_id)) = self.database.session_chore(&session.id)? else {
+            return Ok(None);
+        };
+        let Some(WinCondition::Ledger(spec)) = find_chore(&chore_id).map(|chore| chore.win) else {
+            return Ok(None);
+        };
+        let Some((figure, agreed)) = self.database.ledger_state(&session.id)? else {
+            return Ok(None);
+        };
+        let times_met = self
+            .database
+            .finished_ledgers(&chore_id)?
+            .into_iter()
+            .filter(|(current, agreed)| *agreed && spec.reached_target(*current))
+            .count() as u32;
+        let last_line = session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.speaker == Speaker::Ella)
+            .map(|message| message.content.clone());
+        Ok(Some(ChoreRecap {
+            chore_id,
+            character_id,
+            unit: spec.unit.clone(),
+            direction: spec.direction,
+            target: spec.target,
+            figure,
+            agreed,
+            met: agreed && spec.reached_target(figure),
+            times_met,
+            last_line,
+        }))
+    }
+
+    /// Ella's notes on a finished talk: what went well, read off the learner's
+    /// words, and one fix, if the model finds a mistake in them. `None` for a
+    /// talk too short to say anything about. A fix that could not be read
+    /// leaves the notes without one rather than failing the assessment, so the
+    /// talk still counts; `checked` says so, and nothing claims there was
+    /// nothing to fix.
+    fn notes_for(&self, session: &Session) -> EllaResult<Option<TalkNotes>> {
+        let answers = answers_in(session);
+        if notes::too_short(&answers) {
+            return Ok(None);
+        }
+        let chore = self.chore_recap(session)?;
+        let went_well = notes::went_well(&answers, chore.as_ref());
+        let checked = notes::answers_to_check(&answers);
+        let (fix, looked) = match self.engine.correct(&checked) {
+            Ok(Some(corrected)) => (notes::fix_from(&checked, &corrected), true),
+            Ok(None) => (None, false),
+            Err(error) => {
+                eprintln!("[recap] correcting {}: {error}", session.id);
+                (None, false)
+            }
+        };
+        Ok(Some(TalkNotes {
+            went_well,
+            fix,
+            checked: looked,
+        }))
     }
 
     /// Whether the learner's `answers`-th answer is the placement chat's last.
@@ -1399,6 +1489,7 @@ impl AppService {
                 advanced: None,
                 skills: Vec::new(),
                 scored: reading.is_some(),
+                notes: None,
             };
             Ok(AssessmentWrite {
                 skills: Vec::new(),
@@ -1429,6 +1520,10 @@ impl AppService {
         } else {
             None
         };
+        // After the scores: when the model cannot be reached at all, their
+        // error is the one the window offers to retry, before any time is
+        // spent on notes.
+        let notes = self.notes_for(session)?;
         let today = today();
         let topic_id = session.topic_id.clone();
         let session_id = session.id.clone();
@@ -1485,6 +1580,7 @@ impl AppService {
                 advanced,
                 skills: grown,
                 scored: scores.is_some(),
+                notes,
             };
             write.assessment = to_json(&assessment)?;
             Ok(write)
@@ -1625,6 +1721,16 @@ fn first_name(name: &str) -> &str {
 
 fn to_json(assessment: &Assessment) -> EllaResult<String> {
     Ok(serde_json::to_string(assessment)?)
+}
+
+/// What the learner said in a talk, answer by answer.
+fn answers_in(session: &Session) -> Vec<&str> {
+    session
+        .messages
+        .iter()
+        .filter(|message| message.speaker == Speaker::Learner)
+        .map(|message| message.content.as_str())
+        .collect()
 }
 
 fn read_assessment(kept: &str) -> EllaResult<Assessment> {
@@ -2155,7 +2261,13 @@ mod tests {
         assert_eq!(fresh["standing"], serde_json::Value::Null);
         assert_eq!(
             fresh["progress"],
-            serde_json::json!({ "days": [], "talks_finished": 0, "answers": 0, "finished_topics": [] })
+            serde_json::json!({
+                "days": [],
+                "talks_finished": 0,
+                "answers": 0,
+                "finished_topics": [],
+                "chores_met": [],
+            })
         );
 
         service.save_learner("Asha", Some(14)).unwrap();
@@ -2354,6 +2466,8 @@ mod curriculum_flow_tests {
         requests: Vec<TutorRequest>,
         checks: Vec<usize>,
         scored: Vec<Vec<String>>,
+        /// The answers each correction was asked for.
+        corrected: Vec<Vec<String>>,
     }
 
     /// A model that always answers the same: ready or not, one level, and the
@@ -2365,6 +2479,8 @@ mod curriculum_flow_tests {
         confidence: f64,
         /// Set to make the next reply fail, as a model that falls over does.
         fail_next_reply: Arc<std::sync::atomic::AtomicBool>,
+        /// Whether a correction comes back unreadable.
+        correct_fails: bool,
     }
 
     impl Judge {
@@ -2375,6 +2491,7 @@ mod curriculum_flow_tests {
                 reading: PlacementReading { level: "B1".into(), closing: Some("Lovely to meet you, Asha!".into()) },
                 confidence: 0.95,
                 fail_next_reply: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                correct_fails: false,
             }
         }
     }
@@ -2412,6 +2529,14 @@ mod curriculum_flow_tests {
         fn score(&self, skills: &[Scorable], _: &[Message]) -> EllaResult<Option<HashMap<String, f64>>> {
             self.heard.lock().unwrap().scored.push(skills.iter().map(|skill| skill.key.clone()).collect());
             Ok(Some(skills.iter().map(|skill| (skill.key.clone(), self.confidence)).collect()))
+        }
+        /// Knows one mistake, and corrects every "it have".
+        fn correct(&self, answers: &[&str]) -> EllaResult<Option<Vec<String>>> {
+            self.heard.lock().unwrap().corrected.push(answers.iter().map(|answer| (*answer).to_owned()).collect());
+            if self.correct_fails {
+                return Err(EllaError::Engine("The model could not correct the answers: an answer that could not be read".into()));
+            }
+            Ok(Some(answers.iter().map(|answer| answer.replace("it have", "it has")).collect()))
         }
         fn uses_native_stt(&self) -> bool {
             false
@@ -2474,6 +2599,123 @@ mod curriculum_flow_tests {
             .unwrap();
         service.complete_session(&session.id).unwrap();
         service.assess_session(&session.id).unwrap()
+    }
+
+    /// A finished talk of these answers, and its summary.
+    fn talk_of(service: &AppService, answers: &[&str]) -> (String, SessionSummary) {
+        let session = service.start_session("street-food").unwrap();
+        for answer in answers {
+            service.send_text_turn(&session.id, answer).unwrap();
+        }
+        let summary = service.complete_session(&session.id).unwrap();
+        (session.id, summary)
+    }
+
+    const SCHOOL_TALK: [&str; 3] = [
+        "My school is very big and it have a big playground",
+        "We play football there because it is fun",
+        "yes",
+    ];
+
+    #[test]
+    fn a_talk_of_a_few_words_is_short_and_has_no_notes() {
+        let heard = Arc::default();
+        let service = judged(Judge::new(&heard));
+        let (id, summary) = talk_of(&service, &["I ate poha", "It was good", "yes"]);
+        assert!(summary.short, "three answers but only seven words");
+        assert_eq!(summary.chore, None);
+        assert_eq!(service.assess_session(&id).unwrap().notes, None);
+        assert!(heard.lock().unwrap().corrected.is_empty(), "nothing was sent to be corrected");
+    }
+
+    #[test]
+    fn a_longer_talk_has_notes_and_one_fix_in_the_learners_own_words() {
+        let heard = Arc::default();
+        let service = judged(Judge::new(&heard));
+        let (id, summary) = talk_of(&service, &SCHOOL_TALK);
+        assert!(!summary.short);
+        let assessment = service.assess_session(&id).unwrap();
+        assert_eq!(
+            assessment.notes,
+            Some(TalkNotes {
+                went_well: vec!["Gave reasons".into(), "Full sentences".into()],
+                fix: Some(crate::domain::Fix {
+                    said: "It have a big playground".into(),
+                    better: "It has a big playground".into(),
+                }),
+                checked: true,
+            })
+        );
+        // Only the answers long enough to have a mistake in were sent.
+        assert_eq!(heard.lock().unwrap().corrected, vec![SCHOOL_TALK[..2].iter().map(|answer| (*answer).to_owned()).collect::<Vec<_>>()]);
+        // Kept with the rest of the assessment: asking again asks nothing.
+        assert_eq!(service.assess_session(&id).unwrap(), assessment);
+        assert_eq!(heard.lock().unwrap().corrected.len(), 1);
+        assert!(service.speak_fix(&id).is_ok());
+    }
+
+    #[test]
+    fn a_correction_that_cannot_be_read_still_counts_the_talk_and_claims_no_fix() {
+        let heard = Arc::default();
+        let service = judged(Judge { correct_fails: true, ..Judge::new(&heard) });
+        let (id, _) = talk_of(&service, &SCHOOL_TALK);
+        let assessment = service.assess_session(&id).unwrap();
+        assert!(assessment.scored);
+        let notes = assessment.notes.unwrap();
+        assert_eq!(notes.went_well.len(), 2);
+        assert_eq!((notes.fix, notes.checked), (None, false), "not the same as nothing to fix");
+        assert!(matches!(service.speak_fix(&id), Err(EllaError::NotFound(_))));
+    }
+
+    #[test]
+    fn without_a_model_the_notes_still_say_what_went_well() {
+        let service = demo();
+        let (id, _) = talk_of(&service, &SCHOOL_TALK);
+        let notes = service.assess_session(&id).unwrap().notes.unwrap();
+        assert_eq!(notes.went_well, vec!["Gave reasons", "Full sentences"]);
+        assert_eq!((notes.fix, notes.checked), (None, false));
+    }
+
+    #[test]
+    fn an_assessment_kept_before_notes_existed_reads_without_them() {
+        let kept = r#"{"session_id":"s","kind":"talk","standing":{"level_number":3,"level_count":6,
+            "level_name":"Finding My Voice","step":1,"step_count":5,"step_title":"Me","percent":0,
+            "placed":false},"closing":null,"advanced":null,"skills":[],"scored":true}"#;
+        assert_eq!(read_assessment(kept).unwrap().notes, None);
+    }
+
+    #[test]
+    fn a_chore_recap_says_how_the_ledger_ended_and_counts_every_goal_met() {
+        let service = demo();
+        let finish = |figure: i32, agreed: bool| {
+            let chore = service.start_chore("market-cloth-price").unwrap();
+            service.send_text_turn(&chore.id, "I will give you 380 for it").unwrap();
+            service.database.save_ledger_state(&chore.id, figure, agreed, &now()).unwrap();
+            service.complete_session(&chore.id).unwrap().chore.unwrap()
+        };
+
+        let met = finish(380, true);
+        assert_eq!(met.chore_id, "market-cloth-price");
+        assert_eq!(met.character_id, "stall-owner");
+        assert_eq!((met.unit.as_str(), met.direction, met.target), ("Rs", crate::domain::Direction::Down, 400));
+        assert_eq!((met.figure, met.agreed, met.met, met.times_met), (380, true, true, 1));
+        assert!(met.last_line.is_some_and(|line| !line.is_empty()), "the stall owner's last word");
+        assert_eq!(service.bootstrap().unwrap().progress.chores_met, vec!["market-cloth-price"]);
+
+        // Agreed, but above the target; then at it, but never agreed.
+        let dear = finish(450, true);
+        assert_eq!((dear.met, dear.times_met), (false, 1));
+        let unagreed = finish(400, false);
+        assert_eq!((unagreed.met, unagreed.times_met), (false, 1));
+
+        let again = finish(400, true);
+        assert_eq!((again.met, again.times_met), (true, 2));
+
+        // A free talk and a chore judged on a rubric have no ledger to tell.
+        assert_eq!(talk_of(&service, &SCHOOL_TALK).1.chore, None);
+        let pen = service.start_chore("sell-me-a-pen").unwrap();
+        service.send_text_turn(&pen.id, "This pen never runs out of ink").unwrap();
+        assert_eq!(service.complete_session(&pen.id).unwrap().chore, None);
     }
 
     #[test]
@@ -2876,6 +3118,57 @@ mod curriculum_flow_tests {
         let scored = service.assess_session(&talk.id).unwrap();
         println!("-- talk assessed: {:?}", scored);
         assert!(scored.scored, "the model's scores were read");
+    }
+
+    /// The recap's notes against a real model: a talk with mistakes in it
+    /// gets one fix, quoted from what was said, and a fluent one gets none.
+    /// Needs the same llama-server as the test above:
+    ///
+    /// ELLA_LLM_BASE_URL=http://127.0.0.1:39191/v1 cargo test --lib live_model -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn live_model_writes_the_recaps_notes() {
+        use crate::infrastructure::engines::{EnginePaths, LocalEngine};
+        assert!(std::env::var("ELLA_LLM_BASE_URL").is_ok(), "point ELLA_LLM_BASE_URL at llama-server");
+        std::env::set_var("ELLA_PIPER_DAEMON", "0");
+        let service = AppService::new(
+            Database::in_memory().unwrap(),
+            Box::new(LocalEngine::from_environment(EnginePaths::default())),
+        );
+        service.save_learner("Aarav", Some(13)).unwrap();
+        let notes_for = |answers: &[&str]| {
+            let talk = service.start_session("street-food").unwrap();
+            for answer in answers {
+                service.send_text_turn(&talk.id, answer).unwrap();
+            }
+            service.complete_session(&talk.id).unwrap();
+            let started = Instant::now();
+            let assessment = service.assess_session(&talk.id).unwrap();
+            println!("-- assessed in {:?}: {:?}", started.elapsed(), assessment.notes);
+            assessment.notes.expect("long enough for notes")
+        };
+
+        let answers = [
+            "My school is very big and it have a big playground",
+            "We plays football in lunch time and my friend Rahul is best player",
+            "I like maths because the teacher explain very nicely",
+        ];
+        let notes = notes_for(&answers);
+        assert!(notes.checked, "the correction was read");
+        let fix = notes.fix.expect("a talk with four mistakes has a fix");
+        assert!(
+            answers.iter().any(|answer| answer.to_lowercase().contains(&fix.said.to_lowercase())),
+            "{:?} is not what Aarav said",
+            fix.said
+        );
+
+        let fluent = notes_for(&[
+            "Nothing much, just chilled at home and watched a movie with my cousins",
+            "It was an old Shah Rukh film, I don't remember the name but it was really funny",
+            "Yeah, sometimes. My dad loves them so we end up watching a lot",
+        ]);
+        assert!(fluent.checked);
+        assert_eq!(fluent.fix, None, "nothing to fix in a fluent talk");
     }
 
     #[test]

@@ -201,7 +201,7 @@ describe("the preview's learner", () => {
     const snapshot = await bridge.bootstrap();
     expect(snapshot.learner).toBeNull();
     expect(snapshot.saved_learner).toBeNull();
-    expect(snapshot.progress).toEqual({ days: [], talks_finished: 0, answers: 0, finished_topics: [] });
+    expect(snapshot.progress).toEqual({ days: [], talks_finished: 0, answers: 0, finished_topics: [], chores_met: [] });
     await expect(bridge.logIn()).rejects.toThrow("Tell Ella your name first.");
   });
 
@@ -266,7 +266,7 @@ describe("the preview's learner", () => {
     const signedOut = await bridge.logOut();
     expect(signedOut.learner).toBeNull();
     expect(signedOut.recent_sessions).toEqual([]);
-    expect(signedOut.progress).toEqual({ days: [], talks_finished: 0, answers: 0, finished_topics: [] });
+    expect(signedOut.progress).toEqual({ days: [], talks_finished: 0, answers: 0, finished_topics: [], chores_met: [] });
     // Signed out, the laptop still knows who it keeps.
     expect(signedOut.saved_learner).toEqual({ name: "Aarav Kumar", avatar_color: "#FF7A00" });
     expect(await bridge.bootstrap()).toEqual(signedOut);
@@ -328,7 +328,7 @@ describe("the preview's learner", () => {
     );
     let snapshot = await bridge.bootstrap();
     expect(snapshot.recent_sessions[0].status).toBe("complete");
-    expect(snapshot.progress).toEqual({ days: [], talks_finished: 0, answers: 0, finished_topics: [] });
+    expect(snapshot.progress).toEqual({ days: [], talks_finished: 0, answers: 0, finished_topics: [], chores_met: [] });
 
     // An answer in a talk left open counts as an answer and a talk day, but
     // not as a finished talk.

@@ -12,7 +12,7 @@ import { SummaryScreen } from "./components/SummaryScreen";
 import { TalkScreen } from "./components/TalkScreen";
 import { avatarColorFor, forgetLegacyAvatarColor, legacyAvatarColor } from "./lib/avatar";
 import { bridge } from "./lib/bridge";
-import { recommendedTopicId, streak } from "./lib/presentation";
+import { nextTopicLabel, recommendedTopicId, streak } from "./lib/presentation";
 import { useSetup } from "./lib/setup";
 import {
   downloadUpdateInBackground,
@@ -21,7 +21,16 @@ import {
   type UpdateProgress,
 } from "./lib/updates";
 import { levelTone } from "./lib/curriculum";
-import type { AppSnapshot, Assessment, CastGoal, Session, SessionSummary, Topic } from "./types";
+import type { AppSnapshot, Assessment, CastGoal, LearnerProgress, Session, SessionSummary, Topic } from "./types";
+
+/** A finished talk's summary, with what the recap needs from before it: the
+ * learner's figures, which its streak counts on from, and its topic, which
+ * tomorrow's suggestion steers away from. */
+interface Finished {
+  result: SessionSummary;
+  before: LearnerProgress;
+  topicId: string | null;
+}
 
 /** The assessment of one finished talk, as far as it has got. */
 interface Assessing {
@@ -50,14 +59,14 @@ const NAV_FOR: Partial<Record<Screen, NavKey | null>> = {
   cast: "cast",
   profile: null,
   levels: null,
-  summary: "home",
 };
 
 export default function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [screen, setScreen] = useState<Screen>("onboarding");
   const [session, setSession] = useState<Session | null>(null);
-  const [summary, setSummary] = useState<SessionSummary | null>(null);
+  const [finished, setFinished] = useState<Finished | null>(null);
+  const summary = finished?.result ?? null;
   // What the last finished talk did for the learner. Asked for here rather
   // than by the summary, so leaving the summary before the model has read
   // the talk loses nothing: the snapshot is re-read whenever the answer
@@ -214,7 +223,7 @@ export default function App() {
     await run(async () => {
       const created = await bridge.startSession(topic.id);
       setSession(created);
-      setSummary(null);
+      setFinished(null);
       setScreen("talk");
     });
   }
@@ -235,11 +244,15 @@ export default function App() {
       await handleStartTopic(start.topicId);
       return;
     }
-    if (start.kind !== "chore") return;
+    if (start.kind === "chore") await handleStartChore(start.choreId);
+  }
+
+  /** A chore: from its partner's card, or again from the recap of one missed. */
+  async function handleStartChore(choreId: string) {
     await run(async () => {
-      const created = await bridge.startChore(start.choreId);
+      const created = await bridge.startChore(choreId);
       setSession(created);
-      setSummary(null);
+      setFinished(null);
       setScreen("talk");
     });
   }
@@ -249,14 +262,15 @@ export default function App() {
     await run(async () => {
       const resumed = await bridge.getSession(sessionId);
       setSession(resumed);
-      setSummary(null);
+      setFinished(null);
       setScreen("talk");
     });
   }
 
   function handleComplete(result: SessionSummary) {
     if (!snapshot) return;
-    setSummary(result);
+    // Taken before the re-read below, which already counts this talk.
+    setFinished({ result, before: snapshot.progress, topicId: session?.topic_id ?? null });
     // Drop the finished conversation. `session` is a frozen snapshot taken
     // before completion, so its status still reads "active" — leaving it set
     // let the sidebar's "Talk" reopen a session the backend had closed, and
@@ -318,7 +332,7 @@ export default function App() {
       signIns.current += 1;
       adopt(await bridge.logOut());
       setSession(null);
-      setSummary(null);
+      setFinished(null);
       setAssessing(null);
       setMovedOn(null);
       setScreen("onboarding");
@@ -410,7 +424,7 @@ export default function App() {
   }
 
   const nav = NAV_FOR[screen];
-  const immersive = screen === "talk" || screen === "placement";
+  const immersive = screen === "talk" || screen === "placement" || screen === "summary";
   const openLevels = () => setScreen("levels");
 
   return (
@@ -484,16 +498,22 @@ export default function App() {
             onComplete={handleComplete}
           />
         )}
-        {screen === "summary" && summary && (
+        {screen === "summary" && finished && summary && (
           <SummaryScreen
+            key={summary.session_id}
             summary={summary}
             assessment={assessing?.sessionId === summary.session_id ? assessing.result : null}
             assessError={assessing?.sessionId === summary.session_id ? assessing.error : null}
+            before={finished.before}
+            learnerName={snapshot.learner?.name ?? "friend"}
+            standing={snapshot.standing ?? null}
+            nextTopic={nextTopicLabel(snapshot, finished.topicId)}
             onRetry={() => assess(summary.session_id)}
             onCelebrated={() =>
               setMovedOn((current) => (current?.session_id === summary.session_id ? null : current))
             }
-            onHome={() => setScreen("home")}
+            onDone={() => setScreen("home")}
+            onTryAgain={(choreId) => void handleStartChore(choreId)}
             onLevels={openLevels}
           />
         )}

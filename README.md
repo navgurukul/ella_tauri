@@ -148,12 +148,27 @@ number on the ladder, 1 to 6.
   or after Step 5 to Step 1 of the next level. If every skill left has missed
   twice running, the next step's skills join in. See
   [`progress.rs`](src-tauri/src/progress.rs).
-- **The summary** shows the skills a talk counted, where the learner stands,
-  and "Step complete!" or "Level up!" when a talk moved them on. It opens at
-  once and fills in when the model has read the talk. The app owns that
+- **The recap** (the Ella Desktop Recap design) follows every talk across the
+  whole window: Ella cheering, or for a chore the talk partner with whether the
+  goal was met, its badge and their last line; then Ella's notes — what went
+  well, one fix the learner can hear said right, and the skills that grew — the
+  streak rolling up a day, and tomorrow's topic. "Step complete!" or "Level
+  up!" shows under the headline when a talk moved them on. It opens at once and
+  the notes fill in when the model has read the talk. The app owns that
   question, so leaving early loses nothing: Home catches up, and a step or
   level finished meanwhile is celebrated in a toast. Home and the profile carry
-  a MY LEVEL card, and both open the level map.
+  a MY LEVEL card, and both open the level map, as the recap's footer does.
+- **Ella's notes** ([`notes.rs`](src-tauri/src/notes.rs)) need three answers
+  and twelve words; a shorter talk says so at once. What went well is read off
+  the learner's own words by rules (reasons given, the past told, questions
+  asked, politeness, full sentences), so it holds with or without a model. The
+  fix is the model's correction of the answers, compared word by word with what
+  was said, so the phrase quoted is always the learner's own. It is kept with
+  the assessment; a correction that cannot be read leaves the notes without a
+  fix rather than failing the talk, and "Nothing to fix" is only said when a
+  model looked. A ledger chore's recap is read off its ledger (`ChoreRecap`),
+  which is also what earns the Bargainer badge now: the stall price talked
+  down, or the free bargaining talk finished.
 
 Assessments are worked out once and kept on the talk (`sessions.assessment`),
 in one transaction with the skills and the level they change, so asking again
@@ -189,6 +204,16 @@ the model on sample transcripts, and the prompts' doc comments keep the numbers:
   So it now has to quote the learner's own words for every skill it claims, and
   a claim counts only if they really said it, with one skill per quote. For
   that talk it now claims nothing.
+- *What is the one fix?* Asked for the one mistake and its correction, the model
+  "fixed" "600 is too much" into "600 is too high", and "yes" into "Did you eat
+  anything today?". Asked to rewrite every answer changing as little as it can,
+  it left fluent, casual and bargaining talks word for word, and found "it
+  have", "we plays", "is best player" and "I go to market". A JSON schema pins
+  the answer to one line per answer; without it the model sometimes wrote each
+  answer twice, as given and corrected. Asked for praise, it described the
+  topic instead ("went to market"), and picking from a numbered list it chose
+  the same two for every talk — which is why what went well is rules, not the
+  model.
 
 To run the whole flow against a real model, start llama-server with Ella's
 model and run the ignored end-to-end test:

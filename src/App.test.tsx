@@ -296,6 +296,46 @@ describe("Ella learner flow", () => {
     expect(document.querySelector("aside.sidebar")).not.toBeInTheDocument();
   });
 
+  it("recaps a finished talk across the whole window: what went well, the streak and tomorrow", async () => {
+    await onboard("Asha");
+    const topics = (await bridge.bootstrap()).topics;
+    fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
+    await screen.findByText("End talk");
+    await typeAnswers(3);
+    fireEvent.click(screen.getByRole("button", { name: "End talk" }));
+
+    expect(await screen.findByRole("heading", { name: "Nice talking, Asha!" })).toBeInTheDocument();
+    expect(document.querySelector("aside.sidebar")).not.toBeInTheDocument();
+    expect(screen.getByText(topics[0].label)).toBeInTheDocument();
+    // Read off the answers, with no model in the preview to look for a fix,
+    // so it claims neither a fix nor that there was nothing to fix.
+    const well = await screen.findByRole("region", { name: "Went well" });
+    await waitFor(() => expect(well.querySelectorAll("li")).toHaveLength(2));
+    expect(well).toHaveTextContent("Told what happened");
+    expect(well).toHaveTextContent("Full sentences");
+    expect(screen.queryByRole("region", { name: "One fix" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Streak" })).toHaveTextContent("1 day streak. New streak");
+
+    const foot = document.querySelector(".recap__foot") as HTMLElement;
+    expect(foot).toHaveTextContent(`Tomorrow${topics[1].label}Day 2`);
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    await screen.findByText("Namaste, Asha!");
+  });
+
+  it("says straight away when a talk was too short for notes", async () => {
+    await onboard("Ravi");
+    fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
+    await screen.findByText("End talk");
+    await typeAnswers(1);
+    fireEvent.click(screen.getByRole("button", { name: "End talk" }));
+
+    expect(await screen.findByRole("heading", { name: "Short and sweet, Ravi!" })).toBeInTheDocument();
+    expect(screen.getByText("Talk a little longer to get Ella’s notes.")).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "Ella is looking back over your talk…" })).not.toBeInTheDocument();
+    // One answer still counts for the streak.
+    expect(screen.getByRole("region", { name: "Streak" })).toHaveTextContent("1 day streak");
+  });
+
   it("returns to a usable resting state when ending a talk fails", async () => {
     await onboard("Kabir");
     fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
@@ -502,7 +542,7 @@ describe("Ella profile", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
     await waitFor(() => expect(promptText()).toMatch(/who would you like to share that with/i));
     fireEvent.click(screen.getByRole("button", { name: "End talk" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Back home" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Done" }));
     expect(await screen.findByText("1 day")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /view profile/i }));
@@ -667,6 +707,7 @@ describe("Ella profile", () => {
     try {
       fireEvent.click(screen.getByText("End talk"));
       await waitFor(() => expect(reread).toHaveBeenCalled());
+      fireEvent.click(await screen.findByRole("button", { name: "Done" }));
       fireEvent.click(await screen.findByRole("button", { name: /view profile/i }));
       fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
       fireEvent.click(screen.getByRole("button", { name: "Pink" }));
@@ -838,8 +879,7 @@ describe("Ella levels", () => {
       fireEvent.click(screen.getByRole("button", { name: "End talk" }));
       expect(await screen.findByText("Step complete!")).toBeInTheDocument();
       expect(screen.getByText("On to Step 2 of Finding My Voice.")).toBeInTheDocument();
-      expect(screen.getByText("Past time words")).toBeInTheDocument();
-      expect(screen.getByText("2 talks")).toBeInTheDocument();
+      expect(screen.getByLabelText("Past time words: 2 talks")).toHaveTextContent("Past time words");
 
       assess.mockImplementation(async (sessionId) => ({
         session_id: sessionId,
@@ -849,7 +889,7 @@ describe("Ella levels", () => {
         skills: [],
         scored: true,
       }));
-      fireEvent.click(screen.getByRole("button", { name: "Back home" }));
+      fireEvent.click(screen.getByRole("button", { name: "Done" }));
       fireEvent.click(await screen.findByRole("button", { name: /start talking/i }));
       await screen.findByText("End talk");
       await typeAnswers(1);
@@ -870,10 +910,10 @@ describe("Ella levels", () => {
       await onboard("Tara");
       fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
       await screen.findByText("End talk");
-      await typeAnswers(1);
+      await typeAnswers(3);
       fireEvent.click(screen.getByRole("button", { name: "End talk" }));
-      expect(await screen.findByText("Ella is looking back over your talk…")).toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: "Back home" }));
+      expect(await screen.findAllByRole("status", { name: "Ella is looking back over your talk…" })).not.toHaveLength(0);
+      fireEvent.click(screen.getByRole("button", { name: "Done" }));
       await screen.findByText("Namaste, Tara!");
 
       const sessionId = assess.mock.calls[0][0];
@@ -958,10 +998,11 @@ describe("Ella levels", () => {
       await onboard("Zara");
       fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
       await screen.findByText("End talk");
-      await typeAnswers(1);
+      await typeAnswers(3);
       fireEvent.click(screen.getByRole("button", { name: "End talk" }));
-      await screen.findByText("Ella is looking back over your talk…");
-      fireEvent.click(screen.getByRole("button", { name: /view profile/i }));
+      await screen.findAllByRole("status", { name: "Ella is looking back over your talk…" });
+      fireEvent.click(screen.getByRole("button", { name: "Done" }));
+      fireEvent.click(await screen.findByRole("button", { name: /view profile/i }));
       fireEvent.click(await screen.findByRole("button", { name: "Log out" }));
       fireEvent.click(await screen.findByRole("button", { name: /log in/i }));
       fireEvent.click(await screen.findByRole("button", { name: "Take me in" }));

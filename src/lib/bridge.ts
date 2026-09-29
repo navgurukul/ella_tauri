@@ -12,6 +12,7 @@ import {
   type Position,
 } from "./curriculum";
 import { dayKey } from "./days";
+import { tooShort, wentWell } from "./notes";
 import type {
   AppSnapshot,
   Assessment,
@@ -218,6 +219,7 @@ class TauriBridge implements EllaBridge {
   speakOpening = (sessionId: string) => invoke<SpokenLine>("speak_opening", { sessionId });
   speakRetryPrompt = (sessionId: string) =>
     invoke<SpokenLine>("speak_retry_prompt", { sessionId });
+  speakFix = (sessionId: string) => invoke<SpokenLine>("speak_fix", { sessionId });
   sendTextTurn = (sessionId: string, text: string) =>
     invoke<TurnResult>("send_text_turn", { sessionId, text });
   sendVoiceTurn = ({ sessionId, samples, sampleRate, browserTranscript }: VoiceTurnInput) =>
@@ -265,7 +267,7 @@ const AVATAR_COLOR = /^#[0-9A-Fa-f]{6}$/;
 
 /** No talks, no days: what a signed-out snapshot and a brand-new learner show. */
 function emptyProgress(): LearnerProgress {
-  return { days: [], talks_finished: 0, answers: 0, finished_topics: [] };
+  return { days: [], talks_finished: 0, answers: 0, finished_topics: [], chores_met: [] };
 }
 
 /**
@@ -308,6 +310,8 @@ function progressOf(sessions: Session[]): LearnerProgress {
     talks_finished: finished,
     answers,
     finished_topics: [...finishedTopics].sort(),
+    // The preview plays no ledger, so no goal is ever met in it.
+    chores_met: [],
   };
 }
 
@@ -464,12 +468,15 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
     const session = getSessionOrThrow(state, sessionId);
     session.status = "complete";
     session.completed_at = new Date().toISOString();
-    const turns = session.messages.filter((message) => message.speaker === "learner").length;
+    const answers = answersIn(session);
+    const turns = answers.length;
     const conversations = progressOf(state.sessions).talks_finished;
     return {
       session_id: session.id,
       topic_label: session.topic_label,
       turns,
+      short: tooShort(answers),
+      chore: null,
       headline: turns >= 3 ? "You kept that conversation going" : "Every answer counts",
       // A talk with nothing said in it is not counted, so it is not thanked
       // for as though it were.
@@ -646,6 +653,7 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
           advanced: null,
           skills: [],
           scored: heard,
+          notes: null,
         };
       } else {
         assessment = {
@@ -656,6 +664,11 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
           advanced: null,
           skills: [],
           scored: false,
+          // What went well needs no model; a fix does, so there is none, and
+          // nothing claims there was nothing to fix.
+          notes: tooShort(answersIn(session))
+            ? null
+            : { went_well: wentWell(answersIn(session)), fix: null, checked: false },
         };
       }
       session.assessment = assessment;
@@ -689,6 +702,10 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
 }
 
 export const bridge: EllaBridge = isTauriRuntime() ? new TauriBridge() : createBrowserBridge();
+
+function answersIn(session: Session): string[] {
+  return session.messages.filter((message) => message.speaker === "learner").map((message) => message.content);
+}
 
 function openingFor(topicId: string, name: string): string {
   switch (topicId) {

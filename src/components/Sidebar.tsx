@@ -91,9 +91,9 @@ export function Sidebar({
 }
 
 /** A two-drop flame, drawn in CSS so it can take any card's colours. */
-export function FlameGlyph() {
+export function FlameGlyph({ className = "" }: { className?: string }) {
   return (
-    <span className="flame" aria-hidden="true">
+    <span className={`flame ${className}`.trim()} aria-hidden="true">
       <i />
       <i />
     </span>

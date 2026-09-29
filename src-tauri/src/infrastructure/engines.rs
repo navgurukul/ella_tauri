@@ -1265,6 +1265,54 @@ fn score_prompt(skills: &[Scorable]) -> String {
     )
 }
 
+/// Corrects the learner's answers for the recap's one fix. The model rewrites
+/// every answer with its mistakes fixed, and `notes::fix_from` compares the
+/// two, so the phrase the recap quotes is always the learner's own.
+///
+/// Measured against Ella's 3B model on nine sample talks. Asked for the one
+/// mistake and its correction, it "fixed" "600 is too much" into "600 is too
+/// high", and for a talk of "yes", "samosa" and "good. I like" corrected "yes"
+/// into "Did you eat anything today?". Asked to rewrite each answer changing
+/// as little as it can, it left the fluent and casual talks and a bargaining
+/// talk word for word as they were, and found "it have", "we plays", "is best
+/// player", "the teacher explain", "I go to market" and "where is bus stop".
+/// It misses some ("she is very good batsman"), which is the side to err on:
+/// a wrong fix is worse than none. The answer's length is pinned to the number
+/// of answers by the schema; without that it sometimes wrote each answer
+/// twice, as given and corrected.
+const CORRECTION_PROMPT: &str = "You correct the grammar of a learner's spoken English for a \
+     learning app in India.\n\n\
+     For each of the learner's answers, write it again with only its grammar mistakes \
+     fixed: wrong verb forms and tenses, missing or wrong small words like \"a\", \"the\", \
+     \"is\" and \"to\", and word order. Change as few words as you can. Keep every answer \
+     that is already correct exactly as it is, word for word. Do not change the meaning, \
+     the style or the choice of words, and do not add anything. Ignore punctuation and \
+     capital letters. Hindi words are fine.\n\n\
+     Reply with JSON: {\"lines\":[\"<answer 1, corrected>\",\"<answer 2, corrected>\", ...]}, \
+     one entry per answer, in order.";
+
+/// The answers as the corrector reads them: numbered, one per line.
+fn numbered(answers: &[&str]) -> String {
+    answers
+        .iter()
+        .enumerate()
+        .map(|(index, answer)| format!("{}. {}", index + 1, answer.split_whitespace().collect::<Vec<_>>().join(" ")))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The corrected answers out of the corrector's JSON, one per answer asked
+/// about; any other count means the answer was not read.
+fn read_corrections(value: &Value, expected: usize) -> Option<Vec<String>> {
+    let lines: Vec<String> = value
+        .get("lines")?
+        .as_array()?
+        .iter()
+        .map(|line| line.as_str().map(|line| line.trim().to_owned()))
+        .collect::<Option<_>>()?;
+    (lines.len() == expected).then_some(lines)
+}
+
 /// A session's messages as chat turns: Ella's are the model's own.
 fn chat_messages(messages: &[Message]) -> Vec<Value> {
     messages
@@ -1892,6 +1940,13 @@ pub trait TutorEngine: Send + Sync {
         Ok(None)
     }
 
+    /// The learner's `answers`, each with its grammar mistakes fixed and
+    /// otherwise word for word, for the recap's one fix. `None` without a
+    /// judge; an error when its answer could not be read.
+    fn correct(&self, _answers: &[&str]) -> EllaResult<Option<Vec<String>>> {
+        Ok(None)
+    }
+
     /// Generate one reply.
     ///
     /// Its sentences are synthesized while the rest is still being written, so
@@ -2269,7 +2324,7 @@ impl TutorEngine for LocalEngine {
         let mut request = vec![json!({"role": "system", "content": placement_system_prompt(learner_name, age)})];
         request.extend(chat_messages(messages));
         request.push(json!({"role": "system", "content": PLACEMENT_CHECK_NOTE}));
-        self.judge("check whether the placement has heard enough", request, 30, read_readiness)
+        self.judge("check whether the placement has heard enough", request, 30, None, read_readiness)
             .map(Some)
     }
 
@@ -2284,7 +2339,7 @@ impl TutorEngine for LocalEngine {
                 ),
             }),
         ];
-        self.judge("read a level off the placement", request, 80, read_placement)
+        self.judge("read a level off the placement", request, 80, None, read_placement)
             .map(Some)
     }
 
@@ -2306,8 +2361,37 @@ impl TutorEngine for LocalEngine {
             .map(|message| message.content.as_str())
             .collect();
         // A quote per claim makes the answer longer than a bare score did.
-        self.judge("score the talk", request, 320, |value| read_scores(value, skills, &learner))
+        self.judge("score the talk", request, 320, None, |value| read_scores(value, skills, &learner))
             .map(Some)
+    }
+
+    fn correct(&self, answers: &[&str]) -> EllaResult<Option<Vec<String>>> {
+        if answers.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let request = vec![
+            json!({"role": "system", "content": CORRECTION_PROMPT}),
+            json!({"role": "user", "content": format!("The learner's answers, in order:\n{}", numbered(answers))}),
+        ];
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "lines": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": answers.len(),
+                    "maxItems": answers.len(),
+                },
+            },
+            "required": ["lines"],
+        });
+        // The answer is the answers again, so its budget grows with them.
+        let words: usize = answers.iter().map(|answer| answer.split_whitespace().count()).sum();
+        let budget = (words * 2 + 12 * answers.len() + 24) as u32;
+        self.judge("correct the answers", request, budget, Some(schema), |value| {
+            read_corrections(value, answers.len())
+        })
+        .map(Some)
     }
 
     fn opening_in_chore(&self, context: &ChoreContext, learner_name: &str) -> EllaResult<String> {
@@ -2675,15 +2759,22 @@ impl LocalEngine {
     /// caller can ask again later rather than record a guess.
     ///
     /// Same slot as the conversation. The placement check shares the chat's
-    /// prefix, so it reuses the slot's cache; the other two run once a talk is
+    /// prefix, so it reuses the slot's cache; the others run once a talk is
     /// over, when the next session re-warms the slot anyway.
     fn judge<T>(
         &self,
         label: &str,
         messages: Vec<Value>,
         max_tokens: u32,
+        schema: Option<Value>,
         read: impl Fn(&Value) -> Option<T>,
     ) -> EllaResult<T> {
+        // A schema has llama.cpp hold the answer to that shape, not just to
+        // JSON of some kind.
+        let response_format = match schema {
+            Some(schema) => json!({"type": "json_object", "schema": schema}),
+            None => json!({"type": "json_object"}),
+        };
         let url = format!("{}/chat/completions", self.llm_base_url.trim_end_matches('/'));
         let mut failure = String::new();
         for attempt in 1..=2 {
@@ -2699,7 +2790,7 @@ impl LocalEngine {
                     "stream": false,
                     "cache_prompt": true,
                     "id_slot": self.llm_slot,
-                    "response_format": {"type": "json_object"},
+                    "response_format": response_format,
                 }))
                 .send()
                 .and_then(|response| response.error_for_status())

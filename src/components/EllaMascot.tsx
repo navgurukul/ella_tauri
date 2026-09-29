@@ -81,8 +81,13 @@ export function useEntrance(ref: RefObject<HTMLElement | null>, enabled = true) 
   }, [ref, enabled]);
 }
 
+/** `cheer` closes her eyes into happy arcs and opens her mouth in a grin, as
+ * the recap draws her. Only the conversation face has it. */
+export type EllaMood = "calm" | "cheer";
+
 interface EllaMascotProps {
   state?: EllaState;
+  mood?: EllaMood;
   variant?: EllaVariant;
   /** 1 renders the variant at its designed size. */
   scale?: number;
@@ -106,6 +111,7 @@ interface EllaMascotProps {
  */
 export function EllaMascot({
   state = "resting",
+  mood = "calm",
   variant = "corner",
   scale = 1,
   ears = "rest",
@@ -128,8 +134,9 @@ export function EllaMascot({
   useEffect(() => () => window.clearTimeout(pokeTimer.current), []);
 
   useEffect(() => {
-    // Thinking closes her eyes into lines, so there is nothing to follow.
-    if (prefersReducedMotion() || state === "thinking") return;
+    // Thinking closes her eyes into lines, and cheering into arcs, so there
+    // is nothing to follow.
+    if (prefersReducedMotion() || state === "thinking" || mood === "cheer") return;
 
     const eyes = [leftEye, rightEye];
     let pointerX: number | null = null;
@@ -200,7 +207,7 @@ export function EllaMascot({
       window.clearTimeout(grinTimer);
       window.clearTimeout(grinResetTimer);
     };
-  }, [state, variant]);
+  }, [state, variant, mood]);
 
   function poke(event: MouseEvent<HTMLDivElement>) {
     // A click on a control sitting on her, like the first talk's mic, is not a poke.
@@ -229,6 +236,7 @@ export function EllaMascot({
     `ella--${variant}`,
     `ella--${state}`,
     ears !== "rest" ? `ella--ears-${ears}` : "",
+    mood === "cheer" ? "ella--cheer" : "",
     pokeable ? "is-pokeable" : "",
     className,
   ]
@@ -274,6 +282,15 @@ export function EllaMascot({
             <span className="ella__eye-line ella__eye-line--right" />
             <span ref={mouth} className="ella__mouth ella__mouth--smile" />
             <span className="ella__mouth ella__mouth--open" />
+            {mood === "cheer" && (
+              <>
+                <span className="ella__happy-eye ella__happy-eye--left" />
+                <span className="ella__happy-eye ella__happy-eye--right" />
+                <span className="ella__grin">
+                  <i />
+                </span>
+              </>
+            )}
           </div>
           {children && <div className="ella__slot">{children}</div>}
         </div>
