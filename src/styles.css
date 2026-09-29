@@ -714,7 +714,8 @@ button { font-family: inherit; }
 .ella--stage-talk { bottom: -130px; }
 .ella--corner-ob,
 .ella--corner-boot { right: -130px; bottom: -150px; }
-.ella--corner-ob.is-peeking .ella__inner {
+.ella--corner-ob.is-peeking .ella__inner,
+.ella--corner-boot.is-peeking .ella__inner {
   transform-origin: 50% 50%;
   animation: peekUp 0.5s cubic-bezier(0.22, 1.1, 0.36, 1) forwards;
 }
@@ -1925,6 +1926,189 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 .boot p { margin: 0; font-size: 15px; font-weight: 500; color: var(--ink-62); }
 .boot .spin { margin-top: 12px; color: var(--violet); }
 
+/* ------------------------------------------------------------ setup gate -- */
+
+/* The boot screen, held up until Ella can talk. The column hangs from a fixed
+   point rather than centring, so a card, a button or opened details below it
+   never shift what is already on screen when the state changes. */
+.gate {
+  justify-content: flex-start;
+  gap: 0;
+  padding: max(48px, calc(50vh - 270px)) 44px 40px;
+}
+.gate__column {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: min(560px, 100%);
+}
+.gate__copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  animation: fadeUp 0.22s ease-out;
+}
+/* `.boot p` would otherwise restyle every paragraph the gate borrows. */
+.boot .gate__eyebrow { font-size: 11px; font-weight: 700; color: var(--violet-deep); }
+.gate__eyebrow.is-empty { visibility: hidden; }
+.gate__title {
+  font-size: 44px;
+  line-height: 1.05;
+  color: var(--ink);
+  text-wrap: balance;
+}
+.boot .gate__body {
+  max-width: 480px;
+  min-height: 2.9em;
+  font-size: 16.5px;
+  line-height: 1.45;
+  color: var(--ink-70);
+  text-wrap: pretty;
+}
+.boot .gate__spinner { margin-top: 18px; }
+
+.gate-card {
+  width: 100%;
+  margin-top: 26px;
+  padding: 22px 26px 20px;
+  border: 1.5px solid var(--ink-10);
+  border-radius: var(--r-card);
+  background: var(--white);
+  box-shadow: 0 10px 30px rgba(38, 38, 38, 0.08);
+  text-align: left;
+}
+.gate-card__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 40px;
+}
+.gate-card__percent {
+  font-family: var(--display);
+  font-size: 40px;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--violet);
+  font-variant-numeric: tabular-nums;
+}
+.gate-card__percent--paused { color: var(--ink-45); }
+.gate-card__percent--done { color: var(--green-deep); }
+.gate-card__status {
+  font-family: var(--display);
+  font-size: 26px;
+  font-weight: 800;
+  line-height: 40px;
+  color: var(--ink);
+}
+.gate-card__amount {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink-70);
+  font-variant-numeric: tabular-nums;
+}
+.boot .gate-card__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+  margin-top: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink-70);
+}
+.gate-card__meta svg { flex: none; color: var(--violet); }
+.boot .gate-card__meta--waiting { color: var(--ink); }
+.gate-card__meta--waiting svg { color: var(--orange); }
+.gate-card__meta--done svg { color: var(--green-deep); }
+
+.gate-bar {
+  position: relative;
+  height: 12px;
+  margin-top: 14px;
+  border-radius: var(--r-pill);
+  background: var(--lilac);
+  overflow: hidden;
+}
+.gate-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--violet);
+  transition: width 0.4s ease-out, background-color 0.3s ease;
+}
+.gate-bar--waiting > span { background: var(--orange); }
+.gate-bar--paused { background: var(--ink-07); }
+.gate-bar--paused > span { background: var(--ink-40); }
+.gate-bar--done > span { background: var(--green); }
+/* No numbers to show while the model loads, so a segment drifts across. */
+.gate-bar--sweep > span {
+  width: 36%;
+  animation: gateSweep 1.8s ease-in-out infinite;
+}
+@keyframes gateSweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(280%); }
+}
+
+.boot .gate__hint {
+  max-width: 460px;
+  margin-top: 18px;
+  font-size: 14px;
+  line-height: 1.45;
+  /* The state's one instruction: AA contrast on the canvas, not a whisper. */
+  color: var(--ink-70);
+}
+.gate__retry { min-width: 240px; margin-top: 24px; }
+.boot .gate__retry .spin { margin-top: 0; color: inherit; }
+.gate__retry[aria-disabled="true"] { opacity: 0.7; cursor: progress; }
+.gate__retry[aria-disabled="true"]:hover { background: var(--violet); }
+
+.gate__details {
+  width: 100%;
+  margin-top: 16px;
+  font-size: 13.5px;
+  color: var(--ink-70);
+}
+.gate__details summary {
+  cursor: pointer;
+  font-weight: 700;
+  list-style-position: inside;
+}
+.gate__details summary:hover { color: var(--ink); }
+.gate__details pre {
+  max-height: 104px;
+  margin: 10px 0 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border-radius: 12px;
+  background: var(--ink-07);
+  color: var(--ink-70);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* The corner Ella's bubble, over the corner she peeks up from: above her
+   ears, and clear of the card at the narrowest window. */
+.boot .gate__bubble {
+  right: 40px;
+  bottom: 300px;
+  font-size: 23px;
+  font-weight: 700;
+  color: var(--violet);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gate-bar--sweep > span { width: 100%; opacity: 0.4; animation: none; transform: none; }
+}
+
 .veil {
   position: fixed;
   inset: 0;
@@ -2019,25 +2203,8 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
    First-run setup and self-update
    ------------------------------------------------------------------------ */
 
-/* Sits along the bottom of whatever screen the learner is on, because the
-   download runs behind the app rather than in front of it. */
-.setup-strip {
-  position: fixed;
-  left: 50%;
-  bottom: 18px;
-  z-index: 40;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: min(560px, calc(100vw - 48px));
-  padding: 12px 16px;
-  transform: translateX(-50%);
-  border: 1px solid var(--ink-10);
-  border-radius: 18px;
-  background: var(--white);
-  box-shadow: 0 10px 30px rgba(38, 38, 38, 0.12);
-}
-.setup-strip .spin { flex: none; color: var(--violet); }
+/* The update toast's text and bar. They kept the name of the first-run strip
+   they were first drawn for, which the setup screen has since replaced. */
 .setup-strip__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .setup-strip__text strong { font-size: 14px; font-weight: 700; color: var(--ink); }
 .setup-strip__text span {
@@ -2050,8 +2217,6 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.setup-strip--failed { border-color: rgba(255, 49, 129, 0.35); }
-.setup-strip--failed .setup-strip__text span { white-space: normal; }
 
 .setup-strip__bar {
   flex: none;
@@ -2069,8 +2234,7 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   background: var(--violet);
   transition: width 240ms ease-out;
 }
-/* A new version downloading behind the app. Same card as the setup strip, but
-   in the corner: it matters less than first-run setup, and it must not sit on
+/* A new version downloading behind the app, in the corner: it must not sit on
    the talk controls along the bottom. */
 .update-toast {
   position: fixed;
@@ -2088,8 +2252,6 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   box-shadow: 0 10px 30px rgba(38, 38, 38, 0.12);
   animation: update-toast-in 240ms ease-out;
 }
-/* Clears the setup strip when a fresh install is also fetching its models. */
-.update-toast--raised { bottom: 96px; }
 .update-toast__icon { flex: none; color: var(--violet); }
 .update-toast .setup-strip__bar { width: 64px; }
 .update-toast__restart {

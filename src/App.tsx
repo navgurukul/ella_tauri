@@ -1,17 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { CircleCheck, LoaderCircle, X } from "lucide-react";
 import { CastScreen } from "./components/CastScreen";
-import { EllaGlyph, EllaMascot } from "./components/EllaMascot";
 import { HomeScreen } from "./components/HomeScreen";
 import { MicRecheck, OnboardingFlow } from "./components/OnboardingFlow";
 import { ProfileScreen } from "./components/ProfileScreen";
+import { SetupScreen } from "./components/SetupScreen";
 import { Sidebar, type NavKey } from "./components/Sidebar";
 import { SummaryScreen } from "./components/SummaryScreen";
 import { TalkScreen } from "./components/TalkScreen";
 import { avatarColorFor, forgetLegacyAvatarColor, legacyAvatarColor } from "./lib/avatar";
 import { bridge } from "./lib/bridge";
 import { recommendedTopicId, streak } from "./lib/presentation";
-import { formatBytes, useSetupState, type SetupState } from "./lib/setup";
+import { useSetup } from "./lib/setup";
 import {
   downloadUpdateInBackground,
   installExitsTheApp,
@@ -41,7 +41,11 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [update, setUpdate] = useState<UpdateProgress | null>(null);
   const [applyUpdate, setApplyUpdate] = useState<ApplyUpdate | null>(null);
-  const setup = useSetupState();
+  const setup = useSetup();
+  // Set once the setup screen lets the learner in, and never unset: the gate
+  // is for the start of a launch, and must never close again over a talk.
+  const [opened, setOpened] = useState(false);
+  const gated = !opened;
   // Bumped by every change this window makes to the learner (a save, an
   // avatar colour, a log in or out), so a background re-read that started
   // before one cannot put the older state back on screen.
@@ -58,11 +62,13 @@ export default function App() {
     });
   }, []);
 
+  // No Restart while the gate is up: a restart in the middle of the model
+  // load is the one moment it costs the learner the most, and closing Ella
+  // installs the update just the same.
   const updateToast = (
     <UpdateToast
       progress={update}
-      raised={setup !== null && setup.stage !== "ready"}
-      onRestart={applyUpdate ? () => void applyUpdate() : undefined}
+      onRestart={applyUpdate && !gated ? () => void applyUpdate() : undefined}
       onDismiss={() => setUpdate(null)}
     />
   );
@@ -308,7 +314,28 @@ export default function App() {
     setSnapshot(fresh);
   }
 
-  if (!snapshot) return <BootScreen error={error} />;
+  // Nobody gets in until Ella can talk: a name typed or a talk started before
+  // then would only meet "Ella is still downloading". The screen stands in
+  // front of everything, onboarding and home alike, from the first frame
+  // until setup says ready — one element throughout, so nothing behind it
+  // ever flashes and its Ella only arrives once.
+  if (gated || !snapshot) {
+    const saved = snapshot?.learner ?? snapshot?.saved_learner ?? null;
+    return (
+      <>
+        <SetupScreen
+          setup={setup.state}
+          booted={snapshot !== null}
+          bootError={snapshot ? null : error}
+          learnerName={saved?.name ?? null}
+          retrying={setup.retrying}
+          onRetry={setup.retry}
+          onOpen={() => setOpened(true)}
+        />
+        {updateToast}
+      </>
+    );
+  }
 
   const avatarColor = avatarColorFor(snapshot.learner);
 
@@ -316,7 +343,6 @@ export default function App() {
     return (
       <>
         <MicRecheck onExit={() => setScreen("profile")} />
-        <SetupBanner setup={setup} />
         {updateToast}
       </>
     );
@@ -334,7 +360,6 @@ export default function App() {
           onPlacement={handlePlacement}
           onDone={() => setScreen("home")}
         />
-        <SetupBanner setup={setup} />
         {updateToast}
         {busy && <BusyVeil />}
       </>
@@ -394,7 +419,6 @@ export default function App() {
           <SummaryScreen summary={summary} onHome={() => setScreen("home")} />
         )}
       </main>
-      <SetupBanner setup={setup} />
       {updateToast}
       {busy && <BusyVeil />}
       {error && <Toast message={error} onClose={() => setError(null)} />}
@@ -426,75 +450,15 @@ function listItemFor(result: SessionSummary, topicId: string, startedAt?: string
   };
 }
 
-function BootScreen({ error }: { error: string | null }) {
-  return (
-    <div className="boot">
-      <div className="wordmark wordmark--lg">
-        <EllaGlyph size={48} />
-        <span>Ella</span>
-      </div>
-      <h1 className="display display--md">{error ? "Ella could not start" : "Waking Ella up…"}</h1>
-      <p>{error ?? "Getting your local learning space ready."}</p>
-      {!error && <LoaderCircle className="spin" aria-label="Loading" />}
-      {!error && <EllaMascot variant="corner" className="ella--corner-boot" />}
-    </div>
-  );
-}
-
-/**
- * The first launch after an install has gigabytes to fetch before Ella can
- * speak. It runs behind the app rather than in front of it: a learner can put
- * in their name and check their microphone while it downloads, and only the
- * talking itself has to wait. Anything that needs the engine early says so in
- * its own words, because the backend returns that sentence with the failure.
- */
-function SetupBanner({ setup }: { setup: SetupState | null }) {
-  if (!setup || setup.stage === "ready") return null;
-
-  const downloading = setup.stage === "downloading" && setup.total_bytes > 0;
-  const percent = downloading
-    ? Math.min(100, Math.round((setup.downloaded_bytes / setup.total_bytes) * 100))
-    : null;
-
-  return (
-    <div className={`setup-strip ${setup.stage === "failed" ? "setup-strip--failed" : ""}`.trim()} aria-live="polite">
-      {setup.stage !== "failed" && <LoaderCircle className="spin" aria-hidden="true" />}
-      <div className="setup-strip__text">
-        <strong>
-          {setup.stage === "failed" ? "Ella could not finish setting up" : "Getting Ella ready"}
-        </strong>
-        <span>
-          {setup.stage === "failed"
-            ? setup.message
-            : downloading
-              ? `${setup.message} — ${formatBytes(setup.downloaded_bytes)} of ${formatBytes(setup.total_bytes)}${
-                  (setup.attempt ?? 1) > 1 ? " — connection dropped, retrying" : ""
-                }`
-              : setup.message}
-        </span>
-      </div>
-      {percent !== null && (
-        <div className="setup-strip__bar" role="progressbar" aria-valuenow={percent}>
-          <span style={{ width: `${percent}%` }} />
-        </div>
-      )}
-    </div>
-  );
-}
-
 /**
  * A new version downloading behind the app, in the corner and out of the way.
- * It wears the first-run strip's styling so both read as the same kind of
- * background work, and it sits above that strip whenever both are showing.
  */
 function UpdateToast({
   progress,
-  raised,
   onRestart,
   onDismiss,
 }: {
   progress: UpdateProgress | null;
-  raised: boolean;
   onRestart?: () => void;
   onDismiss: () => void;
 }) {
@@ -514,7 +478,7 @@ function UpdateToast({
       : `Version ${progress.version}`;
 
   return (
-    <div className={`update-toast ${raised ? "update-toast--raised" : ""}`.trim()} aria-live="polite">
+    <div className="update-toast" aria-live="polite">
       {ready ? (
         <CircleCheck className="update-toast__icon" size={20} aria-hidden="true" />
       ) : (

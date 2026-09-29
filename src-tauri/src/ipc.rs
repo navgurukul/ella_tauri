@@ -6,9 +6,12 @@ use crate::{
     application::AppService,
     domain::{AppSnapshot, Learner, Session, SessionSummary, SpokenLine, TurnResult},
     error::EllaResult,
+    setup::{Setup, SetupProgress},
 };
 
 pub struct AppState(pub Arc<AppService>);
+
+pub struct SetupState(pub Arc<Setup>);
 
 // Every command hops to a blocking thread: Tauri runs command bodies on the
 // main thread, and the STT/LLM/TTS pipeline (and even the 2s engine health
@@ -29,6 +32,22 @@ where
 pub async fn bootstrap(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
     let service = state.0.clone();
     off_main_thread(move || service.bootstrap()).await
+}
+
+/// Where setup has got to, for a window that opened, or reloaded, after the
+/// event that said so. Only a lock and a clone, so it stays on the main thread.
+#[tauri::command]
+pub fn setup_state(setup: State<'_, SetupState>) -> SetupProgress {
+    setup.0.latest()
+}
+
+/// "Try again" on the setup screen. The run starts on its own thread and
+/// reports through the setup event; this answers at once with where things
+/// stand, which a second press while it runs leaves unchanged.
+#[tauri::command]
+pub fn retry_setup(setup: State<'_, SetupState>) -> SetupProgress {
+    setup.0.retry();
+    setup.0.latest()
 }
 
 #[tauri::command]

@@ -1640,6 +1640,9 @@ pub struct LocalEngine {
     /// installed build owns it; a development run leaves it `None` because a
     /// terminal already has one running.
     _llama: Option<LlamaServer>,
+    /// Why the server this build should have started did not, in its own
+    /// words, for the setup screen's "Try again" to show beside the button.
+    llama_error: Option<String>,
 }
 
 impl LocalEngine {
@@ -1695,8 +1698,8 @@ impl LocalEngine {
         // An explicit URL means someone is running their own server — the
         // development scripts, the benchmarks — and Ella must not start a
         // second one against the same model.
-        let (llama, llm_base_url) = match env::var("ELLA_LLM_BASE_URL") {
-            Ok(configured) => (None, configured),
+        let (llama, llm_base_url, llama_error) = match env::var("ELLA_LLM_BASE_URL") {
+            Ok(configured) => (None, configured, None),
             Err(_) => match LlamaServer::start(
                 &engine_root,
                 &models_root,
@@ -1704,14 +1707,14 @@ impl LocalEngine {
             ) {
                 Ok(server) => {
                     let url = server.base_url().to_string();
-                    (Some(server), url)
+                    (Some(server), url, None)
                 }
                 Err(reason) => {
                     // Not fatal: the window still opens and `status()` reports
                     // the language model as unavailable, which is far more use
                     // to a remote tester than a process that refuses to start.
                     eprintln!("[engines] llama-server did not start: {reason}");
-                    (None, "http://127.0.0.1:39091/v1".to_string())
+                    (None, "http://127.0.0.1:39091/v1".to_string(), Some(reason.to_string()))
                 }
             },
         };
@@ -1728,6 +1731,7 @@ impl LocalEngine {
             piper_voice,
             piper_daemon,
             _llama: llama,
+            llama_error,
         }
     }
 
@@ -1760,6 +1764,8 @@ impl TutorEngine for LocalEngine {
                 ready: llm_ready,
                 detail: if llm_ready {
                     format!("Streaming response telemetry at {}", self.llm_base_url)
+                } else if let Some(reason) = &self.llama_error {
+                    reason.clone()
                 } else {
                     format!(
                         "Not reachable at {}. Start it with `npm run engines:local`.",

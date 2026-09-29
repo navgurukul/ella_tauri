@@ -10,6 +10,10 @@ pub enum EllaError {
     Conflict(String),
     #[error("Local engine error: {0}")]
     Engine(String),
+    /// A server answered, but not with the file: the status decides whether
+    /// waiting and trying again can help.
+    #[error("{message}")]
+    HttpStatus { status: u16, message: String },
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
     #[error("File or process error: {0}")]
