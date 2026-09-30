@@ -276,6 +276,9 @@ export interface SpeechSegment {
   /** Every token of `audio`, in order. Empty or missing when the voice cannot
    * time them, and then her mouth only opens while she talks. */
   phonemes?: PhonemeSpan[];
+  /** The whole reply, on a reply's first sentence only: its text is settled
+   * before any of it is sent, so it can be shown whole as she starts. */
+  reply?: string | null;
 }
 
 /** The result of speaking a line the app already had — Ella's opening. Carries
@@ -328,6 +331,8 @@ export interface TurnTimings {
   llm_completion_ms?: number | null;
   tts_first_audio_ms?: number | null;
   tts_completion_ms?: number | null;
+  /** When Ella started to speak, from the start of the turn. */
+  speech_ms?: number | null;
   total_ms: number;
 }
 

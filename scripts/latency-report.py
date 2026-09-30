@@ -57,7 +57,7 @@ def main() -> int:
     header = (
         f"{'day':10} {'turns':>5} {'errors':>6} {'fallback':>8} "
         f"{'stt p50/p95':>12} {'ttft p50/p95':>13} {'llm p50/p95':>12} "
-        f"{'tts p50/p95':>12} {'total p50/p95':>14}"
+        f"{'tts p50/p95':>12} {'speaks p50/p95':>15} {'total p50/p95':>14}"
     )
     print(header)
     print("-" * len(header))
@@ -75,6 +75,9 @@ def main() -> int:
         ttft = [e["llm_ttft_ms"] for e in ok if e.get("llm_ttft_ms") is not None]
         llm = [e["llm_completion_ms"] for e in ok if e.get("llm_completion_ms") is not None]
         tts = [e["tts_first_audio_ms"] for e in ok if e.get("tts_first_audio_ms") is not None]
+        # When Ella started to speak. Logs from before it was kept have only
+        # the total, which is when a reply played whole starts anyway.
+        speaks = [e.get("speech_ms", e.get("total_ms")) for e in ok if e.get("speech_ms", e.get("total_ms")) is not None]
         total = [e["total_ms"] for e in ok if e.get("total_ms") is not None]
         rate = f"{len(fallbacks)}/{len(ok)}" if ok else "-"
         print(
@@ -83,6 +86,7 @@ def main() -> int:
             f"{fmt(pct(ttft, 50)):>6}/{fmt(pct(ttft, 95)):>6} "
             f"{fmt(pct(llm, 50)):>5}/{fmt(pct(llm, 95)):>6} "
             f"{fmt(pct(tts, 50)):>5}/{fmt(pct(tts, 95)):>6} "
+            f"{fmt(pct(speaks, 50)):>7}/{fmt(pct(speaks, 95)):>7} "
             f"{fmt(pct(total, 50)):>6}/{fmt(pct(total, 95)):>7}"
         )
 

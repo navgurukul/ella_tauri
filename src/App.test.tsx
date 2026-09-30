@@ -192,13 +192,36 @@ describe("Ella learner flow", () => {
   });
 
   /**
-   * The reply is released whole: its sentences are synthesized while the model
-   * writes but held back until all of them are ready. Nothing of it may reach
-   * the screen before then — a reply that arrives in pieces cannot be centred
-   * without the words already being read jumping as each piece lands.
+   * The reply is heard as soon as it is written and saved: its first sentence
+   * carries the whole text, which is shown the moment Ella starts saying it,
+   * before the turn itself returns. It never arrives in pieces — a reply that
+   * grows cannot be centred without the words already being read jumping as
+   * each piece lands — and when the turn does return, nothing is said twice.
    */
-  it("shows the whole reply at once when the turn returns, and nothing before", async () => {
-    // The opening streams, so the subscription exists; a reply must not use it.
+  it("shows the whole reply as Ella starts saying it, never in pieces, and says it once", async () => {
+    const started: number[] = [];
+    class FakeAudioContext {
+      state = "running";
+      currentTime = 0;
+      destination = {};
+      async resume() {}
+      async close() {}
+      async decodeAudioData(buffer: ArrayBuffer) {
+        return { duration: buffer.byteLength } as AudioBuffer;
+      }
+      createBufferSource() {
+        return {
+          buffer: null,
+          onended: null as (() => void) | null,
+          connect() {},
+          stop() {},
+          start(at: number) {
+            started.push(at);
+          },
+        };
+      }
+    }
+    Object.defineProperty(window, "AudioContext", { configurable: true, value: FakeAudioContext });
     let emit: ((segment: SpeechSegment) => void) | undefined;
     (bridge as EllaBridge).onSpeechSegment = async (handler) => {
       emit = handler;
@@ -211,16 +234,20 @@ describe("Ella learner flow", () => {
     await screen.findByText("End talk");
 
     // Hold the turn open so "before it returns" is a real claim.
-    let release: ((result: TurnResult) => void) | undefined;
+    const audio = { mime_type: "audio/wav", base64: "AAAA" };
+    let release: (() => void) | undefined;
     let turnSession = "";
+    let reply = "";
     const real = bridge.sendTextTurn.bind(bridge);
     const held = vi
       .spyOn(bridge, "sendTextTurn")
       .mockImplementation(async (sessionId: string, text: string) => {
         turnSession = sessionId;
         const result = await real(sessionId, text);
+        reply = result.ella_message.content;
         return new Promise<TurnResult>((resolve) => {
-          release = () => resolve(result);
+          // With the recording the replay button keeps, which must not play now.
+          release = () => resolve({ ...result, audio, streamed_segments: 2 });
         });
       });
 
@@ -231,35 +258,80 @@ describe("Ella learner flow", () => {
         target: { value: "I ate vada pav near the station" },
       });
       fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
-      await waitFor(() => expect(held.mock.calls).toHaveLength(1));
+      await waitFor(() => expect(reply).not.toBe(""));
 
-      // A stray segment mid-turn must not put anything on screen: no queue is
-      // open for a reply, so there is nothing for it to feed.
+      // Another line's sentence feeds nothing and shows nothing.
+      emit?.({
+        session_id: turnSession,
+        turn: 0,
+        index: 0,
+        text: "Hello.",
+        audio,
+        ready_ms: 100,
+        words: [],
+        reply: "Not this reply.",
+      });
+      expect(promptText()).toBe(opening);
+
+      // This reply's first sentence brings all of it, at once.
       emit?.({
         session_id: turnSession,
         turn: 1,
         index: 0,
         text: "That sounds delicious!",
-        audio: { mime_type: "audio/wav", base64: "AAAA" },
+        audio,
         ready_ms: 900,
         words: [{ text: "That", start_ms: 0, end_ms: 300 }],
+        reply,
       });
-      expect(promptText()).toBe(opening);
-
-      release?.({} as TurnResult);
-      await waitFor(() => expect(promptText()).toMatch(/that sounds delicious/i));
-
-      // Whole reply, in one piece, with every word its own element so one of
-      // them can be marked as spoken.
-      const shown = promptText();
-      expect(shown).toMatch(/who would you like to share that with/i);
+      await waitFor(() => expect(promptText()).toBe(reply));
       expect(document.querySelectorAll(".talk-prompt .talk-word")).toHaveLength(
-        shown.split(/\s+/).filter(Boolean).length,
+        reply.split(/\s+/).filter(Boolean).length,
       );
-      // Real spaces, not CSS-generated ones, so the reply stays copyable.
-      expect(shown).toContain("That sounds delicious!");
+      emit?.({ session_id: turnSession, turn: 1, index: 1, text: "Who else?", audio, ready_ms: 950, words: [] });
+      await waitFor(() => expect(started).toHaveLength(2));
+
+      await act(async () => {
+        release?.();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      // The same words, still whole, and the recording kept for the replay
+      // button is not played on top of what she is already saying.
+      expect(promptText()).toBe(reply);
+      expect(started).toHaveLength(2);
     } finally {
       held.mockRestore();
+      delete (bridge as EllaBridge).onSpeechSegment;
+      Reflect.deleteProperty(window, "AudioContext");
+    }
+  });
+
+  /**
+   * Without any sentence of it having arrived, the turn's own recording is
+   * played when the turn returns, and its text shown then, whole.
+   */
+  it("shows and plays the whole reply when the turn returns if nothing streamed", async () => {
+    let emit: ((segment: SpeechSegment) => void) | undefined;
+    (bridge as EllaBridge).onSpeechSegment = async (handler) => {
+      emit = handler;
+      return () => {
+        emit = undefined;
+      };
+    };
+    await onboard("Aarav");
+    fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
+    await screen.findByText("End talk");
+    try {
+      const opening = promptText();
+      fireEvent.click(screen.getByRole("button", { name: /type instead/i }));
+      fireEvent.change(screen.getByLabelText("Your answer"), {
+        target: { value: "I ate vada pav near the station" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
+      await waitFor(() => expect(promptText()).not.toBe(opening));
+      expect(promptText()).toMatch(/who would you like to share that with/i);
+      expect(emit).toBeDefined();
+    } finally {
       delete (bridge as EllaBridge).onSpeechSegment;
     }
   });

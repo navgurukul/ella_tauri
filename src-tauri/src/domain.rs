@@ -421,6 +421,11 @@ pub struct TurnTimings {
     pub llm_completion_ms: Option<u64>,
     pub tts_first_audio_ms: Option<u64>,
     pub tts_completion_ms: Option<u64>,
+    /// When Ella started to speak, from the start of the turn: her first
+    /// sentence handed to the window. For a reply the window plays whole, the
+    /// turn's total. `None` for a turn that failed, or a log from before it.
+    #[serde(default)]
+    pub speech_ms: Option<u64>,
     pub total_ms: u64,
 }
 
@@ -463,6 +468,11 @@ pub struct SpeechStreamEvent {
     /// them, and then her mouth only opens while she talks.
     #[serde(default)]
     pub phonemes: Vec<PhonemeSpan>,
+    /// The whole reply, on a reply's first sentence only. Its text is settled
+    /// before any of it is sent, so the window shows all of it the moment
+    /// Ella starts saying it rather than wait for the turn to return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
 }
 
 /// The result of speaking a line the app already had — Ella's opening. Carries
@@ -517,6 +527,12 @@ pub struct TurnResult {
     /// the voice cannot time them.
     #[serde(default)]
     pub speech_phonemes: Vec<PhonemeSpan>,
+    /// How many `SpeechStreamEvent`s this turn sent. Above zero, the reply
+    /// has been playing since before this result arrived, and `audio` is the
+    /// same recording kept for the replay button: playing it again would say
+    /// the turn twice.
+    #[serde(default)]
+    pub streamed_segments: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

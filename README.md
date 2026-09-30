@@ -170,6 +170,9 @@ number on the ladder, 1 to 6.
   Ella's words at the learner's level instead of the old fixed A1, and a talk
   keeps the level it began at, so its instructions stay in llama.cpp's cached
   prefix even when another talk's assessment moves the learner on meanwhile.
+  The aim is the last thing in a free talk's instructions, so everything before
+  it is the same for every talk on the topic at that level and can be kept on
+  disk between talks: see [Latency on laptops](#latency-on-laptops).
 - **Ending a talk scores it** (`assess_session`) on the skills of the step and
   the next. A demonstration the judge is at least 0.70 sure of raises that
   skill's mastery; a skill is owned at 0.75, shown in two talks on two topics.
@@ -309,19 +312,27 @@ application or UI contracts.
 Piper runs a sentence behind the language model rather than after it. Whole
 sentences leave the token stream as they complete and are synthesized on a
 worker thread, so Piper's time overlaps the model's instead of following it —
-about 300 ms off a turn. They are held back until the whole reply is ready:
-released sentence by sentence, Ella started talking sooner still, but the text
-then arrived in pieces, and a reply that gains words cannot be centred without
-the words being read jumping as each piece lands. Ella's opening is the
-exception and does stream, because its text is on screen from the moment the
-conversation opens, so there is nothing to stage — `speak_opening` is a separate
-command from `start_session` so the screen appears before Piper is asked for
-anything.
+about 300 ms off a turn. None of it is heard until the whole reply is written
+and the turn saved: released sentence by sentence as the model wrote them, Ella
+started talking sooner still, but the text then arrived in pieces, and a reply
+that gains words cannot be centred without the words being read jumping as
+each piece lands. Once the turn is saved, though, the sentences already
+synthesized go to the window at once and the rest follow as Piper finishes
+them, rather than all of them waiting for the last one. The first carries the
+whole reply's text (`SpeechStreamEvent.reply`), so the window shows all of it,
+centred, the moment she starts, and the turn that arrives a moment later puts
+the same words in the conversation (`TurnResult.streamed_segments` says it is
+already playing). Ella's opening streams from the start, because its text is on
+screen from the moment the conversation opens, so there is nothing to stage —
+`speak_opening` is a separate command from `start_session` so the screen
+appears before Piper is asked for anything.
 
 A turn that could be thrown away is safe either way: a ledger chore may
 regenerate its reply when the character breaks its own limit, and the audio is
-only reused when it says exactly what the reply says. Nothing the learner hears
-is ever retracted.
+only reused when it says exactly what the reply says. A reply said differently
+from what Piper read is said afresh, sentence by sentence in the same way, and
+Piper stops reading the one that was dropped. Nothing the learner hears is ever
+retracted.
 
 The reply carries word timings, so the word being spoken is highlighted and the
 words ahead of it are dimmed. `infrastructure/speech_timing.rs` estimates them
@@ -330,7 +341,7 @@ duration and to the leading and trailing silence measured off the PCM. Fitted
 and measured against real Piper phoneme alignments: onset error mean ~70 ms, p90
 ~160 ms, roughly three quarters of words inside 100 ms. The words stay an
 estimate even though Piper's own sound timings now reach the window (below):
-the one-shot binary reports none, and espeak merges words ("in the" becomes one
+the standalone binary reports none, and espeak merges words ("in the" becomes one
 phoneme group) in about 8% of sentences, which leaves no safe positional mapping
 back to the text.
 
@@ -369,9 +380,10 @@ predictor is random, so timings from a second pass would not line up.
   path, so speech grows out of it in 60 ms and hands back to it over the face's
   160 ms fade. It fills the stylesheet smile's box (29.4 by 13.5 px against its
   30 by 13) with Ella Mobile's curve and round line ends.
-- **Where it cannot follow.** The Windows build's `piper.exe` and the system
-  voice report no timings, so there her mouth opens into the design's static
-  "o" while she talks, as it always did.
+- **Where it cannot follow.** The Windows build's `piper.exe`, which stays
+  running like the daemon but times nothing, and the system voice report no
+  timings, so there her mouth opens into the design's static "o" while she
+  talks, as it always did.
 
 Running a live check needs piper-tts and a voice:
 
@@ -386,6 +398,12 @@ Environment overrides:
 - `ELLA_LLM_BASE_URL`
 - `ELLA_STT_ENGINE` (`canary` or `windows`; defaults to `canary` everywhere, with Windows Speech Recognition as the fallback on Windows; `windows` makes it the primary with Canary as the fallback)
 - `ELLA_PIPER_BINARY` and `ELLA_PIPER_VOICE`
+- `ELLA_PIPER_DAEMON=0`, which starts Piper afresh for every line, as Windows
+  did before it stayed resident
+- `ELLA_LLAMA_THREADS`, llama.cpp's threads when Ella starts the server; one
+  per physical performance core by default
+- `ELLA_LLM_SLOT_DIR`, where a llama-server someone else started with
+  `--slot-save-path` keeps its saved slots, so Ella can use them too
 - `ELLA_CANARY_MODEL`, `ELLA_STT_THREADS`, `ELLA_CANARY_VERIFY_SHA256`
 
 ## Timing telemetry
@@ -393,8 +411,77 @@ Environment overrides:
 Every native turn writes one JSON line with `event: "ella_turn_latency"` and a
 correlation ID. Voice lines contain audio input/after-VAD duration, VAD, STT,
 Canary mel/encode/decode, STT engine/backend/fallback, LLM TTFT/completion, Piper
-first-audio/completion, total latency, and success/error status. The WebView also
-logs `ella_voice_playback_ready` after audio reaches the browser playback path.
+first-audio/completion, when Ella started speaking (`speech_ms`: her first
+sentence handed to the window, or the total for a reply the window plays whole),
+total latency, and success/error status. The WebView also logs
+`ella_voice_playback_ready` after audio reaches the browser playback path.
+
+The lines are kept in `telemetry/latency.jsonl` in the app's data folder, on
+every laptop. `npm run telemetry:report -- <path>` prints each day's medians and
+95th percentiles, including when Ella started speaking ("speaks"); a log from
+before `speech_ms` counts its total there. A talk's first turn is the one that
+waits for the talk's instructions to be evaluated, and shows it in its
+`llm_ttft_ms`.
+
+## Latency on laptops
+
+Most of the laptops Ella runs on have no GPU llama.cpp can use, so the model
+runs on the CPU and a turn is mostly the model. Measured on an M1 Pro held to
+four CPU threads — a classroom laptop is slower — a free talk's turn evaluates
+20-95 new prompt tokens and writes 12-26, and a chore's evaluates 62-152. The
+talk's instructions, which every turn of it shares, are 1,068-1,196 tokens,
+evaluated once when the talk opens, and its first reply waits for them.
+
+- **Piper stays running on every platform.** The macOS bundle's Python runs
+  `piper_daemon.py`. The Windows bundle's standalone `piper.exe` is started once
+  with `--json-input`, keeps the voice loaded, and answers each JSON line by
+  writing that line's WAV; the WAV is read once the file is as long as its own
+  header says, because `piper.exe` names it before it closes it. Before, Windows
+  started `piper.exe` and loaded the voice for every line Ella said, after the
+  model had finished writing, and a reply got no overlap with the model: on the
+  M1 Pro a one-shot Piper took 0.9-1.2 s for a reply a resident one says in
+  0.12 s. A Piper that cannot run resident, or leaves a line unanswered for
+  20 s, is set aside for the session, and every line starts Piper afresh, as
+  before.
+- **Ella starts talking once the reply is written and saved**, not once its
+  last sentence is synthesized (see above). On the M1 Pro that is 5 ms after
+  the model's last token instead of 95-130 ms; on a laptop, with a slower Piper,
+  it is more.
+- **Threads.** llama.cpp gets one thread per physical performance core. It had
+  every logical core but two, which is six threads on a four-core laptop with
+  hyper-threading; on the M1 Pro's CPU, spreading from its six performance cores
+  onto the two efficiency cores cut decode from 47 to 34 tokens a second. The
+  daemon's Piper uses two threads that sleep between sentences: onnxruntime's
+  default, a spinning thread per core, cost the model 12% of its decode speed
+  while Piper worked beside it, for 30 ms less per sentence.
+- **A topic's instructions are kept on disk.** A talk's aim changes from one
+  talk to the next, so it comes last, and the topic's instructions before it are
+  the same for every talk on the topic at the learner's level. The first talk on
+  a topic evaluates them and has llama-server save the slot (`--slot-save-path`,
+  in `models/llm-slots`, the four most recent topics at 35-45 MB each). Every
+  later talk on it, after a restart too, restores them in milliseconds and
+  evaluates only its aim and its opening. On the M1 Pro's CPU a talk on a topic
+  done before warmed up in 1.7 s instead of 10 s, and its first reply, answered
+  at once, came in 1.3 s instead of 10.2 s. A talk's replies wait for its
+  warm-up rather than slip in between its requests, so a slot is never saved with
+  a conversation in it, and a slot's file name carries the model file, its size
+  and date, and the server's build, so it is only ever restored into the model
+  and server that made it.
+
+Tried and not kept:
+
+- Putting the rules and guardrails every talk shares ahead of the scene, so a
+  new topic would restore them too and evaluate about half its instructions.
+  In the bench's safety script Ella then accepted a hug in four of twelve
+  replies where the prompt as it is had accepted none. Moving only the aim to
+  the end made no difference: from the same conversation, sampled 100 times at
+  each hug, the prompt as it was and the one with its aim last accepted 1 and 0
+  times, and from a conversation that had drifted, 4 and 3.
+- llama-server's `--cache-reuse`, which lets a chore keep the previous exchange
+  instead of evaluating it again after the turn's note. It saved 20-30 tokens a
+  turn, and eight bench runs of the two ledger chores broke the ledger 5 times
+  with it against 4 without: too few runs to tell, and too little saved to try
+  it on learners.
 
 ## Repeatable Canary/Whisper benchmark
 
@@ -541,6 +628,12 @@ them into `ella.sqlite3`; to back up or move a tester's data, quit Ella and copy
 every `ella.sqlite3*` file together. Every saved turn is synced to the drive
 before Ella moves on (`synchronous = FULL`, plus `fullfsync` on macOS), so it
 survives a crash, a force-quit or a battery that dies.
+
+`models/llm-slots/` beside it holds llama.cpp's saved slots: the evaluated
+instructions of the last four topics talked about (see
+[Latency on laptops](#latency-on-laptops)). They name the learner, since the
+instructions do, but hold nothing they said. Deleting them loses nothing: the
+next talk on a topic evaluates its instructions again and saves them afresh.
 
 A development build has the same identifier, so it opens the same database and
 sees the installed app's learner. Opening a v0.1.6 database only adds columns

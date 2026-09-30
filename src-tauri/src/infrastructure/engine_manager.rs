@@ -1,6 +1,6 @@
 //! Supervision for the one engine Ella does not run in-process.
 //!
-//! Canary is linked into the binary and Piper is spawned per turn, so
+//! Canary is linked into the binary and Piper is a child of the engine, so
 //! `llama-server` is the last process that a development shell script used to
 //! start by hand. A packaged app has no shell script, so it starts the server
 //! itself: it picks a free loopback port, waits for the model to load, keeps
@@ -42,6 +42,9 @@ pub struct LlamaServer {
     child: Arc<Mutex<Child>>,
     base_url: String,
     tail: Arc<Mutex<Vec<String>>>,
+    /// Where the server saves and restores slots, if it could be given
+    /// somewhere to: see `SlotStore` in `engines`.
+    slot_dir: Option<PathBuf>,
 }
 
 /// Every server this process has started and not yet stopped. Until `start`
@@ -90,6 +93,11 @@ impl LlamaServer {
 
         let port = free_loopback_port()?;
         let base_url = format!("http://127.0.0.1:{port}/v1");
+        // Beside the weights, in the one directory an installed build may
+        // write to. Without it the server still runs; it only cannot keep a
+        // talk's shared instructions between launches.
+        let slots = models_root.join("llm-slots");
+        let slot_dir = std::fs::create_dir_all(&slots).is_ok().then_some(slots);
 
         let mut command = Command::new(&binary);
         command
@@ -107,6 +115,9 @@ impl LlamaServer {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
+        if let Some(directory) = &slot_dir {
+            command.arg("--slot-save-path").arg(directory);
+        }
 
         // llama.cpp ships its backends beside the executable. Windows resolves
         // those from the binary's own directory; macOS and Linux need to be
@@ -160,13 +171,22 @@ impl LlamaServer {
             servers.push(Arc::downgrade(&child));
         }
         // From here a failure drops `server`, which kills the process.
-        let server = Self { child, base_url, tail };
+        let server = Self {
+            child,
+            base_url,
+            tail,
+            slot_dir,
+        };
         server.wait_until_ready()?;
         Ok(server)
     }
 
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    pub fn slot_dir(&self) -> Option<&Path> {
+        self.slot_dir.as_deref()
     }
 
     /// Polls `/health` until the model is loaded. A server that exits early —

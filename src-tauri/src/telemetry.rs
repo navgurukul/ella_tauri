@@ -92,6 +92,7 @@ impl LatencyTrace {
                 llm_completion_ms: None,
                 tts_first_audio_ms: None,
                 tts_completion_ms: None,
+                speech_ms: None,
                 total_ms: 0,
             },
         }
@@ -146,8 +147,19 @@ impl LatencyTrace {
         self.timings.tts_completion_ms = completion_ms.map(round_ms);
     }
 
+    /// Ella's first sentence went to the window at `at`. A reply played whole
+    /// never calls this, and starts when the turn returns.
+    pub fn record_speech(&mut self, at: Instant) {
+        self.timings.speech_ms = Some(round_ms(
+            at.saturating_duration_since(self.started).as_secs_f64() * 1_000.0,
+        ));
+    }
+
     pub fn finish(mut self, status: &str, error: Option<&str>) -> TurnTimings {
         self.timings.total_ms = round_ms(self.started.elapsed().as_secs_f64() * 1_000.0);
+        if status == "ok" && self.timings.speech_ms.is_none() {
+            self.timings.speech_ms = Some(self.timings.total_ms);
+        }
         let fmt = |value: Option<u64>| {
             value.map_or_else(|| "-".to_string(), |ms| format!("{ms}ms"))
         };
@@ -157,6 +169,7 @@ impl LatencyTrace {
              [LATENCY]   stt:   {} (engine={} backend={}{})\n\
              [LATENCY]   llm:   ttft={} completion={}\n\
              [LATENCY]   tts:   first_audio={} completion={}\n\
+             [LATENCY]   Ella started speaking at {}\n\
              [LATENCY]   TOTAL (Rust side): {}ms{}",
             self.timings.kind,
             status,
@@ -175,6 +188,7 @@ impl LatencyTrace {
             fmt(self.timings.llm_completion_ms),
             fmt(self.timings.tts_first_audio_ms),
             fmt(self.timings.tts_completion_ms),
+            fmt(self.timings.speech_ms),
             self.timings.total_ms,
             error.map(|detail| format!(" error={detail}")).unwrap_or_default(),
         );

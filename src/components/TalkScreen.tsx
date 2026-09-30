@@ -107,16 +107,23 @@ export function TalkScreen({
   // "Hear it again" button should keep meaning the last thing Ella actually
   // said. Cleared the moment the learner tries again.
   const [retryPrompt, setRetryPrompt] = useState<string | null>(null);
+  // The reply Ella has started saying, from its first sentence, which carries
+  // all of it: the text is settled and the turn saved before any of it is
+  // sent, so it is shown whole the moment she starts, and the turn that
+  // arrives a moment later puts the same words in the conversation.
+  const [incomingReply, setIncomingReply] = useState<string | null>(null);
 
   const voice = useRef(createVoiceCapture());
   const voiceStreamId = useRef<string | null>(null);
   const stopSpeech = useRef<() => void>(() => undefined);
   const playbackWatchdog = useRef<number | null>(null);
   const playbackGeneration = useRef(0);
-  /** Receives sentences while the reply is still generating. Armed for the
-   * duration of one turn, and tied to the playback generation so a learner who
-   * interrupts is not spoken over by the turn they cut off. */
-  const speechQueue = useRef<{ queue: SpeechQueue; generation: number } | null>(null);
+  /** Receives sentences while the reply is still being synthesized. Armed for
+   * the duration of one line, and tied to the playback generation so a learner
+   * who interrupts is not spoken over by the turn they cut off. `turn` is the
+   * one its sentences belong to: 0 for the opening and the retry prompt, the
+   * learner's turn for a reply, and -1 for a replay, which is sent none. */
+  const speechQueue = useRef<{ queue: SpeechQueue; generation: number; turn: number } | null>(null);
   const reactionTimer = useRef<number | null>(null);
   const micOperation = useRef(0);
   const captureActive = useRef(false);
@@ -182,9 +189,12 @@ export function TalkScreen({
         const armed = speechQueue.current;
         if (!armed || armed.generation !== playbackGeneration.current) return;
         if (segment.session_id !== session.id) return;
+        // One queue plays one line: the opening, or one turn's reply.
+        if (segment.turn !== armed.turn) return;
         // Segments arrive in order on one channel; an index already queued is a
         // repeat, and queueing it would say the sentence twice.
         if (segment.index < armed.queue.received) return;
+        if (segment.index === 0 && segment.reply) setIncomingReply(segment.reply);
         armed.queue.push(segment.audio, segment.words, segment.phonemes);
       })
       .then((stop) => {
@@ -246,6 +256,7 @@ export function TalkScreen({
     stopSpeech.current = () => undefined;
     speechQueue.current?.queue.cancel();
     speechQueue.current = null;
+    setIncomingReply(null);
     setSpokenIndex(-1);
     setFollowing(false);
     if (playbackWatchdog.current !== null) window.clearTimeout(playbackWatchdog.current);
@@ -270,7 +281,7 @@ export function TalkScreen({
     setState("speaking");
     const generation = playbackGeneration.current;
     const queue = createSpeechQueue(queueCallbacks(generation, "opening:first-sentence"));
-    speechQueue.current = { generation, queue };
+    speechQueue.current = { generation, queue, turn: 0 };
     void bridge
       .speakOpening(session.id)
       .then((line) => {
@@ -310,7 +321,7 @@ export function TalkScreen({
     setState("speaking");
     const generation = playbackGeneration.current;
     const queue = createSpeechQueue(queueCallbacks(generation, "retry-prompt:first-sentence"));
-    speechQueue.current = { generation, queue };
+    speechQueue.current = { generation, queue, turn: 0 };
     void bridge
       .speakRetryPrompt(session.id)
       .then((line) => {
@@ -325,6 +336,23 @@ export function TalkScreen({
         if (!mounted.current || playbackGeneration.current !== generation) return;
         playElla(fallbackText);
       });
+  }
+
+  /**
+   * Open the queue this turn's reply will play through, before the turn is
+   * sent. Its sentences are released as soon as the reply is written and
+   * saved, while the last of them may still be being synthesized, so they
+   * arrive before the turn itself does.
+   */
+  function armReplyQueue() {
+    if (!bridge.onSpeechSegment) return;
+    stopPlayback();
+    const generation = playbackGeneration.current;
+    speechQueue.current = {
+      generation,
+      queue: createSpeechQueue(queueCallbacks(generation, "turn:first-sentence")),
+      turn: session.messages.filter((message) => message.speaker === "learner").length + 1,
+    };
   }
 
   /** What every queue on this screen reports back, live turn or replay alike. */
@@ -387,7 +415,7 @@ export function TalkScreen({
     // did. Only the browser-speech fallback below has no timings to follow.
     if (result?.audio) {
       const queue = createSpeechQueue(queueCallbacks(generation, "playback:replay"));
-      speechQueue.current = { generation, queue };
+      speechQueue.current = { generation, queue, turn: -1 };
       queue.push(result.audio, result.speech_words, result.speech_phonemes);
       queue.finish(1);
       return;
@@ -504,6 +532,7 @@ export function TalkScreen({
     setSending(true);
     setState("thinking");
     setError(null);
+    armReplyQueue();
     try {
       const capture = await voice.current.stop();
       captureActive.current = false;
@@ -592,6 +621,7 @@ export function TalkScreen({
     setSending(true);
     setState("thinking");
     setError(null);
+    armReplyQueue();
     try {
       const ipcStarted = performance.now();
       const result = await bridge.sendTextTurn(session.id, input);
@@ -633,6 +663,33 @@ export function TalkScreen({
     if (result.session_summary) {
       onClosing?.(result.session_summary);
       setPendingSummary(result.session_summary);
+    }
+    const streaming = speechQueue.current;
+    // The reply has been playing since before this result arrived. `audio` is
+    // the same recording, kept for the replay button — playing it now would say
+    // the whole turn a second time. If nothing reached the queue, the stream
+    // did not get through and the ordinary one-shot playback still applies.
+    if (
+      streaming &&
+      streaming.generation === playbackGeneration.current &&
+      result.streamed_segments > 0 &&
+      streaming.queue.received > 0
+    ) {
+      llog(
+        "playback:streamed",
+        `${streaming.queue.received}/${result.streamed_segments} sentence(s) already playing`,
+      );
+      streaming.queue.finish(result.streamed_segments);
+      // Defensive fallback for a queue that never reports it finished.
+      playbackWatchdog.current = window.setTimeout(
+        () => {
+          if (mounted.current && playbackGeneration.current === streaming.generation) {
+            setState("resting");
+          }
+        },
+        Math.max(15_000, Math.min(45_000, result.ella_message.content.length * 180)),
+      );
+      return;
     }
     playElla(result.ella_message.content, result);
   }
@@ -682,7 +739,7 @@ export function TalkScreen({
   // A showing retry prompt takes over the screen the same way it took over
   // the speaker: `latestElla` (and the replay button below, which reads it
   // directly) stays pointed at the last real reply throughout.
-  const prompt = retryPrompt ?? latestElla?.content ?? "";
+  const prompt = retryPrompt ?? incomingReply ?? latestElla?.content ?? "";
   // While a reply is streaming, the words come from the audio, because the
   // turn's text has not arrived yet. Afterwards the two are the same sentence,
   // so which one renders is invisible.
