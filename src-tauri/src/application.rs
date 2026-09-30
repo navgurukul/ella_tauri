@@ -37,8 +37,8 @@ const PLACEMENT_LABEL: &str = "First talk";
 
 /// How the shell delivers a finished sentence to the window mid-turn.
 ///
-/// Registered once at startup. Without one — tests, the chore bench — nothing
-/// streams and every turn returns its audio whole, exactly as before.
+/// Registered once at startup. Without one — most tests — nothing streams
+/// and every turn returns its audio whole, exactly as before.
 pub trait SpeechBroadcast: Send + Sync {
     fn speak(&self, event: SpeechStreamEvent);
 }
@@ -48,14 +48,34 @@ struct TurnSpeech {
     broadcast: Arc<dyn SpeechBroadcast>,
     session_id: String,
     turn: u32,
+    /// The whole reply, sent with its first sentence so the window can show
+    /// all of it the moment Ella starts saying it. `None` for a line that is
+    /// already on screen, such as the opening.
+    reply: Option<String>,
+    /// When the first sentence went to the window.
+    first_sent: Mutex<Option<Instant>>,
+}
+
+impl TurnSpeech {
+    fn first_sent(&self) -> Option<Instant> {
+        *self
+            .first_sent
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 impl SpeechSink for TurnSpeech {
     fn segment(&self, segment: SpeechSegment) {
+        self.first_sent
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_or_insert_with(Instant::now);
         self.broadcast.speak(SpeechStreamEvent {
             session_id: self.session_id.clone(),
             turn: self.turn,
             index: segment.index,
+            reply: (segment.index == 0).then(|| self.reply.clone()).flatten(),
             text: segment.text,
             audio: segment.audio,
             ready_ms: segment.ready_ms,
@@ -159,6 +179,20 @@ impl AppService {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    /// Where one turn's sentences go on their way to the window, when there is
+    /// a window to send them to.
+    fn turn_speech(&self, session_id: &str, turn: u32, reply: Option<&str>) -> Option<Arc<TurnSpeech>> {
+        self.speech_broadcast().map(|broadcast| {
+            Arc::new(TurnSpeech {
+                broadcast,
+                session_id: session_id.to_owned(),
+                turn,
+                reply: reply.map(str::to_owned),
+                first_sent: Mutex::new(None),
+            })
+        })
     }
 
     /// Everything the window needs to draw. Signed out, the only learner
@@ -279,14 +313,10 @@ impl AppService {
             .ok_or_else(|| {
                 EllaError::Conflict("This conversation has no opening line to say.".into())
             })?;
-        let speech: Option<Arc<dyn SpeechSink>> = self.speech_broadcast().map(|broadcast| {
-            Arc::new(TurnSpeech {
-                broadcast,
-                session_id: session_id.to_owned(),
-                // Turn 0 is the opening: it answers nothing.
-                turn: 0,
-            }) as Arc<dyn SpeechSink>
-        });
+        // Turn 0 is the opening: it answers nothing.
+        let speech = self
+            .turn_speech(session_id, 0, None)
+            .map(|speech| speech as Arc<dyn SpeechSink>);
         let synthesized = self.engine.speak(&opening, speech)?;
         Ok(SpokenLine {
             // Zero means the window heard nothing yet and has to play the
@@ -307,13 +337,9 @@ impl AppService {
     pub fn speak_retry_prompt(&self, session_id: &str) -> EllaResult<SpokenLine> {
         let session = self.database.session(session_id)?;
         let text = "I couldn't quite hear that, could you try again?";
-        let speech: Option<Arc<dyn SpeechSink>> = self.speech_broadcast().map(|broadcast| {
-            Arc::new(TurnSpeech {
-                broadcast,
-                session_id: session.id.clone(),
-                turn: 0,
-            }) as Arc<dyn SpeechSink>
-        });
+        let speech = self
+            .turn_speech(&session.id, 0, None)
+            .map(|speech| speech as Arc<dyn SpeechSink>);
         let synthesized = self.engine.speak(text, speech)?;
         Ok(SpokenLine {
             streamed_segments: synthesized.segments,
@@ -1030,30 +1056,57 @@ impl AppService {
         // Voice is an enhancement, not a transaction dependency: if Piper is
         // missing or fails, the persisted text turn remains fully usable.
         //
-        // A reply whose sentences were synthesized during generation is already
-        // recorded — and, when it streamed, already playing. Only turns that
-        // produced no usable pipeline audio pay for Piper on the clock here.
-        let (audio, speech_words, speech_phonemes) = match generated.speech.take() {
-            Some(synthesized) => {
-                trace.record_tts(synthesized.first_audio_ms, synthesized.completion_ms);
-                trace.stage(
-                    "tts:overlapped",
-                    &format!(
-                        "reply synthesized during generation | first_audio={} completion={}",
-                        synthesized
-                            .first_audio_ms
-                            .map(|ms| format!("{ms:.1} ms"))
-                            .unwrap_or_else(|| "-".into()),
-                        synthesized
-                            .completion_ms
-                            .map(|ms| format!("{ms:.1} ms"))
-                            .unwrap_or_else(|| "-".into()),
-                    ),
-                );
-                (synthesized.audio, synthesized.words, synthesized.phonemes)
+        // The turn is saved, so now it can be heard. A reply whose sentences
+        // were synthesized while it was being written is released: those ready
+        // go to the window at once, with the whole text, and the rest follow as
+        // Piper finishes them, so Ella starts talking without waiting for the
+        // last one. Any other reply is said now, on the clock.
+        let speech = self.turn_speech(session_id, turn, Some(&reply));
+        let sink = speech.clone().map(|speech| speech as Arc<dyn SpeechSink>);
+        let (audio, speech_words, speech_phonemes, streamed_segments) =
+            match generated.pending.take() {
+                Some(pending) => {
+                    if let Some(sink) = sink {
+                        pending.release(sink);
+                    }
+                    match pending.finish() {
+                        Some(synthesized) => {
+                            trace.record_tts(synthesized.first_audio_ms, synthesized.completion_ms);
+                            trace.stage(
+                                "tts:overlapped",
+                                &format!(
+                                    "reply synthesized during generation | first_audio={} completion={} | {} sentence(s) streamed",
+                                    synthesized
+                                        .first_audio_ms
+                                        .map(|ms| format!("{ms:.1} ms"))
+                                        .unwrap_or_else(|| "-".into()),
+                                    synthesized
+                                        .completion_ms
+                                        .map(|ms| format!("{ms:.1} ms"))
+                                        .unwrap_or_else(|| "-".into()),
+                                    synthesized.segments,
+                                ),
+                            );
+                            (
+                                synthesized.audio,
+                                synthesized.words,
+                                synthesized.phonemes,
+                                synthesized.segments,
+                            )
+                        }
+                        // Piper broke off partway. The window is told nothing
+                        // was played, and gets the whole recording instead of
+                        // a reply that stops mid-thought.
+                        None => self.speak_on_clock(&reply, None, trace),
+                    }
+                }
+                None => self.speak_on_clock(&reply, sink, trace),
+            };
+        if streamed_segments > 0 {
+            if let Some(sent) = speech.as_ref().and_then(|speech| speech.first_sent()) {
+                trace.record_speech(sent);
             }
-            None => self.synthesize_on_clock(&reply, trace),
-        };
+        }
         // The app owns the number. `named_figure` is only ever accepted when it
         // is legal for this spec, so a character that concedes too far in prose
         // still does not move the ledger.
@@ -1138,21 +1191,25 @@ impl AppService {
             signal: generated.signal,
             speech_words,
             speech_phonemes,
+            streamed_segments,
         })
     }
 
-    /// Synthesize the whole reply with the learner waiting.
+    /// Say the reply with the learner waiting: through `speech` sentence by
+    /// sentence where Piper stays resident, as one recording where it does not
+    /// or there is no `speech` to send it to.
     ///
-    /// The path for turns that produced no usable pipeline audio: demo mode, a
-    /// missing Piper, or a ledger reply that was regenerated after its
-    /// sentences had already been read.
-    fn synthesize_on_clock(
+    /// The path for replies with no audio synthesized ahead: demo mode, a
+    /// missing Piper, a reply regenerated or rewritten after it was read, or
+    /// one whose Piper broke off partway.
+    fn speak_on_clock(
         &self,
         reply: &str,
+        speech: Option<Arc<dyn SpeechSink>>,
         trace: &mut LatencyTrace,
-    ) -> (Option<AudioPayload>, Vec<WordSpan>, Vec<PhonemeSpan>) {
+    ) -> (Option<AudioPayload>, Vec<WordSpan>, Vec<PhonemeSpan>, u32) {
         trace.stage("tts:start", "sending reply text to speech synthesis");
-        match self.engine.synthesize(reply) {
+        match self.engine.speak(reply, speech) {
             Ok(synthesized) => {
                 trace.record_tts(synthesized.first_audio_ms, synthesized.completion_ms);
                 trace.stage(
@@ -1174,7 +1231,12 @@ impl AppService {
                             .unwrap_or_else(|| "none".into())
                     ),
                 );
-                (synthesized.audio, synthesized.words, synthesized.phonemes)
+                (
+                    synthesized.audio,
+                    synthesized.words,
+                    synthesized.phonemes,
+                    synthesized.segments,
+                )
             }
             Err(error) => {
                 trace.stage("tts:failed", &error.to_string());
@@ -1186,7 +1248,7 @@ impl AppService {
                     })
                 );
                 trace.record_tts(None, None);
-                (None, Vec::new(), Vec::new())
+                (None, Vec::new(), Vec::new(), 0)
             }
         }
     }
@@ -3230,5 +3292,120 @@ mod curriculum_flow_tests {
         service.log_out().unwrap();
         assert!(service.levels().is_err());
         assert!(service.start_placement().is_err());
+    }
+}
+
+/// What the window is sent while a reply is spoken, and when.
+#[cfg(test)]
+mod speech_release_tests {
+    use super::*;
+    use crate::{
+        domain::EngineStatus,
+        infrastructure::{
+            database::Database,
+            engines::{DemoEngine, SynthesizedAudio},
+            stt::Transcription,
+        },
+    };
+
+    /// Says every line sentence by sentence, as a resident Piper does.
+    struct Voiced;
+
+    impl TutorEngine for Voiced {
+        fn status(&self) -> EngineStatus {
+            DemoEngine.status()
+        }
+        fn opening(&self, topic: &Topic, learner_name: &str, pitch: &Pitch) -> EllaResult<String> {
+            DemoEngine.opening(topic, learner_name, pitch)
+        }
+        fn reply(&self, _: &TutorRequest) -> EllaResult<GeneratedReply> {
+            Ok(GeneratedReply::plain(
+                "That sounds fun. What did you eat there?".into(),
+                1.0,
+                1.0,
+            ))
+        }
+        fn uses_native_stt(&self) -> bool {
+            false
+        }
+        fn transcribe(&self, _: &[i16], _: u32) -> EllaResult<Transcription> {
+            Err(EllaError::Engine("no microphone in tests".into()))
+        }
+        fn synthesize(&self, _: &str) -> EllaResult<SynthesizedAudio> {
+            DemoEngine.synthesize("")
+        }
+        fn speak(&self, text: &str, speech: Option<Arc<dyn SpeechSink>>) -> EllaResult<SynthesizedAudio> {
+            let sentences: Vec<&str> = text.split_inclusive(". ").map(str::trim).collect();
+            if let Some(sink) = &speech {
+                for (index, sentence) in sentences.iter().enumerate() {
+                    sink.segment(SpeechSegment {
+                        index: index as u32,
+                        text: (*sentence).to_owned(),
+                        audio: AudioPayload { mime_type: "audio/wav".into(), base64: String::new() },
+                        ready_ms: 1.0,
+                        words: Vec::new(),
+                        phonemes: Vec::new(),
+                    });
+                }
+            }
+            Ok(SynthesizedAudio {
+                audio: Some(AudioPayload { mime_type: "audio/wav".into(), base64: String::new() }),
+                first_audio_ms: Some(1.0),
+                completion_ms: Some(2.0),
+                words: Vec::new(),
+                phonemes: Vec::new(),
+                segments: if speech.is_some() { sentences.len() as u32 } else { 0 },
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct Window(Mutex<Vec<SpeechStreamEvent>>);
+
+    impl SpeechBroadcast for Window {
+        fn speak(&self, event: SpeechStreamEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    fn voiced() -> AppService {
+        let service = AppService::new(Database::in_memory().unwrap(), Box::new(Voiced));
+        service.save_learner("Asha", Some(14)).unwrap();
+        service
+    }
+
+    #[test]
+    fn a_reply_reaches_the_window_with_its_whole_text_on_the_first_sentence() {
+        let service = voiced();
+        let window = Arc::new(Window::default());
+        service.set_speech_broadcast(window.clone());
+        let session = service.start_session("street-food").unwrap();
+        service.speak_opening(&session.id).unwrap();
+        let result = service.send_text_turn(&session.id, "I ate bhel puri.").unwrap();
+
+        assert_eq!(result.streamed_segments, 2, "the window is already playing it");
+        let events = window.0.lock().unwrap();
+        assert!(
+            events.iter().filter(|event| event.turn == 0).all(|event| event.reply.is_none()),
+            "the opening is on screen already"
+        );
+        let reply: Vec<_> = events.iter().filter(|event| event.turn == 1).collect();
+        assert_eq!(reply.iter().map(|event| event.index).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(reply[0].reply.as_deref(), Some(result.ella_message.content.as_str()));
+        assert_eq!(reply[1].reply, None, "the text goes once");
+        let timings = result.timings.unwrap();
+        assert!(timings.speech_ms.unwrap() <= timings.total_ms);
+    }
+
+    #[test]
+    fn without_a_window_a_reply_comes_back_whole() {
+        let service = voiced();
+        let session = service.start_session("street-food").unwrap();
+        let result = service.send_text_turn(&session.id, "I ate bhel puri.").unwrap();
+
+        assert_eq!(result.streamed_segments, 0);
+        assert!(result.audio.is_some(), "the recording is played instead");
+        let timings = result.timings.unwrap();
+        assert_eq!(timings.speech_ms, Some(timings.total_ms), "she speaks when the turn returns");
     }
 }

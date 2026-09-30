@@ -109,6 +109,24 @@ def expose_durations(model):
     return b"".join([data[:field_start], graph, data[start:end], output, data[end:]])
 
 
+def session_options():
+    """Two threads that sleep when there is no work.
+
+    Piper synthesizes a sentence while the language model is still writing the
+    next, on the same cores. onnxruntime's default - a thread per core, spinning
+    between requests - cost the model an eighth of its decode speed on an M1 Pro
+    for 30 ms less per sentence; two quiet threads cost it nothing, and a
+    sentence still takes a fifteenth of the time it takes to say.
+    """
+    import onnxruntime
+
+    options = onnxruntime.SessionOptions()
+    options.intra_op_num_threads = 2
+    options.inter_op_num_threads = 1
+    options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    return options
+
+
 def load_voice(path):
     """The voice, and why it cannot report durations (None when it can)."""
     from piper import PiperVoice
@@ -123,7 +141,7 @@ def load_voice(path):
             config = PiperConfig.from_dict(json.load(handle))
         session = onnxruntime.InferenceSession(
             model,
-            sess_options=onnxruntime.SessionOptions(),
+            sess_options=session_options(),
             providers=["CPUExecutionProvider"],
         )
         return PiperVoice(config=config, session=session), None

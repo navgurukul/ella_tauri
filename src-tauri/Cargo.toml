@@ -30,12 +30,15 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 transcribe-cpp = { version = "=0.2.2", default-features = false, features = ["metal"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+num_cpus = "1"
 transcribe-cpp = { version = "=0.2.2", default-features = false, features = ["dynamic-backends", "vulkan"] }
 
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
+num_cpus = "1"
 transcribe-cpp = { version = "=0.2.2", default-features = false }
 
 [dev-dependencies]

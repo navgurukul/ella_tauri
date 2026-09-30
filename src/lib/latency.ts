@@ -49,6 +49,7 @@ export function logServerTimings(timings?: TurnTimings | null): void {
     "LLM completion (ms)": timings.llm_completion_ms ?? "-",
     "TTS first audio (ms)": timings.tts_first_audio_ms ?? "-",
     "TTS completion (ms)": timings.tts_completion_ms ?? "-",
+    "Ella started speaking (ms)": timings.speech_ms ?? "-",
     "Rust total (ms)": timings.total_ms,
   });
 }

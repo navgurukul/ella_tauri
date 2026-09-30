@@ -374,14 +374,15 @@ fn run_topic(options: &Options, topic_id: &str) -> Result<(), String> {
             .map_err(|error| format!("turn {} failed: {error}", index + 1))?;
         let total_ms = started.elapsed().as_secs_f64() * 1_000.0;
         let timings = result.timings.as_ref();
-        // Only the opening streams now; a reply is released whole, so the
-        // recorder stays empty here and `first_speech_ms` reads as "-".
-        let (first_segment_ms, segments) = recorder.take();
-        // Both clocks start within a millisecond of each other at the top of
-        // the generation, so they compare directly: how long until Ella starts
-        // talking, against how long until she has finished writing.
+        // When Ella started talking, from the top of the turn: her first
+        // sentence handed to the window, which happens once the reply is
+        // written and saved, while its last sentence may still be being
+        // synthesized. A reply played whole starts when the turn returns.
+        let (_, segments) = recorder.take();
+        let speech_ms = timings.and_then(|t| t.speech_ms).map(|ms| ms as f64);
+        let streamed = result.streamed_segments;
         let completion_ms = timings.and_then(|t| t.llm_completion_ms).unwrap_or(0) as f64;
-        let saved = first_segment_ms.map(|ms| completion_ms - ms);
+        let saved = speech_ms.filter(|_| streamed > 0).map(|ms| total_ms - ms);
 
         println!("\n  learner  {}", line.text);
         println!("           ({})", line.intent);
@@ -393,11 +394,12 @@ fn run_topic(options: &Options, topic_id: &str) -> Result<(), String> {
         );
         println!(
             "  speech   {}",
-            match (first_segment_ms, saved) {
+            match (speech_ms, saved) {
                 (Some(ms), Some(saved)) => format!(
-                    "starts talking at {ms:.0}ms \u{2014} {saved:.0}ms before the reply is written",
+                    "starts talking at {ms:.0}ms \u{2014} {saved:.0}ms before the turn returns ({streamed} sentence(s) streamed)",
                 ),
-                _ => "nothing streamed".into(),
+                (Some(ms), None) => format!("starts when the turn returns, at {ms:.0}ms (nothing streamed)"),
+                _ => "-".into(),
             }
         );
         for line in recorder.take_words() {
@@ -412,8 +414,9 @@ fn run_topic(options: &Options, topic_id: &str) -> Result<(), String> {
             "total_ms": total_ms.round(),
             "llm_ttft_ms": timings.and_then(|t| t.llm_ttft_ms),
             "llm_completion_ms": timings.and_then(|t| t.llm_completion_ms),
-            "first_speech_ms": first_segment_ms.map(|ms| ms.round()),
-            "saved_ms": saved.map(|ms| ms.round()),
+            "first_speech_ms": speech_ms.map(f64::round),
+            "saved_ms": saved.map(f64::round),
+            "streamed_segments": streamed,
         }));
     }
 
@@ -439,19 +442,20 @@ fn run_topic(options: &Options, topic_id: &str) -> Result<(), String> {
     println!("median turn              {:.0} ms", median(&totals));
     println!("median reply written at  {:.0} ms", median(&written));
     if first_speech.is_empty() {
-        println!("median time to speech    - (no sentence streamed; is the resident Piper up?)");
+        println!("median time to speech    -");
     } else {
         println!(
             "median time to speech    {:.0} ms   ({} of {} turns streamed)",
             median(&first_speech),
-            first_speech.len(),
+            saved.len(),
             turns.len()
         );
+    }
+    if !saved.is_empty() {
         println!(
-            "median head start        {:.0} ms   (Ella starts talking this much earlier)",
+            "median head start        {:.0} ms   (Ella starts talking this much before the turn returns)",
             median(&saved)
         );
-
     }
 
     if let Some(path) = &options.output {
@@ -506,6 +510,9 @@ fn run(options: &Options) -> Result<(), String> {
     }
 
     let service = AppService::new(database, engine);
+    // A window to hear the replies, as the app has, so a reply is released
+    // the moment it is written and "speaks at" says when that was.
+    service.set_speech_broadcast(Arc::new(SegmentRecorder::default()));
     service
         .save_learner(&options.learner_name, Some(22))
         .map_err(|error| error.to_string())?;
@@ -562,6 +569,7 @@ fn run(options: &Options) -> Result<(), String> {
         let ttft = timings.and_then(|t| t.llm_ttft_ms).unwrap_or(0);
         let completion = timings.and_then(|t| t.llm_completion_ms).unwrap_or(0);
         let tts_first = timings.and_then(|t| t.tts_first_audio_ms);
+        let speech = timings.and_then(|t| t.speech_ms);
 
         println!("\n  learner  {}", line.text);
         println!("           ({})", line.intent);
@@ -579,8 +587,11 @@ fn run(options: &Options) -> Result<(), String> {
             );
         }
         println!(
-            "  timing   total {total_ms:.0}ms | ttft {ttft}ms | llm {completion}ms | tts first {}",
+            "  timing   total {total_ms:.0}ms | ttft {ttft}ms | llm {completion}ms | tts first {} | speaks at {}",
             tts_first
+                .map(|ms| format!("{ms}ms"))
+                .unwrap_or_else(|| "-".into()),
+            speech
                 .map(|ms| format!("{ms}ms"))
                 .unwrap_or_else(|| "-".into())
         );
@@ -598,6 +609,7 @@ fn run(options: &Options) -> Result<(), String> {
             "llm_ttft_ms": ttft,
             "llm_completion_ms": completion,
             "tts_first_audio_ms": tts_first,
+            "speech_ms": speech,
             "tts_completion_ms": timings.and_then(|t| t.tts_completion_ms),
             "ledger": result.ledger.as_ref().map(|ledger| json!({
                 "current": ledger.current,

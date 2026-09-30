@@ -6,14 +6,18 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Condvar, Mutex, OnceLock,
+    },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::{
     domain::{
@@ -33,7 +37,7 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct GeneratedReply {
     pub text: String,
     pub ttft_ms: f64,
@@ -48,10 +52,11 @@ pub struct GeneratedReply {
     /// True when the first generation broke the ledger limit or step and the
     /// turn had to be generated again.
     pub regenerated: bool,
-    /// Whole-reply audio assembled from the sentences that were synthesized
-    /// while this reply was still generating. `None` means the caller has to
-    /// synthesize `text` itself, exactly as before sentence streaming existed.
-    pub speech: Option<SynthesizedAudio>,
+    /// The sentences of `text`, synthesized while it was being written and
+    /// held until the caller has saved the turn and releases them. `None`
+    /// means the caller has to say `text` itself: nothing was synthesized
+    /// ahead, or what was is not what the reply ended up saying.
+    pub pending: Option<PendingSpeech>,
 }
 
 impl GeneratedReply {
@@ -63,7 +68,7 @@ impl GeneratedReply {
             named_figure: None,
             signal: None,
             regenerated: false,
-            speech: None,
+            pending: None,
         }
     }
 }
@@ -85,6 +90,17 @@ pub struct SynthesizedAudio {
 
 const PIPER_DAEMON_SOURCE: &str = include_str!("piper_daemon.py");
 
+/// How long the standalone binary may take to finish a WAV it has already
+/// named. It prints the file's name before it closes the file, so on Windows
+/// the last few kilobytes can still be in the C runtime's buffer when the line
+/// arrives.
+const RESIDENT_WAV_SETTLE: Duration = Duration::from_secs(2);
+
+/// How long the standalone binary may take to answer a line, voice load
+/// included. Far longer than a sentence takes; what it bounds is a Piper that
+/// has stopped answering, which would otherwise hold the turn for good.
+const RESIDENT_REPLY_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// What the resident daemon hands back for one request.
 struct DaemonSpeech {
     /// Raw 16-bit mono PCM.
@@ -100,40 +116,106 @@ struct DaemonSpeech {
     completion_ms: f64,
 }
 
+/// How a resident Piper is started and spoken to.
+enum Resident {
+    /// Ella's own daemon script, on the Python Piper was installed into: the
+    /// macOS bundle, a development venv. One JSON header line and the raw PCM
+    /// per request, with how long every sound lasted, for lip sync.
+    Script { python: PathBuf },
+    /// The standalone binary: the Windows bundle's `piper.exe`. Started with
+    /// `--json-input`, it keeps the voice loaded and reads one JSON line per
+    /// request, writes that request's WAV to the file the line names, and
+    /// prints the file's name once it has. It times no sounds.
+    Binary { piper: PathBuf },
+}
+
 struct PiperDaemonProcess {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    output: DaemonOutput,
 }
 
-/// Long-lived Piper synthesis process. The ONNX voice loads once (~1.4 s) and
-/// every later request only pays inference (~200 ms), instead of a full
-/// interpreter + voice load per turn.
+/// How a resident Piper's answers are read.
+enum DaemonOutput {
+    /// The daemon script's header lines and PCM, read in place.
+    Stream(BufReader<ChildStdout>),
+    /// The binary's lines, read on a thread of their own so that waiting for
+    /// one can give up.
+    Lines(std::sync::mpsc::Receiver<String>),
+}
+
+/// Long-lived Piper synthesis process. The ONNX voice loads once (~0.7 s) and
+/// every later request only pays inference (~100-200 ms), instead of a process
+/// start and a voice load for every line Ella says.
 pub struct PiperDaemon {
-    python: PathBuf,
+    resident: Resident,
     voice: PathBuf,
     process: Mutex<Option<PiperDaemonProcess>>,
+    /// Set once this Piper has shown it cannot run resident here: it would not
+    /// start, or a fresh one could not say a word. Every line then goes to
+    /// the one-shot path, as before there was a daemon, instead of each
+    /// sentence paying for another failed start.
+    broken: AtomicBool,
+    /// Numbers the binary's WAV files, one per request, so a request that
+    /// writes nothing can never be answered with the audio of the one before.
+    requests: AtomicU64,
+    /// WAVs the binary wrote that could not be removed straight away, because
+    /// Piper or a virus scan still had them open. Tried again on the next
+    /// request and at exit.
+    leftovers: Mutex<Vec<PathBuf>>,
+    /// How long the binary may take to answer a line before it is given up
+    /// on: `RESIDENT_REPLY_TIMEOUT`, shorter in tests.
+    reply_timeout: Duration,
 }
 
 impl PiperDaemon {
-    fn new(python: PathBuf, voice: PathBuf) -> Arc<Self> {
+    fn script(python: PathBuf, voice: PathBuf) -> Arc<Self> {
+        Self::resident(Resident::Script { python }, voice, RESIDENT_REPLY_TIMEOUT)
+    }
+
+    fn binary(piper: PathBuf, voice: PathBuf) -> Arc<Self> {
+        Self::binary_answering_within(piper, voice, RESIDENT_REPLY_TIMEOUT)
+    }
+
+    fn binary_answering_within(piper: PathBuf, voice: PathBuf, reply_timeout: Duration) -> Arc<Self> {
+        Self::resident(Resident::Binary { piper }, voice, reply_timeout)
+    }
+
+    fn resident(resident: Resident, voice: PathBuf, reply_timeout: Duration) -> Arc<Self> {
         Arc::new(Self {
-            python,
+            resident,
             voice,
             process: Mutex::new(None),
+            broken: AtomicBool::new(false),
+            requests: AtomicU64::new(0),
+            leftovers: Mutex::new(Vec::new()),
+            reply_timeout,
         })
     }
 
-    /// Spawn and load the voice in the background so the first turn is warm.
+    /// Whether to ask this Piper for anything. False once it has been set
+    /// aside, which is for the rest of the session.
+    fn usable(&self) -> bool {
+        !self.broken.load(Ordering::Relaxed)
+    }
+
+    fn set_aside(&self, reason: &EllaError) {
+        if !self.broken.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "[LATENCY]     tts> resident Piper set aside for this session, so every line starts Piper afresh: {reason}"
+            );
+        }
+    }
+
+    /// Start it, load the voice and say a word, in the background, so the
+    /// first line the learner hears waits for none of it. The binary says
+    /// nothing until it is asked for audio, so asking is also the only proof
+    /// that it runs resident on this machine; one that cannot is set aside.
     fn warm(self: &Arc<Self>) {
         let daemon = Arc::clone(self);
         thread::spawn(move || {
-            let mut guard = daemon
-                .process
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Err(error) = daemon.ensure(&mut guard) {
-                eprintln!("[LATENCY]     tts> resident Piper warmup failed: {error}");
+            if let Err(error) = daemon.synthesize("Hello.") {
+                daemon.set_aside(&error);
             }
         });
     }
@@ -146,60 +228,120 @@ impl PiperDaemon {
             *guard = None;
         }
         let started = Instant::now();
-        let script_path = env::temp_dir().join("ella-piper-daemon.py");
-        fs::write(&script_path, PIPER_DAEMON_SOURCE)?;
-        let mut command = Command::new(&self.python);
+        let (program, mut command) = match &self.resident {
+            Resident::Script { python } => {
+                let script_path = env::temp_dir().join("ella-piper-daemon.py");
+                fs::write(&script_path, PIPER_DAEMON_SOURCE)?;
+                let mut command = Command::new(python);
+                command.arg(&script_path).arg(&self.voice);
+                (python, command)
+            }
+            Resident::Binary { piper } => {
+                let mut command = Command::new(piper);
+                command
+                    .arg("--model")
+                    .arg(&self.voice)
+                    .arg("--json-input")
+                    .arg("--quiet")
+                    // Each request names its WAV relative to here, so the name
+                    // Piper is sent is plain ASCII whatever the user's profile
+                    // is called: the binary opens files by narrow string,
+                    // which on Windows means the ANSI code page, not UTF-8.
+                    // It finds espeak-ng-data by its own path, not this one.
+                    .current_dir(env::temp_dir());
+                (piper, command)
+            }
+        };
         command
-            .arg(&script_path)
-            .arg(&self.voice)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         suppress_console_window(&mut command);
         let mut child = command.spawn().map_err(|error| {
             EllaError::Engine(format!(
-                "Could not start the resident Piper daemon with {}: {error}",
-                self.python.display()
+                "Could not start the resident Piper with {}: {error}",
+                program.display()
             ))
         })?;
         let stdin = child
             .stdin
             .take()
             .ok_or_else(|| EllaError::Engine("Piper daemon stdin was not captured.".into()))?;
-        let stdout = BufReader::new(
+        let mut stdout = BufReader::new(
             child
                 .stdout
                 .take()
                 .ok_or_else(|| EllaError::Engine("Piper daemon stdout was not captured.".into()))?,
         );
+        if let Resident::Binary { .. } = self.resident {
+            // Ends when Piper does, which closes its output.
+            let (lines, answers) = std::sync::mpsc::channel();
+            thread::spawn(move || loop {
+                let mut line = String::new();
+                match stdout.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if lines.send(line).is_err() {
+                            break;
+                        }
+                    }
+                }
+            });
+            eprintln!(
+                "[LATENCY]     tts> resident Piper binary started in {:.0}ms (the voice loads with the first request; no sound timings, so no lip sync)",
+                started.elapsed().as_secs_f64() * 1_000.0,
+            );
+            *guard = Some(PiperDaemonProcess {
+                child,
+                stdin,
+                output: DaemonOutput::Lines(answers),
+            });
+            return Ok(());
+        }
         let mut process = PiperDaemonProcess {
             child,
             stdin,
-            stdout,
+            output: DaemonOutput::Stream(stdout),
         };
-        let header = read_daemon_header(&mut process.stdout)?;
-        if !header["ok"].as_bool().unwrap_or(false) {
-            let _ = process.child.kill();
-            return Err(EllaError::Engine(format!(
-                "Piper daemon could not load the voice: {}",
-                header["error"].as_str().unwrap_or("unknown error")
-            )));
+        {
+            let DaemonOutput::Stream(stdout) = &mut process.output else {
+                unreachable!("the daemon script is read in place");
+            };
+            let header = match read_daemon_header(stdout) {
+                Ok(header) => header,
+                Err(error) => {
+                    let _ = process.child.kill();
+                    let _ = process.child.wait();
+                    return Err(error);
+                }
+            };
+            if !header["ok"].as_bool().unwrap_or(false) {
+                let _ = process.child.kill();
+                let _ = process.child.wait();
+                return Err(EllaError::Engine(format!(
+                    "Piper daemon could not load the voice: {}",
+                    header["error"].as_str().unwrap_or("unknown error")
+                )));
+            }
+            // The daemon says why when it cannot time its sounds.
+            let lip_sync = match header["untimed"].as_str() {
+                Some(reason) => format!("no sound timings for lip sync: {reason}"),
+                None => "timing every sound for lip sync".into(),
+            };
+            eprintln!(
+                "[LATENCY]     tts> resident Piper ready in {:.0}ms (voice load {} ms, {lip_sync})",
+                started.elapsed().as_secs_f64() * 1_000.0,
+                header["ready_ms"],
+            );
         }
-        // The daemon says why when it cannot time its sounds.
-        let lip_sync = match header["untimed"].as_str() {
-            Some(reason) => format!("no sound timings for lip sync: {reason}"),
-            None => "timing every sound for lip sync".into(),
-        };
-        eprintln!(
-            "[LATENCY]     tts> resident Piper ready in {:.0}ms (voice load {} ms, {lip_sync})",
-            started.elapsed().as_secs_f64() * 1_000.0,
-            header["ready_ms"],
-        );
         *guard = Some(process);
         Ok(())
     }
 
     fn synthesize(&self, text: &str) -> EllaResult<DaemonSpeech> {
+        if !self.usable() {
+            return Err(EllaError::Engine("the resident Piper was set aside".into()));
+        }
         let mut last_error = EllaError::Engine("Piper daemon unavailable".into());
         // One respawn retry covers a daemon that died between turns.
         for _attempt in 0..2 {
@@ -208,15 +350,22 @@ impl PiperDaemon {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Err(error) = self.ensure(&mut guard) {
-                last_error = error;
-                continue;
+                // It did not start at all, which a second try will not change.
+                self.set_aside(&error);
+                return Err(error);
             }
             let process = guard.as_mut().expect("ensure() leaves a live process");
-            match Self::request(process, text) {
+            match self.request(process, text) {
                 Ok(result) => return Ok(result),
                 Err(error) => {
                     if let Some(mut dead) = guard.take() {
                         let _ = dead.child.kill();
+                        let _ = dead.child.wait();
+                    }
+                    if !self.usable() {
+                        // It stopped answering: another one is not worth
+                        // another wait.
+                        return Err(error);
                     }
                     last_error = error;
                 }
@@ -225,13 +374,91 @@ impl PiperDaemon {
         Err(last_error)
     }
 
-    fn request(process: &mut PiperDaemonProcess, text: &str) -> EllaResult<DaemonSpeech> {
+    fn request(&self, process: &mut PiperDaemonProcess, text: &str) -> EllaResult<DaemonSpeech> {
+        match self.resident {
+            Resident::Script { .. } => Self::script_request(process, text),
+            Resident::Binary { .. } => self.binary_request(process, text),
+        }
+    }
+
+    /// One line through the standalone binary: the text and a WAV to write it
+    /// to, then the file's name back once it is written.
+    fn binary_request(&self, process: &mut PiperDaemonProcess, text: &str) -> EllaResult<DaemonSpeech> {
+        self.remove_leftovers();
+        let started = Instant::now();
+        let name = format!(
+            "ella-piper-{}-{}.wav",
+            std::process::id(),
+            self.requests.fetch_add(1, Ordering::Relaxed)
+        );
+        let path = env::temp_dir().join(&name);
+        let request = serde_json::to_string(&json!({ "text": text, "output_file": name }))?;
+        process.stdin.write_all(request.as_bytes())?;
+        process.stdin.write_all(b"\n")?;
+        process.stdin.flush()?;
+        let DaemonOutput::Lines(answers) = &process.output else {
+            return Err(EllaError::Engine("the binary's answers are read line by line".into()));
+        };
+        match answers.recv_timeout(self.reply_timeout) {
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let error = EllaError::Engine(format!(
+                    "Piper did not answer within {} s",
+                    self.reply_timeout.as_secs_f64()
+                ));
+                // A Piper that stops answering once is not trusted with the
+                // rest of the session: each line would wait this long again.
+                self.set_aside(&error);
+                return Err(error);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(EllaError::Engine("Piper closed its output stream.".into()));
+            }
+        }
+        let first_audio_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        let read = read_finished_wav(&path, RESIDENT_WAV_SETTLE);
+        if path.exists() && fs::remove_file(&path).is_err() {
+            self.leftovers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(path);
+        }
+        let (pcm, sample_rate) = read?;
+        if pcm.is_empty() {
+            return Err(EllaError::Engine("Piper produced no audio.".into()));
+        }
+        let completion_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        eprintln!(
+            "[LATENCY]     tts> resident Piper binary synthesized {} PCM bytes (~{:.0} ms of audio) in {completion_ms:.1}ms",
+            pcm.len(),
+            pcm.len() as f64 / 2.0 / sample_rate as f64 * 1_000.0,
+        );
+        Ok(DaemonSpeech {
+            pcm,
+            sample_rate,
+            alignment: Vec::new(),
+            first_audio_ms,
+            completion_ms,
+        })
+    }
+
+    fn remove_leftovers(&self) {
+        self.leftovers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|path| path.exists() && fs::remove_file(path).is_err());
+    }
+
+    fn script_request(process: &mut PiperDaemonProcess, text: &str) -> EllaResult<DaemonSpeech> {
         let started = Instant::now();
         let request = serde_json::to_string(&json!({ "text": text }))?;
         process.stdin.write_all(request.as_bytes())?;
         process.stdin.write_all(b"\n")?;
         process.stdin.flush()?;
-        let header = read_daemon_header(&mut process.stdout)?;
+        let DaemonOutput::Stream(stdout) = &mut process.output else {
+            return Err(EllaError::Engine("the daemon script is read in place".into()));
+        };
+        let header = read_daemon_header(stdout)?;
         if !header["ok"].as_bool().unwrap_or(false) {
             return Err(EllaError::Engine(format!(
                 "Piper daemon synthesis failed: {}",
@@ -242,7 +469,7 @@ impl PiperDaemon {
         let sample_rate = header["sample_rate"].as_u64().unwrap_or(22_050) as u32;
         let first_audio_ms = started.elapsed().as_secs_f64() * 1_000.0;
         let mut pcm = vec![0_u8; pcm_bytes];
-        process.stdout.read_exact(&mut pcm)?;
+        stdout.read_exact(&mut pcm)?;
         let completion_ms = started.elapsed().as_secs_f64() * 1_000.0;
         let alignment = daemon_alignment(&header, pcm.len() / 2);
         eprintln!(
@@ -294,6 +521,97 @@ fn daemon_alignment(header: &Value, samples: usize) -> Vec<(String, u32)> {
     }
 }
 
+/// The PCM and sample rate of a WAV that another process has said it wrote,
+/// once all of it is there.
+///
+/// The standalone Piper names each WAV before closing it, so a read can land
+/// while the tail is still being flushed. The header says how long the audio
+/// is, so the file is read again until it is that long, for at most `settle`.
+fn read_finished_wav(path: &Path, settle: Duration) -> EllaResult<(Vec<u8>, u32)> {
+    let deadline = Instant::now() + settle;
+    loop {
+        let bytes = fs::read(path).map_err(|error| {
+            EllaError::Engine(format!(
+                "Piper said it wrote {}, but it cannot be read: {error}",
+                path.display()
+            ))
+        })?;
+        match wav_pcm(&bytes) {
+            Ok(Some(audio)) => return Ok(audio),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(2)),
+            Ok(None) => {
+                return Err(EllaError::Engine(format!(
+                    "Piper's WAV at {} was still unfinished after {} ms ({} bytes)",
+                    path.display(),
+                    settle.as_millis(),
+                    bytes.len()
+                )))
+            }
+            Err(reason) => {
+                return Err(EllaError::Engine(format!(
+                    "Piper wrote a WAV Ella cannot read at {}: {reason}",
+                    path.display()
+                )))
+            }
+        }
+    }
+}
+
+/// The samples and sample rate of a mono 16-bit PCM WAV, or `Ok(None)` while
+/// the file is still shorter than its own header says it will be.
+fn wav_pcm(bytes: &[u8]) -> Result<Option<(Vec<u8>, u32)>, String> {
+    const MAX_DATA_BYTES: usize = 64 * 1024 * 1024;
+    let read_u16 = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+    let read_u32 =
+        |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+    if bytes.len() < 12 {
+        return Ok(None);
+    }
+    if &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err("it is not a RIFF/WAVE file".into());
+    }
+    let mut sample_rate = None;
+    let mut at = 12;
+    loop {
+        if bytes.len() < at + 8 {
+            return Ok(None);
+        }
+        let id = &bytes[at..at + 4];
+        let size = read_u32(at + 4) as usize;
+        if size > MAX_DATA_BYTES {
+            return Err(format!("a {size}-byte chunk is not a spoken sentence"));
+        }
+        let body = at + 8;
+        if id == b"fmt " {
+            if bytes.len() < body + 16 {
+                return Ok(None);
+            }
+            let (format, channels, rate, bits) = (
+                read_u16(body),
+                read_u16(body + 2),
+                read_u32(body + 4),
+                read_u16(body + 14),
+            );
+            if format != 1 || channels != 1 || bits != 16 || rate == 0 {
+                return Err(format!(
+                    "expected mono 16-bit PCM, found format {format}, {channels} channel(s), {bits} bits at {rate} Hz"
+                ));
+            }
+            sample_rate = Some(rate);
+        } else if id == b"data" {
+            let Some(rate) = sample_rate else {
+                return Err("its audio comes before its format".into());
+            };
+            if bytes.len() < body + size {
+                return Ok(None);
+            }
+            return Ok(Some((bytes[body..body + size].to_vec(), rate)));
+        }
+        // Chunks are padded to an even length.
+        at = body + size + (size & 1);
+    }
+}
+
 impl Drop for PiperDaemon {
     fn drop(&mut self) {
         if let Ok(mut guard) = self.process.lock() {
@@ -302,6 +620,7 @@ impl Drop for PiperDaemon {
                 let _ = process.child.wait();
             }
         }
+        self.remove_leftovers();
     }
 }
 
@@ -503,8 +822,8 @@ struct StreamedSpeech {
     audio: Option<SynthesizedAudio>,
     segments: u32,
     first_ready_ms: Option<f64>,
-    /// True when segments were handed to the sink as they finished, so the
-    /// learner has already heard them.
+    /// True when every segment synthesized was handed to the sink, each as it
+    /// finished or all at once on release, so the window has all of them.
     live: bool,
 }
 
@@ -536,22 +855,43 @@ impl StreamedSpeech {
     }
 }
 
+/// Where a pipeline's finished sentences go.
+enum Gate {
+    /// Synthesized ahead of the reply being settled, and kept until it is.
+    Held(Vec<SpeechSegment>),
+    /// Handed to the window: everything held until then, and each sentence
+    /// after it the moment it is ready.
+    Live(Arc<dyn SpeechSink>),
+}
+
 /// Synthesizes sentences on a worker thread while the reply is still being
-/// generated, so Piper's ~200 ms per sentence overlaps the model's seconds of
-/// decode instead of following them.
+/// generated, so Piper's ~100-200 ms per sentence overlaps the model's seconds
+/// of decode instead of following them.
 struct SpeechPipeline {
     sentences: Option<std::sync::mpsc::Sender<String>>,
     worker: Option<thread::JoinHandle<StreamedSpeech>>,
     splitter: SentenceSplitter,
+    gate: Arc<Mutex<Gate>>,
+    /// Every word sent to Piper so far, as the worker reads them.
+    queued: String,
+    /// Tells the worker to stop at the next sentence, because nothing will
+    /// play it: the reply it was reading has been dropped.
+    abandoned: Arc<AtomicBool>,
 }
 
 impl SpeechPipeline {
     /// `sink` present means the learner hears each sentence as it lands. Pass
-    /// `None` to synthesize ahead but hold the audio back — the right choice
-    /// when the turn might still be regenerated.
+    /// `None` to synthesize ahead but hold the audio back until `release`,
+    /// which is right while the turn might still be regenerated, or is not
+    /// saved yet.
     fn start(daemon: Arc<PiperDaemon>, sink: Option<Arc<dyn SpeechSink>>, started: Instant) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<String>();
-        let live = sink.is_some();
+        let gate = Arc::new(Mutex::new(match sink {
+            Some(sink) => Gate::Live(sink),
+            None => Gate::Held(Vec::new()),
+        }));
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let (worker_gate, worker_abandoned) = (Arc::clone(&gate), Arc::clone(&abandoned));
         let worker = thread::spawn(move || {
             let mut spoken = String::new();
             let mut pcm = Vec::new();
@@ -569,6 +909,18 @@ impl SpeechPipeline {
                 let text = spoken_form(&sentence);
                 if !text.chars().any(char::is_alphanumeric) {
                     continue;
+                }
+                if worker_abandoned.load(Ordering::Relaxed) {
+                    // Nobody will play the rest, and every sentence
+                    // synthesized now is one the model's next attempt, or
+                    // the next reply, waits behind.
+                    return StreamedSpeech {
+                        spoken: String::new(),
+                        audio: None,
+                        segments,
+                        first_ready_ms,
+                        live: false,
+                    };
                 }
                 let speech = match daemon.synthesize(&text) {
                     Ok(speech) => speech,
@@ -613,18 +965,23 @@ impl SpeechPipeline {
                         reply.extend(phoneme_spans(&speech.alignment, rate, pcm.len() / 2));
                         reply
                     });
-                if let Some(sink) = sink.as_ref() {
-                    sink.segment(SpeechSegment {
-                        index: segments,
-                        text: text.clone(),
-                        audio: AudioPayload {
-                            mime_type: "audio/wav".into(),
-                            base64: STANDARD.encode(raw_pcm_to_wav(&speech.pcm, rate, 1)),
-                        },
-                        ready_ms,
-                        words,
-                        phonemes,
-                    });
+                let segment = SpeechSegment {
+                    index: segments,
+                    text: text.clone(),
+                    audio: AudioPayload {
+                        mime_type: "audio/wav".into(),
+                        base64: STANDARD.encode(raw_pcm_to_wav(&speech.pcm, rate, 1)),
+                    },
+                    ready_ms,
+                    words,
+                    phonemes,
+                };
+                match &mut *worker_gate
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                {
+                    Gate::Held(held) => held.push(segment),
+                    Gate::Live(sink) => sink.segment(segment),
                 }
                 pcm.extend_from_slice(&speech.pcm);
                 segments += 1;
@@ -640,42 +997,82 @@ impl SpeechPipeline {
                 phonemes: reply_phonemes.unwrap_or_default(),
                 segments,
             });
+            // Whether the window has these is for `finish` to say: a held
+            // reply can still be released after the last one is ready.
             StreamedSpeech {
                 spoken,
                 audio,
                 segments,
                 first_ready_ms,
-                live,
+                live: false,
             }
         });
         Self {
             sentences: Some(tx),
             worker: Some(worker),
             splitter: SentenceSplitter::default(),
+            gate,
+            queued: String::new(),
+            abandoned,
         }
     }
 
     /// Feed one streamed token delta. Complete sentences leave for Piper now.
     fn push(&mut self, delta: &str) {
+        for sentence in self.splitter.push(delta) {
+            self.send(sentence);
+        }
+    }
+
+    fn send(&mut self, sentence: String) {
         let Some(tx) = self.sentences.as_ref() else {
             return;
         };
-        for sentence in self.splitter.push(delta) {
-            if tx.send(sentence).is_err() {
-                // The worker gave up; stop feeding it.
-                self.sentences = None;
-                return;
+        let text = spoken_form(&sentence);
+        if tx.send(sentence).is_err() {
+            // The worker gave up; stop feeding it.
+            self.sentences = None;
+            return;
+        }
+        // Recorded exactly as the worker reads it, skipping what it skips.
+        if text.chars().any(char::is_alphanumeric) {
+            if !self.queued.is_empty() {
+                self.queued.push(' ');
+            }
+            self.queued.push_str(&text);
+        }
+    }
+
+    /// No more text is coming: whatever the splitter still holds goes to Piper
+    /// as the last sentence.
+    fn close(&mut self) {
+        if let Some(rest) = self.splitter.flush() {
+            self.send(rest);
+        }
+        self.sentences = None;
+    }
+
+    /// Everything sent to Piper, as it will be read.
+    fn queued(&self) -> &str {
+        &self.queued
+    }
+
+    /// Hand the reply to the window: every sentence ready so far at once, and
+    /// each of the rest the moment it is.
+    fn release(&self, sink: Arc<dyn SpeechSink>) {
+        let mut gate = self.gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Gate::Held(held) = &mut *gate {
+            for segment in held.drain(..) {
+                sink.segment(segment);
             }
         }
+        *gate = Gate::Live(sink);
     }
 
     /// Close the stream and wait for the last sentence to finish synthesizing.
     fn finish(mut self) -> StreamedSpeech {
-        if let (Some(tx), Some(rest)) = (self.sentences.as_ref(), self.splitter.flush()) {
-            let _ = tx.send(rest);
-        }
-        self.sentences = None;
-        match self.worker.take().map(|worker| worker.join()) {
+        self.close();
+        let mut result = match self.worker.take().map(|worker| worker.join()) {
             Some(Ok(result)) => result,
             _ => StreamedSpeech {
                 spoken: String::new(),
@@ -684,7 +1081,80 @@ impl SpeechPipeline {
                 first_ready_ms: None,
                 live: false,
             },
+        };
+        // A worker that broke off leaves no audio, and then the window must be
+        // told nothing was played, whatever it was handed before the break.
+        let released = matches!(
+            *self.gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+            Gate::Live(_)
+        );
+        result.live = released && result.audio.is_some();
+        result
+    }
+}
+
+impl Drop for SpeechPipeline {
+    fn drop(&mut self) {
+        // Dropped without `finish`: whatever is still queued will never play.
+        self.abandoned.store(true, Ordering::Relaxed);
+    }
+}
+
+/// A reply's audio, synthesized while the reply was being written and held
+/// until the turn is saved. `release` starts it playing and `finish` waits for
+/// the last sentence.
+pub struct PendingSpeech {
+    pipeline: SpeechPipeline,
+    text: String,
+}
+
+impl std::fmt::Debug for PendingSpeech {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingSpeech")
+            .field("text", &self.text)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PendingSpeech {
+    /// The first generation's audio, if what Piper was given to read is what
+    /// the reply now says. Anything else is dropped, and its worker stops.
+    fn matching(pipeline: Option<SpeechPipeline>, text: &str) -> Option<Self> {
+        let pipeline = pipeline?;
+        if same_words(pipeline.queued(), text) {
+            return Some(Self {
+                pipeline,
+                text: text.to_owned(),
+            });
         }
+        eprintln!(
+            "[LATENCY]     tts> audio synthesized ahead dropped: the reply changed after it was written"
+        );
+        None
+    }
+
+    /// Hand what is ready to the window now, and the rest as it is ready.
+    pub fn release(&self, speech: Arc<dyn SpeechSink>) {
+        self.pipeline.release(speech);
+    }
+
+    /// Wait for the last sentence. The whole reply's audio, for the replay
+    /// button, with how many sentences the window was handed; `None` when
+    /// Piper broke off partway, and the reply has to be said again whole.
+    pub fn finish(self) -> Option<SynthesizedAudio> {
+        let streamed = self.pipeline.finish();
+        if let Some(first_ready_ms) = streamed.first_ready_ms {
+            eprintln!(
+                "[LATENCY]     tts> first sentence was ready {first_ready_ms:.1}ms into the generation ({} segments)",
+                streamed.segments
+            );
+        }
+        let (audio, played) = streamed.resolve(&self.text);
+        audio.map(|audio| SynthesizedAudio {
+            segments: played,
+            ..audio
+        })
     }
 }
 
@@ -873,12 +1343,24 @@ fn focus_brief(learner_name: &str, focus: Option<&Focus>) -> String {
     )
 }
 
-fn ella_system_prompt(learner_name: &str, topic_id: &str, topic_label: &str, pitch: &Pitch) -> String {
+/// A free conversation's instructions for its topic: everything but the
+/// skill the talk aims at. The aim changes from one talk to the next, so it
+/// comes last, after this: then every talk on the topic, at the learner's
+/// level, starts with these same words, which llama.cpp keeps on disk between
+/// talks and between launches, and a talk on a topic done before only has to
+/// evaluate its aim when it opens. See `LocalEngine::warm_prompt_cache`.
+///
+/// Everything else is in the order it has always been, and was measured in:
+/// the guardrail stays after the scene. Moving the rules and the guardrail
+/// ahead of the scene, so that every topic could share them, had Ella accept
+/// a hug in four of twelve replies where she had accepted none.
+fn ella_topic_prompt(learner_name: &str, topic_id: &str, topic_label: &str, level: &str) -> String {
     let scene = scene_for(topic_id);
     format!(
         "You are Ella, a warm speaking buddy for an Indian learner named {learner_name}, \
-         who is practising English at about {level} level. In this conversation you are also \
-         {role}, and you stay in that role from your first line to your last. {owns} \
+         who is practising English at about {level} level. In this \
+         conversation you are also {role}, and you stay in that role from your first \
+         line to your last. {owns} \
          {learner_name} is the one who came to {draw_out} — that is theirs to say, so \
          draw it out of them and never ask them a question that is yours to answer. \
          Keep the conversation on {topic_label}: if they wander off it or dodge your \
@@ -895,7 +1377,7 @@ fn ella_system_prompt(learner_name: &str, topic_id: &str, topic_label: &str, pit
          plainly, that you can only help with {topic_label} here, then ask that exact \
          same question again. That is not the same as an ordinary, on-topic way of \
          asking your question — decline only what is genuinely unrelated, never an \
-         on-topic request just because it is phrased unusually.{focus}\n\n\
+         on-topic request just because it is phrased unusually.\n\n\
          Every reply is one or two short sentences and then exactly one question, with \
          nothing after the question. Say it the way a person says it out loud, in whole \
          sentences — never a bare word, a bare number, or a fragment on its own. Use \
@@ -933,11 +1415,17 @@ fn ella_system_prompt(learner_name: &str, topic_id: &str, topic_label: &str, pit
          \"you're hot\"). Treat a new way of saying one of these the same as the \
          examples themselves — the exact words are never the point, what they are \
          asking for or saying to you is.",
-        level = pitch.level,
-        focus = focus_brief(learner_name, pitch.focus.as_ref()),
         role = scene.role,
         owns = scene.owns,
         draw_out = scene.draw_out,
+    )
+}
+
+fn ella_system_prompt(learner_name: &str, topic_id: &str, topic_label: &str, pitch: &Pitch) -> String {
+    format!(
+        "{}{}",
+        ella_topic_prompt(learner_name, topic_id, topic_label, &pitch.level),
+        focus_brief(learner_name, pitch.focus.as_ref()),
     )
 }
 
@@ -2025,11 +2513,12 @@ pub trait TutorEngine: Send + Sync {
     /// Generate one reply.
     ///
     /// Its sentences are synthesized while the rest is still being written, so
-    /// Piper's time overlaps the model's instead of following it — but none of
-    /// it reaches the learner until the whole reply is ready. Releasing
-    /// sentence by sentence got Ella talking sooner and was not worth it: the
-    /// text arrived in pieces, which meant it could not be centred without
-    /// jumping as each piece landed.
+    /// Piper's time overlaps the model's instead of following it, and held in
+    /// `pending` until the caller has saved the turn. None of it reaches the
+    /// learner before the whole text is settled. Releasing sentence by
+    /// sentence as they were written got Ella talking sooner and was not worth
+    /// it: the text arrived in pieces, which meant it could not be centred
+    /// without jumping as each piece landed.
     fn reply(&self, request: &TutorRequest) -> EllaResult<GeneratedReply>;
 
     /// The character's first line, in role. The default is an authored opener,
@@ -2191,6 +2680,248 @@ impl TutorEngine for DemoEngine {
     }
 }
 
+/// How many saved slots are kept: the topics talked about most recently, at
+/// the learner's level. Each is 35-45 MB.
+const SAVED_SLOTS_KEPT: usize = 4;
+
+/// Slots llama-server has saved to disk: a topic's instructions, evaluated
+/// once and kept, so that the next talk on it, even after a restart, only
+/// evaluates the skill it aims at.
+///
+/// On a laptop's CPU a talk's whole instructions take 10-25 seconds to
+/// evaluate, and the talk's first reply waits for them. A restore reads a
+/// file instead.
+struct SlotStore {
+    dir: PathBuf,
+    /// Which model and which build of the server the slots belong to, asked
+    /// of the server on first use. A slot saved by another model or build is
+    /// not this one's to restore, so it is part of every file's name.
+    identity: OnceLock<Option<String>>,
+    /// Set once the server has refused to save a slot: it was started without
+    /// anywhere to keep them, and asking again every talk would not help.
+    refused: AtomicBool,
+}
+
+impl SlotStore {
+    fn new(dir: PathBuf) -> Self {
+        Self {
+            dir,
+            identity: OnceLock::new(),
+            refused: AtomicBool::new(false),
+        }
+    }
+
+    fn identity(&self, client: &Client, root: &str) -> Option<&str> {
+        self.identity
+            .get_or_init(|| {
+                let props: Value = client
+                    .get(format!("{root}/props"))
+                    .timeout(Duration::from_secs(5))
+                    .send()
+                    .ok()?
+                    .error_for_status()
+                    .ok()?
+                    .json()
+                    .ok()?;
+                let model = props["model_path"].as_str()?;
+                // The path alone is not enough: a model update writes the new
+                // weights to the same file.
+                let file = fs::metadata(model).ok()?;
+                let modified = file.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs();
+                Some(format!(
+                    "{}|{model}|{}|{modified}|{}",
+                    props["build_info"].as_str().unwrap_or("unknown build"),
+                    file.len(),
+                    props["default_generation_settings"]["n_ctx"],
+                ))
+            })
+            .as_deref()
+    }
+
+    fn file_name(identity: &str, kind: &str, prompt: &str) -> String {
+        let digest = Sha256::new()
+            .chain_update(identity)
+            .chain_update([0])
+            .chain_update(prompt)
+            .finalize();
+        let hex: String = digest[..8].iter().map(|byte| format!("{byte:02x}")).collect();
+        format!("ella-{kind}-{hex}.bin")
+    }
+
+    /// Put `prefixes`, each the start of the next, at the head of the slot
+    /// before a talk's warm-up evaluates the rest of its prompt: the longest
+    /// one already saved is restored, and each longer one is evaluated from
+    /// there and saved for next time.
+    fn prime(&self, client: &Client, root: &str, slot: i32, prefixes: &[(&str, String)]) {
+        if prefixes.is_empty() || self.refused.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(identity) = self.identity(client, root) else {
+            eprintln!("[LATENCY]     llm> no saved slots: the server did not say which model it runs");
+            return;
+        };
+        let names: Vec<String> = prefixes
+            .iter()
+            .map(|(kind, prompt)| Self::file_name(identity, kind, prompt))
+            .collect();
+        let mut from = 0;
+        for index in (0..prefixes.len()).rev() {
+            let path = self.dir.join(&names[index]);
+            if !path.is_file() {
+                continue;
+            }
+            let started = Instant::now();
+            match slot_action(client, root, slot, "restore", &names[index]) {
+                Ok(body) => {
+                    eprintln!(
+                        "[LATENCY]     llm> restored {} ({} tokens) in {:.0}ms",
+                        names[index],
+                        body["n_restored"],
+                        started.elapsed().as_secs_f64() * 1_000.0
+                    );
+                    touch(&path);
+                    from = index + 1;
+                    break;
+                }
+                Err(error) => {
+                    // Most likely saved by a server that could not agree on
+                    // its layout. Evaluated again below, and saved afresh.
+                    eprintln!("[LATENCY]     llm> could not restore {}: {error}", names[index]);
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+        for index in from..prefixes.len() {
+            let started = Instant::now();
+            let evaluated = client
+                .post(format!("{root}/v1/chat/completions"))
+                .json(&json!({
+                    "model": "local",
+                    "messages": [{"role": "system", "content": prefixes[index].1}],
+                    "max_tokens": 1,
+                    "stream": false,
+                    "cache_prompt": true,
+                    "id_slot": slot,
+                }))
+                .send()
+                .and_then(|response| response.error_for_status())
+                .and_then(|response| response.json::<Value>());
+            let evaluated = match evaluated {
+                Ok(body) => body["timings"]["prompt_n"].clone(),
+                Err(error) => {
+                    eprintln!("[LATENCY]     llm> could not evaluate the start of the prompt: {error}");
+                    return;
+                }
+            };
+            match slot_action(client, root, slot, "save", &names[index]) {
+                Ok(body) => eprintln!(
+                    "[LATENCY]     llm> evaluated {evaluated} tokens and saved {} ({} tokens) in {:.0}ms",
+                    names[index],
+                    body["n_saved"],
+                    started.elapsed().as_secs_f64() * 1_000.0
+                ),
+                Err(error) => {
+                    eprintln!(
+                        "[LATENCY]     llm> the server saves no slots, so every talk evaluates its whole prompt: {error}"
+                    );
+                    self.refused.store(true, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
+        self.prune(&names);
+    }
+
+    /// Keeps the files just used, and the most recently used of the others,
+    /// up to `SAVED_SLOTS_KEPT` in all.
+    fn prune(&self, current: &[String]) {
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return;
+        };
+        let mut others: Vec<(SystemTime, PathBuf)> = entries
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.starts_with("ella-") && name.ends_with(".bin") && !current.contains(&name)
+            })
+            .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+            .collect();
+        others.sort_by(|left, right| right.0.cmp(&left.0));
+        for (_, path) in others
+            .into_iter()
+            .skip(SAVED_SLOTS_KEPT.saturating_sub(current.len()))
+        {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// How many talk warm-ups are still priming and warming the slot. A reply
+/// waits for them here rather than slip in between their requests: the server
+/// would take it next, and a slot saved after it would hold the conversation
+/// as well as the topic's words. It would wait behind them in the server's
+/// queue anyway, so waiting here costs it nothing.
+#[derive(Default)]
+struct WarmUps {
+    running: Mutex<usize>,
+    finished: Condvar,
+}
+
+impl WarmUps {
+    fn begin(self: &Arc<Self>) -> WarmUpRunning {
+        *self.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
+        WarmUpRunning(Arc::clone(self))
+    }
+
+    fn wait(&self) {
+        let mut running = self.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while *running > 0 {
+            running = self
+                .finished
+                .wait(running)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+}
+
+/// One warm-up in progress; finished when dropped, however its thread ends.
+struct WarmUpRunning(Arc<WarmUps>);
+
+impl Drop for WarmUpRunning {
+    fn drop(&mut self) {
+        let mut running = self.0.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *running = running.saturating_sub(1);
+        self.0.finished.notify_all();
+    }
+}
+
+/// `POST /slots/{slot}?action=save|restore` for one file in the server's
+/// slot directory.
+fn slot_action(client: &Client, root: &str, slot: i32, action: &str, filename: &str) -> Result<Value, String> {
+    let response = client
+        .post(format!("{root}/slots/{slot}?action={action}"))
+        .json(&json!({ "filename": filename }))
+        .send()
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    let body = response.json::<Value>().unwrap_or(Value::Null);
+    if status.is_success() {
+        Ok(body)
+    } else {
+        Err(format!(
+            "{status} {}",
+            body["error"]["message"].as_str().unwrap_or_default()
+        ))
+    }
+}
+
+/// Marks a saved slot as just used, which is what pruning keeps.
+fn touch(path: &Path) {
+    if let Ok(file) = fs::File::options().write(true).open(path) {
+        let _ = file.set_modified(SystemTime::now());
+    }
+}
+
 pub struct LocalEngine {
     client: Client,
     llm_base_url: String,
@@ -2206,6 +2937,10 @@ pub struct LocalEngine {
     /// Why the server this build should have started did not, in its own
     /// words, for the setup screen's "Try again" to show beside the button.
     llama_error: Option<String>,
+    /// Where the start of each free talk's instructions is kept between
+    /// talks. `None` without anywhere the server saves slots.
+    slots: Option<Arc<SlotStore>>,
+    warm_ups: Arc<WarmUps>,
 }
 
 impl LocalEngine {
@@ -2251,9 +2986,8 @@ impl LocalEngine {
             .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
             .unwrap_or(true);
         let piper_daemon = daemon_enabled
-            .then(|| piper_python_interpreter(&piper_binary))
-            .flatten()
-            .map(|python| PiperDaemon::new(python, piper_voice.clone()));
+            .then(|| resident_piper(&piper_binary, &piper_voice))
+            .flatten();
         if let Some(daemon) = &piper_daemon {
             daemon.warm();
         }
@@ -2263,11 +2997,11 @@ impl LocalEngine {
         // second one against the same model.
         let (llama, llm_base_url, llama_error) = match env::var("ELLA_LLM_BASE_URL") {
             Ok(configured) => (None, configured, None),
-            Err(_) => match LlamaServer::start(
-                &engine_root,
-                &models_root,
-                env_i32("ELLA_LLAMA_THREADS", default_llama_threads()),
-            ) {
+            Err(_) => match LlamaServer::start(&engine_root, &models_root, {
+                let threads = env_i32("ELLA_LLAMA_THREADS", default_llama_threads());
+                eprintln!("[engines] llama-server gets {threads} threads");
+                threads
+            }) {
                 Ok(server) => {
                     let url = server.base_url().to_string();
                     (Some(server), url, None)
@@ -2282,6 +3016,14 @@ impl LocalEngine {
             },
         };
 
+        // The server Ella started keeps its slots beside the weights. Someone
+        // else's says where it keeps them through ELLA_LLM_SLOT_DIR, which
+        // has to match the --slot-save-path it was started with.
+        let slot_dir = llama
+            .as_ref()
+            .and_then(|server| server.slot_dir().map(Path::to_path_buf))
+            .or_else(|| env::var_os("ELLA_LLM_SLOT_DIR").map(PathBuf::from));
+
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(120))
@@ -2295,6 +3037,8 @@ impl LocalEngine {
             piper_daemon,
             _llama: llama,
             llama_error,
+            slots: slot_dir.map(|dir| Arc::new(SlotStore::new(dir))),
+            warm_ups: Arc::default(),
         }
     }
 
@@ -2375,13 +3119,14 @@ impl TutorEngine for LocalEngine {
         self.warm_prompt_cache(
             ella_system_prompt(learner_name, &topic.id, &topic.label, pitch),
             text.clone(),
+            vec![("topic", ella_topic_prompt(learner_name, &topic.id, &topic.label, &pitch.level))],
         );
         Ok(text)
     }
 
     fn placement_opening(&self, learner_name: &str, age: Option<u8>) -> EllaResult<String> {
         let text = placement_opening_line(learner_name);
-        self.warm_prompt_cache(placement_system_prompt(learner_name, age), text.clone());
+        self.warm_prompt_cache(placement_system_prompt(learner_name, age), text.clone(), Vec::new());
         Ok(text)
     }
 
@@ -2474,7 +3219,7 @@ impl TutorEngine for LocalEngine {
         let text = chore_opening_for(&context.chore_id)
             .map(str::to_owned)
             .unwrap_or_else(|| fallback_opening(context));
-        self.warm_prompt_cache(chore_system_prompt(learner_name, context), text.clone());
+        self.warm_prompt_cache(chore_system_prompt(learner_name, context), text.clone(), Vec::new());
         Ok(text)
     }
 
@@ -2506,28 +3251,28 @@ impl TutorEngine for LocalEngine {
         }
 
         // Sentences are synthesized as the model writes them but held back:
-        // Piper's time overlaps the model's, and the learner still gets the
-        // whole reply at once. Nothing streams, so a ledger turn that has to be
-        // generated again is no different from any other here.
+        // Piper's time overlaps the model's, and none of it is heard until the
+        // reply is settled and the caller has saved the turn. Then the
+        // sentences already synthesized are released at once and the rest as
+        // they are ready, so the text and the voice still arrive together,
+        // and a ledger turn that has to be generated again is no different
+        // from any other here.
         //
-        // Needs the resident Piper; one-shot Piper reloads the voice per call,
+        // Needs a resident Piper; one-shot Piper loads the voice per call,
         // which would cost more per sentence than the overlap saves.
         let generation_started = Instant::now();
-        let mut pipeline = self.piper_daemon.as_ref().map(|daemon| {
-            SpeechPipeline::start(Arc::clone(daemon), None, generation_started)
-        });
+        let mut pipeline = self
+            .piper_daemon
+            .as_ref()
+            .filter(|daemon| daemon.usable())
+            .map(|daemon| SpeechPipeline::start(Arc::clone(daemon), None, generation_started));
 
         let first = self.stream_once(&system, &history, None, pipeline.as_mut())?;
-        // Only the first generation feeds the speaker; a regenerated reply
-        // synthesizes from scratch below.
-        let streamed = pipeline.take().map(SpeechPipeline::finish);
-        if let Some(speech) = streamed.as_ref() {
-            if let Some(first_ready_ms) = speech.first_ready_ms {
-                eprintln!(
-                    "[LATENCY]     tts> first sentence audible {:.1}ms into a {:.1}ms generation ({} segments)",
-                    first_ready_ms, first.completion_ms, speech.segments
-                );
-            }
+        // Only the first generation feeds the speaker; a regenerated reply is
+        // said from scratch by the caller. Whatever is still being synthesized
+        // carries on while the reply is checked.
+        if let Some(pipeline) = pipeline.as_mut() {
+            pipeline.close();
         }
         let (mut text, signal) = take_signal(&first.text);
         if request.placement.as_ref().is_some_and(|brief| brief.closing) {
@@ -2553,6 +3298,10 @@ impl TutorEngine for LocalEngine {
                      words. Take what they just said, say something back about it, and ask about \
                      one new thing they have not told you yet."
                 );
+                // Piper stops reading the first attempt rather than compete with
+                // the model's second one. In the rare case that the second
+                // comes back empty, the caller says the first one itself.
+                drop(pipeline.take());
                 let second = self.stream_once(&system, &history, Some(&corrective), None)?;
                 let (retry_text, _) = take_signal(&second.text);
                 // Once only. A second repeat is left alone: another generation
@@ -2565,19 +3314,18 @@ impl TutorEngine for LocalEngine {
                         named_figure: None,
                         signal: None,
                         regenerated: true,
-                        speech: None,
+                        pending: None,
                     });
                 }
             }
-            let (speech, _) = streamed.map_or((None, 0), |speech| speech.resolve(&text));
             return Ok(GeneratedReply {
+                pending: PendingSpeech::matching(pipeline, &text),
                 text,
                 ttft_ms: first.ttft_ms,
                 completion_ms: first.completion_ms,
                 named_figure: None,
                 signal,
                 regenerated: false,
-                speech,
             });
         };
 
@@ -2593,10 +3341,9 @@ impl TutorEngine for LocalEngine {
             let final_text = voiced(text, signal, &ledger.spec);
             // The figure held, so the audio synthesized ahead is the audio for
             // the reply being returned — unless `voiced` substituted the
-            // authored line for a wordless turn, which `resolve` catches.
-            let (speech, _) = streamed.map_or((None, 0), |speech| speech.resolve(&final_text));
+            // authored line for a wordless turn, which `matching` catches.
             return Ok(GeneratedReply {
-                speech,
+                pending: PendingSpeech::matching(pipeline, &final_text),
                 text: final_text,
                 named_figure: figure,
                 signal,
@@ -2605,7 +3352,7 @@ impl TutorEngine for LocalEngine {
                 completion_ms: first.completion_ms,
             });
         }
-        drop(streamed);
+        drop(pipeline);
 
         // The character named a figure past its own limit, or conceded more in
         // one move than the chore allows. Regenerating costs one extra
@@ -2647,7 +3394,7 @@ impl TutorEngine for LocalEngine {
                 regenerated: true,
                 ttft_ms: first.ttft_ms,
                 completion_ms: first.completion_ms + second.completion_ms,
-                speech: None,
+                pending: None,
             });
         }
 
@@ -2662,7 +3409,7 @@ impl TutorEngine for LocalEngine {
             regenerated: true,
             ttft_ms: first.ttft_ms,
             completion_ms: first.completion_ms + second.completion_ms,
-            speech: None,
+            pending: None,
         })
     }
     fn uses_native_stt(&self) -> bool {
@@ -2693,7 +3440,7 @@ impl TutorEngine for LocalEngine {
                 segments: 0,
             });
         }
-        if let Some(daemon) = &self.piper_daemon {
+        if let Some(daemon) = self.piper_daemon.as_ref().filter(|daemon| daemon.usable()) {
             eprintln!(
                 "[LATENCY]     tts> asking resident Piper for {} chars of text",
                 text.chars().count()
@@ -2739,7 +3486,7 @@ impl LocalEngine {
         text: &str,
         speech: Option<Arc<dyn SpeechSink>>,
     ) -> EllaResult<SynthesizedAudio> {
-        let Some(daemon) = self.piper_daemon.as_ref() else {
+        let Some(daemon) = self.piper_daemon.as_ref().filter(|daemon| daemon.usable()) else {
             return self.synthesize(text);
         };
         let mut pipeline = SpeechPipeline::start(Arc::clone(daemon), speech, Instant::now());
@@ -2760,15 +3507,32 @@ impl LocalEngine {
     /// Fire-and-forget llama.cpp prompt-cache warmup with this session's stable
     /// prefix, so turn 1 does not pay full prompt evaluation. Both kinds of
     /// session open on an authored line, so both can do this off the clock.
-    fn warm_prompt_cache(&self, system: String, opening: String) {
+    ///
+    /// `prefixes` are starts of `system` that other talks share, shortest
+    /// first. Whichever are saved are restored before the warm-up, so it
+    /// evaluates only what follows them: see `SlotStore`.
+    fn warm_prompt_cache(&self, system: String, opening: String, prefixes: Vec<(&'static str, String)>) {
         let client = self.client.clone();
         let url = format!(
             "{}/chat/completions",
             self.llm_base_url.trim_end_matches('/')
         );
+        let root = self
+            .llm_base_url
+            .trim_end_matches('/')
+            .trim_end_matches("/v1")
+            .to_owned();
         let slot = self.llm_slot;
+        let slots = self.slots.clone();
+        // Counted before the thread starts, so a reply sent the moment the
+        // talk opens still finds it running.
+        let running = self.warm_ups.begin();
         thread::spawn(move || {
+            let _running = running;
             let started = Instant::now();
+            if let Some(slots) = &slots {
+                slots.prime(&client, &root, slot, &prefixes);
+            }
             // This request, not the first turn, is the one that swaps the slot
             // from the previous session's prompt to this one's. Whatever it
             // reuses is what survived the switch, so its counts are the ones
@@ -2945,6 +3709,13 @@ impl LocalEngine {
             eprintln!("[PROMPT] ─── end of chained prompt ───");
         }
         let started = Instant::now();
+        // Counted in the time to the first token, as it was when the reply
+        // queued behind the warm-up in the server instead.
+        self.warm_ups.wait();
+        let waited_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        if waited_ms >= 1.0 {
+            eprintln!("[LATENCY]     llm> waited {waited_ms:.0}ms for the talk's warm-up");
+        }
         let response = self
             .client
             .post(format!(
@@ -3201,14 +3972,61 @@ fn resolve_models_root(engine_root: &Path, packaged_models_root: Option<PathBuf>
     packaged_models_root.unwrap_or_else(|| engine_root.join("models"))
 }
 
-/// How many threads llama.cpp gets when nothing says otherwise: everything but
-/// two cores, which leaves room for Piper and Canary to run alongside it
-/// mid-turn. The tooling notes settle on the same rule.
+/// How many threads llama.cpp gets when nothing says otherwise: one per
+/// physical performance core, which is also what llama.cpp would pick itself.
+///
+/// It used to be every logical core but two. On a four-core laptop with
+/// hyper-threading that is six threads on four cores, and on an M1 Pro running
+/// on its CPU, spreading from the six performance cores onto the two
+/// efficiency cores cut decode from 47 to 34 tokens a second. Decode waits on
+/// memory, not arithmetic, so the extra threads only get in each other's way,
+/// and in Piper's, which synthesizes on whatever is left while the model
+/// writes. Without hyper-threading nothing is left, so one core is kept back.
 fn default_llama_threads() -> i32 {
-    let cores = thread::available_parallelism()
-        .map(|count| count.get() as i32)
+    let logical = thread::available_parallelism()
+        .map(|count| count.get())
         .unwrap_or(4);
-    (cores - 2).max(2)
+    llama_threads_for(performance_cores().unwrap_or(logical), logical) as i32
+}
+
+fn llama_threads_for(performance: usize, logical: usize) -> usize {
+    let performance = performance.clamp(1, logical.max(1));
+    if performance == logical && performance >= 4 {
+        performance - 1
+    } else {
+        performance
+    }
+}
+
+/// Physical cores that run at full speed: the performance cluster on Apple
+/// silicon, every physical core on an Intel Mac.
+#[cfg(target_os = "macos")]
+fn performance_cores() -> Option<usize> {
+    fn sysctl(name: &str) -> Option<usize> {
+        let name = std::ffi::CString::new(name).ok()?;
+        let mut value: libc::c_int = 0;
+        let mut size = std::mem::size_of::<libc::c_int>();
+        // SAFETY: `value` and `size` describe one writable c_int, which is
+        // what both of the names asked for hold.
+        let status = unsafe {
+            libc::sysctlbyname(
+                name.as_ptr(),
+                (&mut value as *mut libc::c_int).cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        (status == 0 && value > 0).then_some(value as usize)
+    }
+    sysctl("hw.perflevel0.physicalcpu").or_else(|| sysctl("hw.physicalcpu"))
+}
+
+/// Every physical core. A hybrid Intel chip counts its efficiency cores too,
+/// as llama.cpp's own default does on Windows.
+#[cfg(not(target_os = "macos"))]
+fn performance_cores() -> Option<usize> {
+    Some(num_cpus::get_physical()).filter(|cores| *cores > 0)
 }
 
 fn resolve_engine_root(packaged_engine_root: Option<PathBuf>) -> PathBuf {
@@ -3238,8 +4056,21 @@ fn default_piper_binary(engine_root: &Path) -> PathBuf {
     }
 }
 
-/// The resident daemon needs the Piper venv's Python. Returns None for the
-/// standalone C++ piper binary, which keeps the one-shot path.
+/// The Piper this install can keep running between lines: Ella's daemon
+/// script when Piper came with its own Python (the macOS bundle, a development
+/// venv), and otherwise the standalone binary itself (the Windows bundle),
+/// which stays up for as long as it is fed JSON lines.
+fn resident_piper(piper_binary: &Path, voice: &Path) -> Option<Arc<PiperDaemon>> {
+    if let Some(python) = piper_python_interpreter(piper_binary) {
+        return Some(PiperDaemon::script(python, voice.to_path_buf()));
+    }
+    piper_binary
+        .is_file()
+        .then(|| PiperDaemon::binary(piper_binary.to_path_buf(), voice.to_path_buf()))
+}
+
+/// The Python beside a venv's `piper`, which runs Ella's daemon script. None
+/// for the standalone C++ binary, which runs resident on its own.
 fn piper_python_interpreter(piper_binary: &Path) -> Option<PathBuf> {
     let bin_dir = piper_binary.parent()?;
     for name in ["python3", "python"] {
@@ -3325,6 +4156,106 @@ fn opening_for(topic_id: &str, learner_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn llama_gets_a_thread_per_performance_core() {
+        assert_eq!(llama_threads_for(4, 8), 4, "a hyper-threaded quad core");
+        assert_eq!(llama_threads_for(2, 4), 2, "a hyper-threaded dual core");
+        assert_eq!(llama_threads_for(6, 8), 6, "an M1 Pro's performance cores");
+        assert_eq!(llama_threads_for(10, 12), 10, "a hybrid Intel chip");
+        assert_eq!(llama_threads_for(4, 4), 3, "one core kept for Piper without hyper-threading");
+        assert_eq!(llama_threads_for(2, 2), 2);
+        assert_eq!(llama_threads_for(0, 8), 1);
+        assert!(default_llama_threads() >= 1);
+    }
+
+    /// What a talk's warm-up restores has to be the start of what its turns
+    /// send, token for token: every talk on the topic at that level shares it,
+    /// and only the aim comes after it.
+    #[test]
+    fn a_free_talk_prompt_ends_on_its_aim_after_what_the_topic_shares() {
+        let focus = Focus {
+            step_title: "Talking about the past".into(),
+            step_focus: "Starting to use past tense to share what happened.".into(),
+            skill: "I can use past simple with regular verbs.".into(),
+        };
+        for topic in crate::domain::topics() {
+            let own = ella_topic_prompt("Asha", &topic.id, &topic.label, "B1");
+            let aimed = ella_system_prompt(
+                "Asha",
+                &topic.id,
+                &topic.label,
+                &Pitch { level: "B1".into(), focus: Some(focus.clone()) },
+            );
+            let plain = ella_system_prompt("Asha", &topic.id, &topic.label, &Pitch::at("B1"));
+            assert_eq!(plain, own, "{}: without an aim the prompt is the topic's", topic.id);
+            let aim = aimed.strip_prefix(&own).expect("the topic's words come first");
+            assert!(aim.starts_with("\n\nAsha is on the step"), "{}: {aim}", topic.id);
+            assert!(own.ends_with("what they are asking for or saying to you is."), "the guardrail stays last");
+        }
+    }
+
+    #[test]
+    fn a_reply_waits_for_the_warm_up_of_its_talk_and_only_for_that() {
+        let warm_ups = Arc::new(WarmUps::default());
+        let started = Instant::now();
+        warm_ups.wait();
+        assert!(started.elapsed() < Duration::from_millis(50), "nothing running, nothing to wait for");
+
+        let running = warm_ups.begin();
+        let finisher = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            drop(running);
+        });
+        let started = Instant::now();
+        warm_ups.wait();
+        assert!(started.elapsed() >= Duration::from_millis(150), "waited for the warm-up");
+        finisher.join().unwrap();
+    }
+
+    #[test]
+    fn a_saved_slot_is_named_for_its_model_its_build_and_its_prompt() {
+        let name = SlotStore::file_name("b1|model.gguf|2104932768|1759126000|4096", "talk", "You are Ella.");
+        assert!(name.starts_with("ella-talk-") && name.ends_with(".bin"), "{name}");
+        assert_eq!(name, SlotStore::file_name("b1|model.gguf|2104932768|1759126000|4096", "talk", "You are Ella."));
+        for other in [
+            SlotStore::file_name("b2|model.gguf|2104932768|1759126000|4096", "talk", "You are Ella."),
+            SlotStore::file_name("b1|model.gguf|2104932768|1759999999|4096", "talk", "You are Ella."),
+            SlotStore::file_name("b1|model.gguf|2104932768|1759126000|4096", "talk", "You are Ella!"),
+        ] {
+            assert_ne!(name, other);
+        }
+    }
+
+    #[test]
+    fn saved_slots_keep_what_was_just_used_and_the_newest_of_the_rest() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SlotStore::new(root.path().to_path_buf());
+        let now = SystemTime::now();
+        for (age, name) in [
+            (50, "ella-topic-a.bin"),
+            (40, "ella-topic-b.bin"),
+            (30, "ella-topic-c.bin"),
+            (20, "ella-topic-d.bin"),
+            (90, "ella-talk-x.bin"),
+        ] {
+            let path = root.path().join(name);
+            fs::write(&path, b"slot").unwrap();
+            let file = fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(now - Duration::from_secs(age)).unwrap();
+        }
+        fs::write(root.path().join("not-a-slot.txt"), b"keep").unwrap();
+        store.prune(&["ella-talk-x.bin".into(), "ella-topic-a.bin".into()]);
+        let mut left: Vec<String> = fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            ["ella-talk-x.bin", "ella-topic-a.bin", "ella-topic-c.bin", "ella-topic-d.bin", "not-a-slot.txt"]
+        );
+    }
 
     #[test]
     fn demo_reply_is_short_and_asks_a_question() {
@@ -4470,6 +5401,207 @@ mod speech_stream_tests {
         assert!(daemon_alignment(&json!({ "ok": true }), 1_024).is_empty(), "an untimed voice");
     }
 
+    #[test]
+    fn a_wav_is_read_only_once_it_is_as_long_as_its_header_says() {
+        let pcm: Vec<u8> = (0..400_i16).flat_map(i16::to_le_bytes).collect();
+        let wav = raw_pcm_to_wav(&pcm, 22_050, 1);
+        assert_eq!(wav_pcm(&wav), Ok(Some((pcm.clone(), 22_050))));
+        for cut in [0, 11, 20, 43, 44, wav.len() - 1] {
+            assert_eq!(wav_pcm(&wav[..cut]), Ok(None), "cut at {cut} bytes");
+        }
+        assert!(wav_pcm(b"RIFX\0\0\0\0WAVEfmt ").is_err());
+        assert!(wav_pcm(&raw_pcm_to_wav(&pcm, 22_050, 2)).is_err(), "Piper's voices are mono");
+    }
+
+    /// `piper.exe --json-input`, as far as Ella can see it: a JSON line in,
+    /// the WAV it names written relative to the working directory, and the
+    /// name printed back. Printed here before the tail is written, which is
+    /// how the real one can be caught, since it names the file before it
+    /// closes it. Every sentence it says is the same `pcm`, and each start of
+    /// the process adds a line to `starts`.
+    #[cfg(unix)]
+    struct FakePiper {
+        piper: PathBuf,
+        voice: PathBuf,
+        pcm: Vec<u8>,
+        starts: PathBuf,
+    }
+
+    #[cfg(unix)]
+    fn fake_piper(root: &Path) -> FakePiper {
+        use std::os::unix::fs::PermissionsExt;
+        let pcm: Vec<u8> = (0..2_000_i16).flat_map(i16::to_le_bytes).collect();
+        let sentence = root.join("sentence.wav");
+        fs::write(&sentence, raw_pcm_to_wav(&pcm, 22_050, 1)).unwrap();
+        let starts = root.join("starts");
+        let piper = root.join("piper");
+        fs::write(
+            &piper,
+            format!(
+                "#!/bin/sh\n\
+                 echo started >> '{starts}'\n\
+                 while IFS= read -r line; do\n\
+                 name=$(printf '%s' \"$line\" | sed -n 's/.*\"output_file\":\"\\([^\"]*\\)\".*/\\1/p')\n\
+                 head -c 1000 '{sentence}' > \"$name\"\n\
+                 echo \"$name\"\n\
+                 sleep 0.05\n\
+                 tail -c +1001 '{sentence}' >> \"$name\"\n\
+                 done\n",
+                starts = starts.display(),
+                sentence = sentence.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&piper, fs::Permissions::from_mode(0o755)).unwrap();
+        let voice = root.join("voice.onnx");
+        fs::write(&voice, b"").unwrap();
+        FakePiper { piper, voice, pcm, starts }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_standalone_piper_stays_up_and_answers_each_line_with_its_own_wav() {
+        let root = tempfile::tempdir().unwrap();
+        let fake = fake_piper(root.path());
+        let daemon = PiperDaemon::binary(fake.piper.clone(), fake.voice.clone());
+        for text in ["Hello there.", "What did you eat today?"] {
+            let speech = daemon.synthesize(text).unwrap();
+            assert_eq!(speech.pcm, fake.pcm, "{text}");
+            assert_eq!(speech.sample_rate, 22_050);
+            assert!(speech.alignment.is_empty(), "the binary times no sounds");
+        }
+        assert_eq!(
+            fs::read_to_string(&fake.starts).unwrap().lines().count(),
+            1,
+            "one process said both lines"
+        );
+        let prefix = format!("ella-piper-{}-", std::process::id());
+        let left: Vec<_> = fs::read_dir(env::temp_dir())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            .collect();
+        assert!(left.is_empty(), "every WAV is removed once read: {left:?}");
+    }
+
+    #[derive(Default)]
+    struct Heard(Mutex<Vec<SpeechSegment>>);
+
+    impl SpeechSink for Heard {
+        fn segment(&self, segment: SpeechSegment) {
+            self.0.lock().unwrap().push(segment);
+        }
+    }
+
+    const REPLY: &str = "That sounds fun. What did you eat there?";
+
+    /// Held while it is written and checked, then released: every sentence
+    /// ready by then goes at once, the rest as each is ready, all in order.
+    #[cfg(unix)]
+    #[test]
+    fn a_held_reply_is_heard_whole_and_in_order_once_released() {
+        for wait_before_release in [Duration::from_millis(600), Duration::ZERO] {
+            let root = tempfile::tempdir().unwrap();
+            let fake = fake_piper(root.path());
+            let mut pipeline =
+                SpeechPipeline::start(PiperDaemon::binary(fake.piper, fake.voice), None, Instant::now());
+            pipeline.push("That sounds fun. What did you ");
+            pipeline.push("eat there?");
+            pipeline.close();
+            assert_eq!(pipeline.queued(), REPLY);
+            thread::sleep(wait_before_release);
+
+            let pending = PendingSpeech::matching(Some(pipeline), REPLY).expect("the words match");
+            let heard = Arc::new(Heard::default());
+            pending.release(heard.clone());
+            let audio = pending.finish().expect("the whole reply, for the replay");
+            assert_eq!(audio.segments, 2, "the window has all of it");
+            assert_eq!(audio.words.len(), 8);
+            let heard = heard.0.lock().unwrap();
+            assert_eq!(
+                heard.iter().map(|segment| (segment.index, segment.text.as_str())).collect::<Vec<_>>(),
+                vec![(0, "That sounds fun."), (1, "What did you eat there?")],
+                "released {wait_before_release:?} after the reply was written"
+            );
+        }
+    }
+
+    /// Never released, because nothing was listening: the window gets the
+    /// recording, and is told nothing has played.
+    #[cfg(unix)]
+    #[test]
+    fn a_reply_nobody_released_comes_back_as_one_recording() {
+        let root = tempfile::tempdir().unwrap();
+        let fake = fake_piper(root.path());
+        let mut pipeline =
+            SpeechPipeline::start(PiperDaemon::binary(fake.piper, fake.voice), None, Instant::now());
+        pipeline.push(REPLY);
+        pipeline.close();
+        let audio = PendingSpeech::matching(Some(pipeline), REPLY).unwrap().finish().unwrap();
+        assert_eq!(audio.segments, 0);
+        assert!(audio.audio.is_some());
+    }
+
+    #[test]
+    fn audio_synthesized_ahead_is_kept_only_for_the_words_it_read() {
+        let missing = env::temp_dir().join("ella-no-such-piper").join("piper");
+        let written = |text: &str| {
+            let daemon = PiperDaemon::binary(missing.clone(), missing.with_file_name("voice.onnx"));
+            let mut pipeline = SpeechPipeline::start(daemon, None, Instant::now());
+            pipeline.push(text);
+            pipeline.close();
+            pipeline
+        };
+        assert!(
+            PendingSpeech::matching(Some(written("Take it for 250.  Final offer!")), "Take it for 250. Final offer!")
+                .is_some(),
+            "collapsed whitespace is not a change of words"
+        );
+        assert!(
+            PendingSpeech::matching(Some(written("Take it for 250.")), "That is below what I paid for it.").is_none(),
+            "the authored refusal replaced the reply"
+        );
+        assert!(PendingSpeech::matching(None, REPLY).is_none());
+        // Piper could not say it at all: the caller has to say it whole.
+        let broken = PendingSpeech::matching(Some(written(REPLY)), REPLY).unwrap();
+        broken.release(Arc::new(Heard::default()));
+        assert!(broken.finish().is_none());
+    }
+
+    /// A Piper that takes a line and never answers must not hold the turn:
+    /// the wait gives up, and nothing waits on that Piper again.
+    #[cfg(unix)]
+    #[test]
+    fn a_standalone_piper_that_stops_answering_is_given_up_on_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let piper = root.path().join("piper");
+        fs::write(&piper, "#!/bin/sh\nwhile IFS= read -r line; do :; done\n").unwrap();
+        fs::set_permissions(&piper, fs::Permissions::from_mode(0o755)).unwrap();
+        let daemon =
+            PiperDaemon::binary_answering_within(piper, root.path().join("voice.onnx"), Duration::from_millis(300));
+
+        let started = Instant::now();
+        assert!(daemon.synthesize("Hello.").is_err());
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_millis(300), "it did wait: {waited:?}");
+        assert!(waited < Duration::from_millis(600), "and only once: {waited:?}");
+        assert!(!daemon.usable());
+
+        let started = Instant::now();
+        assert!(daemon.synthesize("Hello again.").is_err());
+        assert!(started.elapsed() < Duration::from_millis(50), "set aside, so nothing is asked");
+    }
+
+    #[test]
+    fn a_piper_that_cannot_start_is_set_aside_for_the_session() {
+        let missing = env::temp_dir().join("ella-no-such-piper").join("piper");
+        let daemon = PiperDaemon::binary(missing.clone(), missing.with_file_name("voice.onnx"));
+        assert!(daemon.synthesize("Hello.").is_err());
+        assert!(!daemon.usable());
+        assert!(daemon.synthesize("Hello.").is_err(), "and nothing starts it again");
+    }
+
     /// Piper's own timings, through the real daemon and the sentence stream:
     ///
     ///     ELLA_PIPER_PYTHON=<python with piper-tts> ELLA_PIPER_VOICE=<voice.onnx> \
@@ -4487,7 +5619,7 @@ mod speech_stream_tests {
         let voice = PathBuf::from(env::var("ELLA_PIPER_VOICE").expect("ELLA_PIPER_VOICE"));
         let recorder = Arc::new(Recorder(Mutex::new(Vec::new())));
         let mut pipeline = SpeechPipeline::start(
-            PiperDaemon::new(python, voice),
+            PiperDaemon::script(python, voice),
             Some(recorder.clone() as Arc<dyn SpeechSink>),
             Instant::now(),
         );
