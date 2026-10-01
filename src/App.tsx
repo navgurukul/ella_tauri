@@ -479,6 +479,7 @@ export default function App() {
           <HomeScreen
             snapshot={snapshot}
             busy={busy}
+            mood={finished && finished.topicId !== "placement" ? "happy" : "eager"}
             onStart={(topic) => void handleStart(topic)}
             onResume={(sessionId) => void handleResume(sessionId)}
             onLevels={openLevels}

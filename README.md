@@ -60,12 +60,17 @@ design's window chrome — title bar and traffic lights — is left to the OS.
 - Ella herself is drawn in CSS, not illustrated: see
   [`src/components/EllaMascot.tsx`](src/components/EllaMascot.tsx). The design
   draws her afresh for each placement, so each placement is a variant whose face
-  is a block of custom properties on `.ella--{variant}`. Her eyes follow the
-  cursor and blink, she flies in when a screen opens, and she squishes when
-  poked. On the talk stage she bobs, leans in to listen, bounces as she speaks
-  and sways while she thinks; when the mic opens she dives away and comes back
-  from a random side, ears pricked (or looming, if she came from above). Her
-  mouth there follows the sounds she is making, as on Ella Mobile: see
+  is a block of custom properties on `.ella--{variant}`. She moves as Ella
+  Mobile moves her ([`src/lib/motion.ts`](src/lib/motion.ts)). Her eyes follow
+  the cursor, every Ella on screen blinks and grins together, and she squishes
+  when poked. She floats gently where she stands; on Home she sways, eager, or
+  happy once a talk is done; the learner's own Ella on the profile only moves
+  her eyes. On the talk stage she bounces as she speaks and sways while she
+  thinks, and when the mic opens she leans in a little and nods now and then,
+  her ears lifting and twitching. Each loop eases into the next. Like Ella
+  Mobile, she leaves out the design's walk-ons and its dive on every listening
+  turn: she and the talk partners are already in place when a screen opens.
+  Her mouth on the talk stage follows the sounds she is making: see
   [Lip sync](#lip-sync).
 - Onboarding is the five-step flow — welcome, name, age, mic check, placement
   chat — in

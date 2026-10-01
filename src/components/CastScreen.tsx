@@ -1,5 +1,4 @@
-import { useRef } from "react";
-import { EllaMascot, useEntrance } from "./EllaMascot";
+import { EllaMascot } from "./EllaMascot";
 import { MicGlyph } from "./HomeScreen";
 import { castFor } from "../lib/presentation";
 import type { CastGoal, CastId, Learner } from "../types";
@@ -169,12 +168,10 @@ function FigureParts({ id }: { id: CastId }) {
   );
 }
 
-/** A talk partner, bobbing on their card after flying in with the screen. */
-export function PartnerFigure({ id, entrance = true }: { id: CastId; entrance?: boolean }) {
-  const entry = useRef<HTMLDivElement>(null);
-  useEntrance(entry, entrance);
+/** A talk partner, breathing where they stand on their card. */
+export function PartnerFigure({ id }: { id: CastId }) {
   return (
-    <div ref={entry} className="partner__entry" aria-hidden="true">
+    <div className="partner__entry" aria-hidden="true">
       <div className={`figure figure--${id}`}>
         <FigureParts id={id} />
       </div>

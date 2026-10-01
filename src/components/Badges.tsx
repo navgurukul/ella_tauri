@@ -199,7 +199,7 @@ export function BadgeSheet({
           <span className="badge-place__thumb" style={{ background: thumb }} aria-hidden="true">
             {badge.partner ? (
               <span className="badge-place__figure">
-                <PartnerFigure id={badge.partner} entrance={false} />
+                <PartnerFigure id={badge.partner} />
               </span>
             ) : (
               <span className="badge-place__glyph" style={{ background: badge.color }}>
