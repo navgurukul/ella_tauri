@@ -402,6 +402,104 @@ mod tests {
         assert_eq!(deferred.status().mode, "starting", "nothing was put in the slot");
     }
 
+    /// Remembers what it was asked to get ready. Its scoring waits until it is
+    /// shut down, as an assessment waits for a talk to end.
+    struct Parked {
+        prepared: Arc<Mutex<Vec<NextTalk>>>,
+        closing: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        dropped: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Parked {
+        fn new() -> Self {
+            Self {
+                prepared: Arc::default(),
+                closing: Arc::default(),
+                dropped: Arc::default(),
+            }
+        }
+    }
+
+    impl Drop for Parked {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl TutorEngine for Parked {
+        fn status(&self) -> EngineStatus {
+            EngineStatus { mode: "test".into(), label: "test".into(), ready: true, components: Vec::new() }
+        }
+        fn prepare(&self, next: &NextTalk) {
+            self.prepared.lock().unwrap().push(next.clone());
+        }
+        fn opening(&self, _: &Topic, _: &str, _: &Pitch) -> EllaResult<String> {
+            Ok(String::new())
+        }
+        fn score(&self, _: &[Scorable], _: &[Message]) -> EllaResult<Option<HashMap<String, f64>>> {
+            let (closed, changed) = &*self.closing;
+            let mut closed = closed.lock().unwrap();
+            while !*closed {
+                closed = changed.wait(closed).unwrap();
+            }
+            Err(EllaError::Engine("Ella is closing.".into()))
+        }
+        fn shutdown(&self) {
+            let (closed, changed) = &*self.closing;
+            *closed.lock().unwrap() = true;
+            changed.notify_all();
+        }
+        fn reply(&self, _: &TutorRequest) -> EllaResult<GeneratedReply> {
+            unreachable!()
+        }
+        fn uses_native_stt(&self) -> bool {
+            true
+        }
+        fn transcribe(&self, _: &[i16], _: u32) -> EllaResult<Transcription> {
+            unreachable!()
+        }
+        fn synthesize(&self, _: &str) -> EllaResult<SynthesizedAudio> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn a_talk_asked_for_before_the_engine_is_there_is_got_ready_once_it_is() {
+        let deferred = DeferredEngine::new("waiting");
+        let slot = deferred.slot();
+        let next = NextTalk::Placement { learner_name: "Asha".into(), age: Some(16) };
+        // The window reads Home as it opens, long before a first model loads.
+        deferred.prepare(&next);
+
+        let engine = Parked::new();
+        let prepared = Arc::clone(&engine.prepared);
+        assert!(slot.fill(Box::new(engine)));
+        assert_eq!(*prepared.lock().unwrap(), [next.clone()], "handed over as the engine arrived");
+        deferred.prepare(&next);
+        assert_eq!(prepared.lock().unwrap().len(), 2, "and straight to it from then on");
+    }
+
+    #[test]
+    fn closing_lets_an_assessment_waiting_inside_the_engine_go_and_lets_go_of_the_engine() {
+        // `shutdown` stops every server in the process.
+        let _turn = SERVER_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
+        let deferred = Arc::new(DeferredEngine::new("waiting"));
+        let engine = Parked::new();
+        let dropped = Arc::clone(&engine.dropped);
+        assert!(deferred.slot().fill(Box::new(engine)));
+        let scoring = {
+            let deferred = Arc::clone(&deferred);
+            thread::spawn(move || deferred.score(&[], &[]))
+        };
+        thread::sleep(Duration::from_millis(100));
+
+        let started = Instant::now();
+        deferred.shutdown();
+        assert!(started.elapsed() < Duration::from_secs(2), "it did not wait out its deadline: {:?}", started.elapsed());
+        assert_eq!(dropped.load(Ordering::SeqCst), 1, "the engine was let go of");
+        assert!(scoring.join().unwrap().is_err());
+    }
+
     #[test]
     fn free_ports_are_actually_free() {
         let port = free_loopback_port().unwrap();
@@ -425,7 +523,7 @@ use crate::domain::{
     Scorable, Topic, TutorRequest,
 };
 use crate::infrastructure::engines::{
-    GeneratedReply, SpeechSink, SynthesizedAudio, TutorEngine,
+    GeneratedReply, NextTalk, SpeechSink, SynthesizedAudio, TutorEngine,
 };
 use crate::infrastructure::stt::Transcription;
 
@@ -441,6 +539,7 @@ pub struct DeferredEngine {
     inner: Arc<RwLock<Option<Box<dyn TutorEngine>>>>,
     waiting_on: Arc<Mutex<String>>,
     closed: Arc<AtomicBool>,
+    prepared: Arc<Mutex<Option<NextTalk>>>,
 }
 
 /// The write end, held by the thread doing the work.
@@ -451,6 +550,10 @@ pub struct EngineSlot {
     /// Set by `shutdown`. An engine that finishes loading after it has
     /// nothing left to drain it, so it is dropped as it arrives.
     closed: Arc<AtomicBool>,
+    /// The talk the window last asked to have ready, kept while there was no
+    /// engine to ask. The window reads Home once, as it opens, which is long
+    /// before a first launch's model has loaded.
+    prepared: Arc<Mutex<Option<NextTalk>>>,
 }
 
 impl DeferredEngine {
@@ -459,6 +562,7 @@ impl DeferredEngine {
             inner: Arc::new(RwLock::new(None)),
             waiting_on: Arc::new(Mutex::new(waiting_on.to_string())),
             closed: Arc::new(AtomicBool::new(false)),
+            prepared: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -467,6 +571,7 @@ impl DeferredEngine {
             inner: Arc::clone(&self.inner),
             waiting_on: Arc::clone(&self.waiting_on),
             closed: Arc::clone(&self.closed),
+            prepared: Arc::clone(&self.prepared),
         }
     }
 
@@ -518,6 +623,15 @@ impl EngineSlot {
         // Dropped outside the lock, so an engine that panics on its way out
         // cannot poison the slot for the one that replaced it.
         drop(replaced);
+        // Asked for before there was anyone to ask. Taken under the same lock
+        // `prepare` holds while it looks for the engine, so a request is
+        // either handed over there or found here, never neither.
+        let pending = self.prepared.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(next) = pending {
+            if let Some(engine) = self.inner.read().ok().as_ref().and_then(|slot| slot.as_ref()) {
+                engine.prepare(&next);
+            }
+        }
         true
     }
 
@@ -558,6 +672,21 @@ impl TutorEngine for DeferredEngine {
                 ready: false,
                 components: Vec::new(),
             },
+        }
+    }
+
+    fn prepare(&self, next: &NextTalk) {
+        let mut prepared = self.prepared.lock().unwrap_or_else(PoisonError::into_inner);
+        match self.inner.read().ok().as_ref().and_then(|slot| slot.as_ref()) {
+            Some(engine) => engine.prepare(next),
+            // Handed over by `EngineSlot::fill` once the engine is there.
+            None => *prepared = Some(next.clone()),
+        }
+    }
+
+    fn talk_over(&self) {
+        if let Some(engine) = self.inner.read().ok().as_ref().and_then(|slot| slot.as_ref()) {
+            engine.talk_over();
         }
     }
 
@@ -689,6 +818,15 @@ impl TutorEngine for DeferredEngine {
     /// moment that takes (`Setup::wait_while_loading`).
     fn shutdown(&self) {
         self.closed.store(true, Ordering::SeqCst);
+        // An assessment waiting for a talk to end is a call into the engine,
+        // and holds a read lock as long as it waits. Told first, it gives up,
+        // and lets go of it. Never blocks: a writer stuck behind a reader
+        // would hold this up too.
+        if let Ok(slot) = self.inner.try_read() {
+            if let Some(engine) = slot.as_ref() {
+                engine.shutdown();
+            }
+        }
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             if let Ok(mut slot) = self.inner.try_write() {

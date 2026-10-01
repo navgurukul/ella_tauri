@@ -1,6 +1,6 @@
 // Local tutor engines with native Canary STT and HTTP Whisper fallback.
 use std::{
-    collections::{hash_map::DefaultHasher, BTreeSet, HashMap},
+    collections::{hash_map::DefaultHasher, BTreeSet, HashMap, HashSet},
     env, fs,
     hash::{Hash, Hasher},
     io::{BufRead, BufReader, Read, Write},
@@ -8,7 +8,7 @@ use std::{
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Condvar, Mutex, OnceLock,
+        Arc, Condvar, Mutex, OnceLock, PoisonError,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -29,6 +29,7 @@ use crate::{
     infrastructure::{
         audio::raw_pcm_to_wav,
         engine_manager::LlamaServer,
+        model_queue::{Errand, ErrandTurn, GiveWay, ModelQueue, Step},
         speech_timing::{phoneme_spans, shifted, word_spans},
         stt::{
             CanaryStt, SpeechToTextEngine, SttRouter, Transcription, WindowsStt,
@@ -2450,8 +2451,34 @@ fn mentions_alias(text: &str, aliases: &[String]) -> bool {
     })
 }
 
+/// A talk the learner is likely to open next, named by what its instructions
+/// are made of, so an engine can get them ready while nothing else needs the
+/// model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NextTalk {
+    /// A free talk on `topic_id`, at `level`. Its aim is left out: it is
+    /// picked when the talk opens, and comes last in the instructions.
+    Topic {
+        learner_name: String,
+        topic_id: String,
+        topic_label: String,
+        level: String,
+    },
+    /// The placement chat that onboarding ends in.
+    Placement { learner_name: String, age: Option<u8> },
+}
+
 pub trait TutorEngine: Send + Sync {
     fn status(&self) -> EngineStatus;
+
+    /// Get ready for `next` while nothing else needs the model, so its first
+    /// reply does not wait for its instructions. Never waits itself. Nothing
+    /// by default, where there is nothing to get ready.
+    fn prepare(&self, _next: &NextTalk) {}
+
+    /// The talk the learner was in is over: work held back so as not to slow
+    /// it down can go ahead. Nothing by default.
+    fn talk_over(&self) {}
 
     /// A free conversation's first line. `pitch` is what every reply of the
     /// session is told about the learner, so the engine can warm the prompt
@@ -2680,15 +2707,16 @@ impl TutorEngine for DemoEngine {
     }
 }
 
-/// How many saved slots are kept: the topics talked about most recently, at
-/// the learner's level. Each is 35-45 MB.
-const SAVED_SLOTS_KEPT: usize = 4;
+/// How many saved slots are kept: the talks opened most recently and the one
+/// Home offers next, at the learner's level. A topic's or a chore's is
+/// 35-45 MB, the placement chat's about 23 MB.
+const SAVED_SLOTS_KEPT: usize = 6;
 
-/// Slots llama-server has saved to disk: a topic's instructions, evaluated
-/// once and kept, so that the next talk on it, even after a restart, only
-/// evaluates the skill it aims at.
+/// Slots llama-server has saved to disk: a talk's instructions, evaluated
+/// once and kept, so that the next talk like it, even after a restart, only
+/// evaluates what is its own: a free talk's aim, any talk's opening line.
 ///
-/// On a laptop's CPU a talk's whole instructions take 10-25 seconds to
+/// On a laptop's CPU a talk's whole instructions take 10-50 seconds to
 /// evaluate, and the talk's first reply waits for them. A restore reads a
 /// file instead.
 struct SlotStore {
@@ -2700,6 +2728,14 @@ struct SlotStore {
     /// Set once the server has refused to save a slot: it was started without
     /// anywhere to keep them, and asking again every talk would not help.
     refused: AtomicBool,
+    /// Instructions being got ready ahead of a talk, by kind and prompt. The
+    /// window re-reads Home after most things it does, and each re-read asks
+    /// for the same talk again.
+    preparing: Mutex<HashSet<String>>,
+    /// Held by an errand from its last stretch of a prompt to the save of it,
+    /// which have to follow one another at the server: a talk's request in
+    /// between would be saved under the errand's name.
+    saving: Mutex<()>,
 }
 
 impl SlotStore {
@@ -2708,7 +2744,94 @@ impl SlotStore {
             dir,
             identity: OnceLock::new(),
             refused: AtomicBool::new(false),
+            preparing: Mutex::new(HashSet::new()),
+            saving: Mutex::new(()),
         }
+    }
+
+    /// Waits until no errand is between its last stretch and its save, so a
+    /// talk's request is never the one saved.
+    fn wait_for_saves(&self) {
+        drop(self.saving.lock().unwrap_or_else(PoisonError::into_inner));
+    }
+
+    /// One run at getting `prompt` ready as a `kind` slot, for
+    /// `LocalEngine::prepare_prompt`: read in pieces, then its last stretch
+    /// and the save.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        &self,
+        client: &Client,
+        url: &str,
+        root: &str,
+        slot: i32,
+        kind: &str,
+        prompt: &str,
+        errand: &ErrandTurn<'_>,
+    ) -> Step<()> {
+        let Some(identity) = self.identity(client, root) else {
+            return Step::Done(());
+        };
+        let name = Self::file_name(identity, kind, prompt);
+        if self.dir.join(&name).is_file() {
+            return Step::Done(());
+        }
+        let stopped = |why: GiveWay| {
+            eprintln!("[LATENCY]     llm> stopped getting {name} ready ({why:?})");
+            match why {
+                GiveWay::Errand => Step::GaveWay,
+                GiveWay::Talk | GiveWay::Closing => Step::Done(()),
+            }
+        };
+        let started = Instant::now();
+        let messages = [json!({"role": "system", "content": prompt})];
+        match read_in_pieces(client, url, slot, &messages, errand) {
+            Ok(None) => {}
+            Ok(Some(why)) => return stopped(why),
+            Err(error) => {
+                eprintln!("[LATENCY]     llm> could not get {name} ready: {error}");
+                return Step::Done(());
+            }
+        }
+        {
+            let _saving = self.saving.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(why) = errand.give_way() {
+                return stopped(why);
+            }
+            let evaluated = client
+                .post(url)
+                .json(&json!({
+                    "model": "local",
+                    "messages": messages,
+                    "max_tokens": 1,
+                    "stream": false,
+                    "cache_prompt": true,
+                    "id_slot": slot,
+                }))
+                .send()
+                .and_then(|response| response.error_for_status())
+                .and_then(|response| response.json::<Value>());
+            if let Err(error) = evaluated {
+                eprintln!("[LATENCY]     llm> could not get {name} ready: {error}");
+                return Step::Done(());
+            }
+            match slot_action(client, root, slot, "save", &name) {
+                Ok(body) => eprintln!(
+                    "[LATENCY]     llm> got {name} ready ahead of its talk ({} tokens) in {:.0}ms",
+                    body["n_saved"],
+                    started.elapsed().as_secs_f64() * 1_000.0
+                ),
+                Err(error) => {
+                    eprintln!(
+                        "[LATENCY]     llm> the server saves no slots, so every talk evaluates its whole prompt: {error}"
+                    );
+                    self.refused.store(true, Ordering::Relaxed);
+                    return Step::Done(());
+                }
+            }
+        }
+        self.prune(&[name]);
+        Step::Done(())
     }
 
     fn identity(&self, client: &Client, root: &str) -> Option<&str> {
@@ -2922,6 +3045,125 @@ fn touch(path: &Path) {
     }
 }
 
+/// How much further each piece of an errand reads into its prompt: about 100
+/// tokens, four seconds on a classroom laptop's CPU at 25 tokens a second,
+/// and well under one on an M1. A talk opened while an errand runs waits for
+/// the piece in hand and no more. llama-server reads a whole request's prompt
+/// before it looks at anything else: cancelled 2 s into a 1,400-token prompt
+/// on the M1's CPU, a request held the next one for 10.6 s, and the same
+/// prompt read in these pieces held it for 0.4 s.
+const PIECE_CHARS: usize = 400;
+
+/// The ever-longer starts of `messages` that read it into the slot a piece at
+/// a time. Each ends at a space about `PIECE_CHARS` further on, or at the end
+/// of a message. The whole of `messages` is not among them: whatever follows
+/// the pieces reads the last stretch.
+fn pieces_of(messages: &[Value]) -> Vec<Vec<Value>> {
+    let mut pieces = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        let content = message["content"].as_str().unwrap_or_default();
+        let mut from = 0;
+        while let Some(cut) = next_cut(content, from) {
+            let mut piece = messages[..index].to_vec();
+            let mut start = message.clone();
+            start["content"] = Value::String(content[..cut].to_owned());
+            piece.push(start);
+            pieces.push(piece);
+            from = cut;
+        }
+        if index + 1 < messages.len() {
+            pieces.push(messages[..=index].to_vec());
+        }
+    }
+    pieces
+}
+
+/// Where the piece of `content` that starts at `from` ends: at the first space
+/// at least `PIECE_CHARS` on. `None` when what is left is shorter than that.
+fn next_cut(content: &str, from: usize) -> Option<usize> {
+    let at_least = from + PIECE_CHARS;
+    if at_least >= content.len() {
+        return None;
+    }
+    content
+        .char_indices()
+        .skip_while(|(at, _)| *at < at_least)
+        .find(|(_, character)| character.is_whitespace())
+        .map(|(at, _)| at)
+}
+
+/// Reads `messages` into the slot one piece at a time, asking before each
+/// whether to give way. `None` once every piece is in, so that the request
+/// that follows has only the last stretch to read; why it stopped, if it did.
+fn read_in_pieces(
+    client: &Client,
+    url: &str,
+    slot: i32,
+    messages: &[Value],
+    errand: &ErrandTurn<'_>,
+) -> EllaResult<Option<GiveWay>> {
+    for piece in pieces_of(messages) {
+        if let Some(why) = errand.give_way() {
+            return Ok(Some(why));
+        }
+        client
+            .post(url)
+            .json(&json!({
+                "model": "local",
+                "messages": piece,
+                "max_tokens": 1,
+                "temperature": 0.0,
+                "stream": false,
+                "cache_prompt": true,
+                "id_slot": slot,
+            }))
+            .send()?
+            .error_for_status()?
+            .bytes()?;
+    }
+    Ok(errand.give_way())
+}
+
+/// What came of an errand's streamed request.
+enum Answer {
+    Written { text: String, evaluated: Option<i64> },
+    /// It stopped partway to let something else have the model. Dropping the
+    /// response closes the connection, and llama-server stops writing: the M1
+    /// took the next request 0.4 s after one was dropped mid-answer.
+    GaveWay(GiveWay),
+}
+
+/// Sends `body`, a streamed chat request, and gathers what it writes, asking
+/// at every line whether to give way.
+fn stream_answer(client: &Client, url: &str, body: &Value, errand: &ErrandTurn<'_>) -> EllaResult<Answer> {
+    let response = client.post(url).json(body).send()?.error_for_status()?;
+    let mut text = String::new();
+    let mut evaluated = None;
+    for line in BufReader::new(response).lines() {
+        if let Some(why) = errand.give_way() {
+            return Ok(Answer::GaveWay(why));
+        }
+        let line = line?;
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data == "[DONE]" {
+            break;
+        }
+        let Ok(chunk) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        if let Some(prompt_n) = chunk["timings"]["prompt_n"].as_i64() {
+            evaluated = Some(prompt_n);
+        }
+        if let Some(delta) = chunk["choices"][0]["delta"]["content"].as_str() {
+            text.push_str(delta);
+        }
+    }
+    Ok(Answer::Written { text, evaluated })
+}
+
 pub struct LocalEngine {
     client: Client,
     llm_base_url: String,
@@ -2941,6 +3183,9 @@ pub struct LocalEngine {
     /// talks. `None` without anywhere the server saves slots.
     slots: Option<Arc<SlotStore>>,
     warm_ups: Arc<WarmUps>,
+    /// Puts a talk's requests ahead of everything else the model is asked to
+    /// do: see `ModelQueue`.
+    queue: Arc<ModelQueue>,
 }
 
 impl LocalEngine {
@@ -3039,6 +3284,7 @@ impl LocalEngine {
             llama_error,
             slots: slot_dir.map(|dir| Arc::new(SlotStore::new(dir))),
             warm_ups: Arc::default(),
+            queue: Arc::default(),
         }
     }
 
@@ -3126,8 +3372,34 @@ impl TutorEngine for LocalEngine {
 
     fn placement_opening(&self, learner_name: &str, age: Option<u8>) -> EllaResult<String> {
         let text = placement_opening_line(learner_name);
-        self.warm_prompt_cache(placement_system_prompt(learner_name, age), text.clone(), Vec::new());
+        let system = placement_system_prompt(learner_name, age);
+        // All of it holds for the whole chat, so all of it can be kept.
+        self.warm_prompt_cache(system.clone(), text.clone(), vec![("placement", system)]);
         Ok(text)
+    }
+
+    fn prepare(&self, next: &NextTalk) {
+        match next {
+            NextTalk::Topic {
+                learner_name,
+                topic_id,
+                topic_label,
+                level,
+            } => self.prepare_prompt("topic", ella_topic_prompt(learner_name, topic_id, topic_label, level)),
+            NextTalk::Placement { learner_name, age } => {
+                self.prepare_prompt("placement", placement_system_prompt(learner_name, *age))
+            }
+        }
+    }
+
+    fn talk_over(&self) {
+        self.queue.talk_over();
+    }
+
+    /// Let go of every errand waiting its turn, so none of them holds the
+    /// engine past the moment Ella closes: see `DeferredEngine::shutdown`.
+    fn shutdown(&self) {
+        self.queue.close();
     }
 
     fn judges(&self) -> bool {
@@ -3145,6 +3417,9 @@ impl TutorEngine for LocalEngine {
         let mut request = vec![json!({"role": "system", "content": placement_system_prompt(learner_name, age)})];
         request.extend(chat_messages(messages));
         request.push(json!({"role": "system", "content": PLACEMENT_CHECK_NOTE}));
+        // Part of the chat: the next turn reads it, and it reads the chat's own
+        // prefix in the slot.
+        let _talking = self.queue.talking();
         self.judge("check whether the placement has heard enough", request, 30, None, read_readiness)
             .map(Some)
     }
@@ -3160,7 +3435,7 @@ impl TutorEngine for LocalEngine {
                 ),
             }),
         ];
-        self.judge("read a level off the placement", request, 80, None, read_placement)
+        self.judge_aside("read a level off the placement", request, 80, None, read_placement)
             .map(Some)
     }
 
@@ -3182,7 +3457,7 @@ impl TutorEngine for LocalEngine {
             .map(|message| message.content.as_str())
             .collect();
         // A quote per claim makes the answer longer than a bare score did.
-        self.judge("score the talk", request, 320, None, |value| read_scores(value, skills, &learner))
+        self.judge_aside("score the talk", request, 320, None, |value| read_scores(value, skills, &learner))
             .map(Some)
     }
 
@@ -3209,7 +3484,7 @@ impl TutorEngine for LocalEngine {
         // The answer is the answers again, so its budget grows with them.
         let words: usize = answers.iter().map(|answer| answer.split_whitespace().count()).sum();
         let budget = (words * 2 + 12 * answers.len() + 24) as u32;
-        self.judge("correct the answers", request, budget, Some(schema), |value| {
+        self.judge_aside("correct the answers", request, budget, Some(schema), |value| {
             read_corrections(value, answers.len())
         })
         .map(Some)
@@ -3219,7 +3494,10 @@ impl TutorEngine for LocalEngine {
         let text = chore_opening_for(&context.chore_id)
             .map(str::to_owned)
             .unwrap_or_else(|| fallback_opening(context));
-        self.warm_prompt_cache(chore_system_prompt(learner_name, context), text.clone(), Vec::new());
+        let system = chore_system_prompt(learner_name, context);
+        // Everything that moves between turns is in the turn's note, so the
+        // whole of this is the same for every talk of this chore at this level.
+        self.warm_prompt_cache(system.clone(), text.clone(), vec![("chore", system)]);
         Ok(text)
     }
 
@@ -3525,12 +3803,16 @@ impl LocalEngine {
         let slot = self.llm_slot;
         let slots = self.slots.clone();
         // Counted before the thread starts, so a reply sent the moment the
-        // talk opens still finds it running.
+        // talk opens still finds it running, and an errand asking whether to
+        // give way finds the talk open.
         let running = self.warm_ups.begin();
+        let talking = self.queue.talking();
         thread::spawn(move || {
             let _running = running;
+            let _talking = talking;
             let started = Instant::now();
             if let Some(slots) = &slots {
+                slots.wait_for_saves();
                 slots.prime(&client, &root, slot, &prefixes);
             }
             // This request, not the first turn, is the one that swaps the slot
@@ -3594,15 +3876,16 @@ impl LocalEngine {
         messages
     }
 
-    /// One JSON answer from the model, for the judges. Not streamed, because
-    /// nothing of it is spoken, and `response_format` has llama.cpp constrain
-    /// the output to JSON. `read` says whether the answer is usable; one that
-    /// is not is asked for once more before giving up with an error, so the
-    /// caller can ask again later rather than record a guess.
+    /// One JSON answer from the model, asked inside a talk: the placement
+    /// chat's check, which shares the chat's prefix in the slot and is read by
+    /// the chat's next turn. Not streamed, because nothing of it is spoken, and
+    /// `response_format` has llama.cpp constrain the output to JSON. `read`
+    /// says whether the answer is usable; one that is not is asked for once
+    /// more before giving up with an error, so the caller can ask again later
+    /// rather than record a guess.
     ///
-    /// Same slot as the conversation. The placement check shares the chat's
-    /// prefix, so it reuses the slot's cache; the others run once a talk is
-    /// over, when the next session re-warms the slot anyway.
+    /// The judges asked once a talk is over go through `judge_aside`, which
+    /// lets the next talk go first.
     fn judge<T>(
         &self,
         label: &str,
@@ -3660,6 +3943,120 @@ impl LocalEngine {
         Err(EllaError::Engine(format!("The model could not {label}: {failure}")))
     }
 
+    /// `judge` for what no learner sits waiting on — a finished talk's scores
+    /// and its one fix, the level a placement found — run as an errand: only
+    /// while no talk is open, with its prompt read a piece at a time and its
+    /// answer streamed, so a talk opened while it runs waits for the piece in
+    /// hand rather than all of it. See `ModelQueue`. Stopped, it starts again
+    /// once the talk is over, from whatever of its prompt the slot still holds.
+    fn judge_aside<T>(
+        &self,
+        label: &str,
+        messages: Vec<Value>,
+        max_tokens: u32,
+        schema: Option<Value>,
+        read: impl Fn(&Value) -> Option<T>,
+    ) -> EllaResult<T> {
+        let response_format = match schema {
+            Some(schema) => json!({"type": "json_object", "schema": schema}),
+            None => json!({"type": "json_object"}),
+        };
+        let url = format!("{}/chat/completions", self.llm_base_url.trim_end_matches('/'));
+        let mut attempt = 0;
+        let mut failure = String::new();
+        let outcome = self.queue.run(Errand::Assess, |errand| {
+            let started = Instant::now();
+            match read_in_pieces(&self.client, &url, self.llm_slot, &messages, errand) {
+                Ok(None) => {}
+                Ok(Some(why)) => {
+                    eprintln!("[LATENCY]     judge> {label}: gave way ({why:?}) while reading its prompt");
+                    return Step::GaveWay;
+                }
+                Err(error) => return Step::Done(Err(error)),
+            }
+            while attempt < 2 {
+                attempt += 1;
+                let answer = stream_answer(
+                    &self.client,
+                    &url,
+                    &json!({
+                        "model": "local",
+                        "messages": messages,
+                        "temperature": 0.1,
+                        "max_tokens": max_tokens,
+                        "stream": true,
+                        "stream_options": {"include_usage": true},
+                        "cache_prompt": true,
+                        "id_slot": self.llm_slot,
+                        "response_format": response_format,
+                    }),
+                    errand,
+                );
+                let took_ms = started.elapsed().as_secs_f64() * 1_000.0;
+                match answer {
+                    Ok(Answer::GaveWay(why)) => {
+                        attempt -= 1;
+                        eprintln!("[LATENCY]     judge> {label}: gave way ({why:?}) while answering");
+                        return Step::GaveWay;
+                    }
+                    Ok(Answer::Written { text, evaluated }) => {
+                        eprintln!(
+                            "[LATENCY]     judge> {label}: attempt {attempt} took {took_ms:.0}ms (evaluated {} prompt tokens last): {}",
+                            evaluated.map_or_else(|| "?".into(), |n| n.to_string()),
+                            text.trim()
+                        );
+                        if let Some(read) = json_object_in(&text).as_ref().and_then(&read) {
+                            return Step::Done(Ok(read));
+                        }
+                        failure = format!("an answer that could not be read: {}", text.trim());
+                    }
+                    Err(error) => {
+                        eprintln!("[LATENCY]     judge> {label}: attempt {attempt} failed after {took_ms:.0}ms: {error}");
+                        failure = error.to_string();
+                    }
+                }
+            }
+            Step::Done(Err(EllaError::Engine(format!("The model could not {label}: {failure}"))))
+        });
+        outcome.unwrap_or_else(|| Err(EllaError::Engine("Ella is closing.".into())))
+    }
+
+    /// Has `prompt`, the instructions a likely next talk starts with, evaluated
+    /// and saved as a `kind` slot in the background, as an errand (see
+    /// `ModelQueue`). Once it is saved, that talk's warm-up restores it, and
+    /// the talk's first reply waits only for what follows it.
+    ///
+    /// Given way to an assessment, it waits for it and carries on. Given way to
+    /// a talk, it is dropped: the talk changes what is likely next, and the
+    /// window asks again when it next shows Home.
+    fn prepare_prompt(&self, kind: &'static str, prompt: String) {
+        let Some(slots) = self.slots.clone() else {
+            return;
+        };
+        if slots.refused.load(Ordering::Relaxed) {
+            return;
+        }
+        let key = format!("{kind}-{}", prompt_fingerprint(&prompt));
+        if !slots.preparing.lock().unwrap_or_else(PoisonError::into_inner).insert(key.clone()) {
+            return;
+        }
+        let client = self.client.clone();
+        let url = format!("{}/chat/completions", self.llm_base_url.trim_end_matches('/'));
+        let root = self
+            .llm_base_url
+            .trim_end_matches('/')
+            .trim_end_matches("/v1")
+            .to_owned();
+        let slot = self.llm_slot;
+        let queue = Arc::clone(&self.queue);
+        thread::spawn(move || {
+            queue.run(Errand::Prepare, |errand| {
+                slots.prepare(&client, &url, &root, slot, kind, &prompt, errand)
+            });
+            slots.preparing.lock().unwrap_or_else(PoisonError::into_inner).remove(&key);
+        });
+    }
+
     /// One streamed generation. `corrective` is appended as a system turn when
     /// re-generating after a ledger break. `speech` receives token deltas as
     /// they land so whole sentences can be synthesized without waiting for the
@@ -3708,10 +4105,14 @@ impl LocalEngine {
             }
             eprintln!("[PROMPT] ─── end of chained prompt ───");
         }
+        let _talking = self.queue.talking();
         let started = Instant::now();
         // Counted in the time to the first token, as it was when the reply
         // queued behind the warm-up in the server instead.
         self.warm_ups.wait();
+        if let Some(slots) = &self.slots {
+            slots.wait_for_saves();
+        }
         let waited_ms = started.elapsed().as_secs_f64() * 1_000.0;
         if waited_ms >= 1.0 {
             eprintln!("[LATENCY]     llm> waited {waited_ms:.0}ms for the talk's warm-up");
@@ -4235,8 +4636,11 @@ mod tests {
         for (age, name) in [
             (50, "ella-topic-a.bin"),
             (40, "ella-topic-b.bin"),
-            (30, "ella-topic-c.bin"),
+            (30, "ella-chore-c.bin"),
             (20, "ella-topic-d.bin"),
+            (10, "ella-placement-e.bin"),
+            (60, "ella-topic-f.bin"),
+            (70, "ella-chore-g.bin"),
             (90, "ella-talk-x.bin"),
         ] {
             let path = root.path().join(name);
@@ -4253,7 +4657,15 @@ mod tests {
         left.sort();
         assert_eq!(
             left,
-            ["ella-talk-x.bin", "ella-topic-a.bin", "ella-topic-c.bin", "ella-topic-d.bin", "not-a-slot.txt"]
+            [
+                "ella-chore-c.bin",
+                "ella-placement-e.bin",
+                "ella-talk-x.bin",
+                "ella-topic-a.bin",
+                "ella-topic-b.bin",
+                "ella-topic-d.bin",
+                "not-a-slot.txt",
+            ]
         );
     }
 
@@ -5907,5 +6319,500 @@ mod curriculum_prompt_tests {
         let goodbye = DemoEngine.reply(&request(5, true)).unwrap().text;
         assert_eq!(goodbye, PLACEMENT_WRAP);
         assert!(!DemoEngine.judges());
+    }
+}
+
+#[cfg(test)]
+mod errand_tests {
+    //! A talk going ahead of everything else the model is asked to do, against
+    //! a stand-in for llama-server that, like the real one with its one slot,
+    //! works on one request at a time and stops writing an answer once its
+    //! reader has gone.
+
+    use super::*;
+    use crate::domain::{find_character, find_chore, LedgerTurn, WinCondition};
+    use std::net::{TcpListener, TcpStream};
+
+    /// A request the stand-in took up, once it had answered it.
+    #[derive(Clone, Debug)]
+    struct Seen {
+        path: String,
+        body: Value,
+        /// A streamed answer whose reader left before the end of it.
+        dropped: bool,
+    }
+
+    /// How long the stand-in takes over each kind of request.
+    #[derive(Clone)]
+    struct Pace {
+        /// Every request that is not streamed: a piece, a warm-up, a prompt to
+        /// keep.
+        request: Duration,
+        /// Between the parts of a streamed answer.
+        part: Duration,
+        /// How many parts a judge's answer comes in.
+        parts: usize,
+    }
+
+    fn pace(request_ms: u64, part_ms: u64, parts: usize) -> Pace {
+        Pace {
+            request: Duration::from_millis(request_ms),
+            part: Duration::from_millis(part_ms),
+            parts,
+        }
+    }
+
+    const JUDGED: &str = r#"{"level": "B1", "closing": "Good job, Asha!"}"#;
+    const REPLY: &str = "That sounds lovely. Which dish did you like best there?";
+
+    struct FakeLlama {
+        url: String,
+        seen: Arc<Mutex<Vec<Seen>>>,
+        slots: tempfile::TempDir,
+        _model: tempfile::NamedTempFile,
+    }
+
+    struct Served {
+        pace: Pace,
+        seen: Arc<Mutex<Vec<Seen>>>,
+        /// Held while a request is worked on: one at a time.
+        slot: Mutex<()>,
+        slot_dir: PathBuf,
+        model: String,
+    }
+
+    impl FakeLlama {
+        fn start(pace: Pace) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let slots = tempfile::tempdir().unwrap();
+            let model = tempfile::NamedTempFile::new().unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let served = Arc::new(Served {
+                pace,
+                seen: Arc::clone(&seen),
+                slot: Mutex::new(()),
+                slot_dir: slots.path().to_path_buf(),
+                model: model.path().display().to_string(),
+            });
+            thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let served = Arc::clone(&served);
+                    thread::spawn(move || {
+                        let _ = served.serve(stream);
+                    });
+                }
+            });
+            Self {
+                url: format!("http://127.0.0.1:{port}/v1"),
+                seen,
+                slots,
+                _model: model,
+            }
+        }
+
+        fn seen(&self) -> Vec<Seen> {
+            self.seen.lock().unwrap().clone()
+        }
+
+        fn completions(&self) -> Vec<Seen> {
+            self.seen()
+                .into_iter()
+                .filter(|seen| seen.path == "/v1/chat/completions")
+                .collect()
+        }
+
+        fn kept(&self) -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(self.slots.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".bin"))
+                .collect();
+            names.sort();
+            names
+        }
+
+        fn engine(&self, quiet: Duration) -> LocalEngine {
+            LocalEngine {
+                client: Client::builder().timeout(Duration::from_secs(20)).build().unwrap(),
+                llm_base_url: self.url.clone(),
+                llm_slot: 0,
+                stt: SttRouter::new(
+                    Box::new(CanaryStt::new(self.slots.path().join("no-canary.gguf"), 1, false)),
+                    None,
+                ),
+                piper_binary: PathBuf::from("no-piper"),
+                piper_voice: PathBuf::from("no-voice.onnx"),
+                piper_daemon: None,
+                _llama: None,
+                llama_error: None,
+                slots: Some(Arc::new(SlotStore::new(self.slots.path().to_path_buf()))),
+                warm_ups: Arc::default(),
+                queue: Arc::new(ModelQueue::new(quiet)),
+            }
+        }
+    }
+
+    impl Served {
+        fn serve(&self, mut stream: TcpStream) -> std::io::Result<()> {
+            let (path, body) = read_request(&mut stream)?;
+            if path == "/props" {
+                return respond(
+                    &mut stream,
+                    "200 OK",
+                    &json!({
+                        "model_path": self.model,
+                        "build_info": "test",
+                        "default_generation_settings": {"n_ctx": 4096},
+                    }),
+                );
+            }
+            let _slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut dropped = false;
+            let answered = if let Some(action) = path.strip_prefix("/slots/0?action=") {
+                let file = self.slot_dir.join(body["filename"].as_str().unwrap_or_default());
+                match action {
+                    "save" => {
+                        fs::write(&file, b"slot")?;
+                        respond(&mut stream, "200 OK", &json!({"n_saved": 42}))
+                    }
+                    _ if file.is_file() => respond(&mut stream, "200 OK", &json!({"n_restored": 42})),
+                    _ => respond(&mut stream, "400 Bad Request", &json!({"error": {"message": "no such slot"}})),
+                }
+            } else if body["stream"] == true {
+                let judged = body.get("response_format").is_some();
+                let (text, parts) = if judged { (JUDGED, self.pace.parts) } else { (REPLY, 4) };
+                let streamed = stream_parts(&mut stream, text, parts, self.pace.part);
+                dropped = streamed.is_err();
+                streamed
+            } else {
+                thread::sleep(self.pace.request);
+                respond(
+                    &mut stream,
+                    "200 OK",
+                    &json!({
+                        "choices": [{"message": {"content": "x"}}],
+                        "timings": {"prompt_n": 10},
+                        "usage": {"prompt_tokens": 100},
+                    }),
+                )
+            };
+            self.seen.lock().unwrap().push(Seen { path, body, dropped });
+            answered
+        }
+    }
+
+    fn read_request(stream: &mut TcpStream) -> std::io::Result<(String, Value)> {
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let path = line.split_whitespace().nth(1).unwrap_or_default().to_owned();
+        let mut length = 0;
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header)?;
+            let header = header.trim_end();
+            if header.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = header.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+            }
+        }
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body)?;
+        Ok((path, serde_json::from_slice(&body).unwrap_or(Value::Null)))
+    }
+
+    fn respond(stream: &mut TcpStream, status: &str, body: &Value) -> std::io::Result<()> {
+        let body = body.to_string();
+        write!(
+            stream,
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )?;
+        stream.flush()
+    }
+
+    fn stream_parts(stream: &mut TcpStream, text: &str, parts: usize, pause: Duration) -> std::io::Result<()> {
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")?;
+        let characters: Vec<char> = text.chars().collect();
+        for part in characters.chunks(characters.len().div_ceil(parts.max(1))) {
+            thread::sleep(pause);
+            let delta: String = part.iter().collect();
+            write!(stream, "data: {}\n\n", json!({"choices": [{"delta": {"content": delta}}]}))?;
+            stream.flush()?;
+        }
+        write!(
+            stream,
+            "data: {}\n\ndata: [DONE]\n\n",
+            json!({"choices": [{"delta": {}}], "timings": {"prompt_n": 7}, "usage": {"prompt_tokens": 100}})
+        )?;
+        stream.flush()
+    }
+
+    /// A request's messages as one text, role by role, so the start of a
+    /// prompt reads as the start of this.
+    fn prompt_text(body: &Value) -> String {
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| format!("{}:{}", message["role"].as_str().unwrap(), message["content"].as_str().unwrap()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn said(speaker: Speaker, content: &str, turn: u32) -> Message {
+        Message {
+            id: format!("{speaker:?}-{turn}"),
+            speaker,
+            content: content.into(),
+            turn,
+            created_at: "2026-10-01T12:00:00Z".into(),
+        }
+    }
+
+    fn placement_chat() -> Vec<Message> {
+        let answers = [
+            "My day was quite busy. I went to college in the morning and after that I helped my father in his shop until the evening.",
+            "I live with my parents and my younger brother in Nagpur. My brother is twelve and he is crazy about cricket, he plays every evening.",
+            "Last weekend we visited my aunt in Pune. We took the train, and in the evening we walked by the river and ate pani puri together.",
+            "I think online classes are useful, but I prefer the classroom, because I can ask questions and discuss things with my friends.",
+            "If I could change one thing in my city, I would build more libraries, because many students have no quiet place to study at home.",
+            "My favourite place is my grandmother's village. There are mango trees everywhere, and in summer the whole house smells of mangoes.",
+        ];
+        let mut messages = vec![said(Speaker::Ella, "So Asha, tell me about your day so far!", 0)];
+        for (index, answer) in answers.iter().enumerate() {
+            let turn = index as u32 + 1;
+            messages.push(said(Speaker::Learner, answer, turn));
+            messages.push(said(Speaker::Ella, "That sounds lovely. What else do you enjoy?", turn));
+        }
+        messages
+    }
+
+    fn first_answer(topic: &Topic) -> TutorRequest {
+        TutorRequest {
+            learner_name: "Asha".into(),
+            topic_id: topic.id.clone(),
+            topic_label: topic.label.clone(),
+            messages: vec![said(Speaker::Ella, &opening_for(&topic.id, "Asha"), 0)],
+            learner_text: "I ate vada pav near the station yesterday.".into(),
+            turn: 1,
+            chore: None,
+            pitch: Pitch::at("A2"),
+            placement: None,
+        }
+    }
+
+    fn chore() -> ChoreContext {
+        let chore = find_chore("market-cloth-price").unwrap();
+        ChoreContext {
+            chore_id: chore.id.clone(),
+            level: "A2".into(),
+            character: find_character(&chore.character_id).unwrap(),
+            setting: chore.setting.clone(),
+            learner_goal: chore.learner_goal.clone(),
+            character_brief: chore.character_brief.clone(),
+            max_turns: chore.max_turns,
+            ledger: match &chore.win {
+                WinCondition::Ledger(spec) => Some(LedgerTurn {
+                    spec: spec.clone(),
+                    current: spec.opening,
+                    agreed: false,
+                }),
+                WinCondition::Rubric { .. } => None,
+            },
+        }
+    }
+
+    fn eventually(what: &str, done: impl Fn() -> bool) {
+        let started = Instant::now();
+        while !done() {
+            assert!(started.elapsed() < Duration::from_secs(10), "never: {what}");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_finished_talk_is_read_a_piece_at_a_time_and_its_answer_streamed() {
+        let fake = FakeLlama::start(pace(5, 5, 6));
+        let engine = fake.engine(Duration::from_secs(60));
+        let reading = engine.place("Asha", &placement_chat()).unwrap().unwrap();
+        assert_eq!(reading.level, "B1");
+
+        let asked = fake.completions();
+        let (answer, pieces) = asked.split_last().unwrap();
+        assert!(pieces.len() >= 3, "read in {} pieces", pieces.len());
+        assert_eq!(answer.body["stream"], true, "the answer is streamed");
+        assert!(answer.body.get("response_format").is_some());
+        let whole = prompt_text(&answer.body);
+        let mut read_so_far = 0;
+        for piece in pieces {
+            assert_eq!(piece.body["max_tokens"], 1, "a piece only reads");
+            let text = prompt_text(&piece.body);
+            assert!(whole.starts_with(&text), "every piece is the start of the prompt");
+            assert!(text.len() > read_so_far, "and each reads further than the last");
+            assert!(text.len() - read_so_far <= PIECE_CHARS + 40, "by about a piece");
+            read_so_far = text.len();
+        }
+        assert!(whole.len() - read_so_far <= PIECE_CHARS + 40, "the answer reads only the last stretch");
+    }
+
+    #[test]
+    fn a_talk_opened_while_a_talk_is_assessed_goes_first_and_the_assessment_carries_on_after() {
+        let fake = FakeLlama::start(pace(150, 20, 6));
+        let engine = Arc::new(fake.engine(Duration::from_secs(60)));
+        let assessing = {
+            let engine = Arc::clone(&engine);
+            thread::spawn(move || engine.place("Asha", &placement_chat()))
+        };
+        thread::sleep(Duration::from_millis(400));
+
+        let topic = crate::domain::topics()[0].clone();
+        let opened = Instant::now();
+        engine.opening(&topic, "Asha", &Pitch::at("A2")).unwrap();
+        let reply = engine.reply(&first_answer(&topic)).unwrap();
+        let answered = opened.elapsed();
+        assert_eq!(reply.text, REPLY);
+        // The piece in hand, the topic's instructions, the warm-up and the
+        // reply: 150 ms each, and the reply's 80.
+        assert!(answered < Duration::from_millis(1_200), "the first answer waited {answered:?}");
+        thread::sleep(Duration::from_millis(300));
+        assert!(!assessing.is_finished(), "the assessment waits for the talk to be over");
+
+        engine.talk_over();
+        let reading = assessing.join().unwrap().unwrap().unwrap();
+        assert_eq!(reading.level, "B1");
+        let asked = fake.completions();
+        let replied = asked.iter().position(|seen| seen.body["stream"] == true && seen.body.get("response_format").is_none());
+        let judged = asked.iter().position(|seen| seen.body.get("response_format").is_some());
+        assert!(replied < judged, "the talk's reply went before the assessment's answer");
+    }
+
+    #[test]
+    fn an_answer_being_written_when_a_talk_opens_is_dropped_and_written_again_after() {
+        let fake = FakeLlama::start(pace(5, 60, 20));
+        let engine = Arc::new(fake.engine(Duration::from_secs(60)));
+        let assessing = {
+            let engine = Arc::clone(&engine);
+            thread::spawn(move || engine.place("Asha", &placement_chat()))
+        };
+        // Its pieces take a few milliseconds; its answer, 1.2 s.
+        thread::sleep(Duration::from_millis(500));
+
+        let topic = crate::domain::topics()[0].clone();
+        let opened = Instant::now();
+        engine.opening(&topic, "Asha", &Pitch::at("A2")).unwrap();
+        engine.reply(&first_answer(&topic)).unwrap();
+        assert!(opened.elapsed() < Duration::from_millis(700), "the talk waited {:?}", opened.elapsed());
+        assert!(
+            fake.completions().iter().any(|seen| seen.dropped && seen.body.get("response_format").is_some()),
+            "the answer was left unfinished"
+        );
+
+        engine.talk_over();
+        assert_eq!(assessing.join().unwrap().unwrap().unwrap().level, "B1");
+    }
+
+    #[test]
+    fn chores_and_the_placement_chat_keep_their_instructions_for_next_time() {
+        let fake = FakeLlama::start(pace(5, 5, 4));
+        let engine = fake.engine(Duration::from_secs(60));
+        let context = chore();
+        let open: [(&str, Box<dyn Fn() -> String>); 2] = [
+            ("ella-chore-", Box::new(|| engine.opening_in_chore(&context, "Asha").unwrap())),
+            ("ella-placement-", Box::new(|| engine.placement_opening("Asha", Some(16)).unwrap())),
+        ];
+        for (kind, opening) in open {
+            let before = fake.kept();
+            opening();
+            engine.warm_ups.wait();
+            let kept: Vec<String> = fake.kept().into_iter().filter(|name| !before.contains(name)).collect();
+            assert_eq!(kept.len(), 1, "{kind}: {kept:?}");
+            assert!(kept[0].starts_with(kind), "{kept:?}");
+
+            let asked = fake.completions().len();
+            opening();
+            engine.warm_ups.wait();
+            assert!(
+                fake.seen().iter().any(|seen| seen.path.ends_with("action=restore") && seen.body["filename"] == kept[0]),
+                "{kind}: the next one restores them"
+            );
+            let again = &fake.completions()[asked..];
+            assert_eq!(again.len(), 1, "{kind}: and evaluates only its opening line");
+            assert_eq!(again[0].body["messages"].as_array().unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn the_talk_home_offers_is_got_ready_ahead_and_its_warm_up_restores_it() {
+        let fake = FakeLlama::start(pace(5, 5, 4));
+        let engine = fake.engine(Duration::from_secs(60));
+        let topic = crate::domain::topics()[0].clone();
+        let next = NextTalk::Topic {
+            learner_name: "Asha".into(),
+            topic_id: topic.id.clone(),
+            topic_label: topic.label.clone(),
+            level: "A2".into(),
+        };
+        engine.prepare(&next);
+        engine.prepare(&next);
+        eventually("the topic's instructions are kept", || fake.kept().len() == 1);
+        assert!(fake.kept()[0].starts_with("ella-topic-"));
+        let read = fake.completions();
+        assert!(read.len() >= 4, "read in pieces: {}", read.len());
+        assert!(read.iter().all(|seen| seen.body["max_tokens"] == 1));
+        thread::sleep(Duration::from_millis(100));
+        let saves = fake.seen().iter().filter(|seen| seen.path.ends_with("action=save")).count();
+        assert_eq!(saves, 1, "asked for twice, got ready once");
+
+        engine.opening(&topic, "Asha", &Pitch::at("A2")).unwrap();
+        engine.warm_ups.wait();
+        assert!(fake.seen().iter().any(|seen| seen.path.ends_with("action=restore")));
+        assert_eq!(fake.completions().len(), read.len() + 1, "the talk evaluates only its aim and opening");
+
+        engine.talk_over();
+        engine.prepare(&next);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(fake.completions().len(), read.len() + 1, "kept, it is not got ready again");
+    }
+
+    #[test]
+    fn getting_a_talk_ready_stops_when_another_talk_opens() {
+        let fake = FakeLlama::start(pace(150, 5, 4));
+        let engine = fake.engine(Duration::from_secs(60));
+        let topics = crate::domain::topics();
+        engine.prepare(&NextTalk::Topic {
+            learner_name: "Asha".into(),
+            topic_id: topics[0].id.clone(),
+            topic_label: topics[0].label.clone(),
+            level: "A2".into(),
+        });
+        thread::sleep(Duration::from_millis(250));
+        engine.opening(&topics[1], "Asha", &Pitch::at("A2")).unwrap();
+        engine.warm_ups.wait();
+        engine.talk_over();
+        thread::sleep(Duration::from_millis(500));
+        assert_eq!(fake.kept().len(), 1, "only the talk that opened kept its instructions: {:?}", fake.kept());
+    }
+
+    #[test]
+    fn closing_ella_lets_an_assessment_waiting_for_a_talk_go() {
+        let fake = FakeLlama::start(pace(5, 5, 4));
+        let engine = Arc::new(fake.engine(Duration::from_secs(60)));
+        let talking = engine.queue.talking();
+        let assessing = {
+            let engine = Arc::clone(&engine);
+            thread::spawn(move || engine.place("Asha", &placement_chat()))
+        };
+        thread::sleep(Duration::from_millis(150));
+        assert!(!assessing.is_finished(), "it waits for the talk");
+        engine.shutdown();
+        assert!(assessing.join().unwrap().is_err(), "and gives up when Ella closes");
+        assert!(fake.completions().is_empty(), "having asked the model nothing");
+        drop(talking);
     }
 }

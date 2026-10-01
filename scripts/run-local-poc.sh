@@ -31,5 +31,8 @@ done
 
 cd "$PROJECT_DIR"
 # The launcher above owns llama-server. Naming it here stops the app starting
-# a second one against the same model, which it otherwise does when installed.
-ELLA_ENGINE_MODE=local ELLA_LLM_BASE_URL=http://127.0.0.1:39091/v1 npm run desktop:dev
+# a second one against the same model, which it otherwise does when installed,
+# and naming its slot directory lets the app keep talks' instructions there.
+ENGINE_ROOT="${ELLA_ENGINE_ROOT:-$PROJECT_DIR/engines}"
+ELLA_ENGINE_MODE=local ELLA_LLM_BASE_URL=http://127.0.0.1:39091/v1 \
+  ELLA_LLM_SLOT_DIR="${ELLA_LLM_SLOT_DIR:-$ENGINE_ROOT/models/llm-slots}" npm run desktop:dev
