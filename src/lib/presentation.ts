@@ -445,7 +445,7 @@ const BADGES: BadgeRule[] = [
     id: "deposit",
     name: "Deposit back",
     level: 3,
-    color: "#262626",
+    color: "#5B7DEF",
     glyph: "house",
     how: "Get at least Rs 3500 of your deposit back from Grumble.",
     scene: { partner: "landlord", goal: "deposit-refund" },

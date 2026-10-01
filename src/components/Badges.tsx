@@ -77,15 +77,15 @@ export function BadgeRow({
  * thumbnail's wash and the row's paler one. */
 const PARTNER_TINT: Record<CastId, [string, string]> = {
   "stall-owner": ["#FFE9D4", "#FFF6EC"],
-  landlord: ["#ECECEC", "#F4F4F4"],
-  doctor: ["#FFE2EE", "#FFF0F6"],
+  landlord: ["#E4ECFB", "#F1F5FD"],
+  doctor: ["#FFE2DA", "#FFF0ED"],
   debater: ["#E7F4D6", "#F2F9E9"],
 };
 
 /** The same for a badge that is not a partner's, by its colour. */
 const COLOR_TINT: Record<string, [string, string]> = {
   "#FF7A00": ["#FFE9D4", "#FFF6EC"],
-  "#262626": ["#ECECEC", "#F4F4F4"],
+  "#5B7DEF": ["#E4ECFB", "#F1F5FD"],
   "#FF3181": ["#FFE2EE", "#FFF0F6"],
   "#68B506": ["#E7F4D6", "#F2F9E9"],
   "#9347DD": ["#EDE2FA", "#F6F0FD"],
