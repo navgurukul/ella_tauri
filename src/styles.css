@@ -1109,12 +1109,12 @@ button { font-family: inherit; }
 }
 .partner:hover { transform: translateY(-4px); box-shadow: 0 14px 30px rgba(38, 38, 38, 0.1); }
 
-/* Each partner's wash, hover, colour and floor shadow. The recap's band and a
-   badge's sheet draw them the same way. */
-[data-character="stall-owner"] { --tint: #ffe9d4; --tint-hover: #fff6ec; --accent: var(--orange); --shadow-w: 180px; }
-[data-character="landlord"] { --tint: #ececec; --tint-hover: #f4f4f4; --accent: var(--ink); --shadow-w: 110px; }
-[data-character="doctor"] { --tint: #ffe2ee; --tint-hover: #fff0f6; --accent: var(--pink); --shadow-w: 200px; }
-[data-character="debater"] { --tint: #e7f4d6; --tint-hover: #f2f9e9; --accent: var(--green); --shadow-w: 150px; }
+/* Each partner's wash, hover and colour, as Ella Mobile dresses them. The
+   recap's band and a badge's sheet draw them the same way. */
+[data-character="stall-owner"] { --tint: #ffe9d4; --tint-hover: #fff6ec; --accent: var(--orange); }
+[data-character="landlord"] { --tint: #e4ecfb; --tint-hover: #f1f5fd; --accent: #5b7def; }
+[data-character="doctor"] { --tint: #ffe2da; --tint-hover: #fff0ed; --accent: #ff685b; }
+[data-character="debater"] { --tint: #e7f4d6; --tint-hover: #f2f9e9; --accent: var(--green); }
 
 .partner__stage {
   position: relative;
@@ -1122,17 +1122,6 @@ button { font-family: inherit; }
   background: var(--tint);
   overflow: hidden;
 }
-.partner__shadow {
-  position: absolute;
-  left: 50%;
-  bottom: 8px;
-  width: var(--shadow-w);
-  height: 14px;
-  margin-left: calc(var(--shadow-w) / -2);
-  border-radius: 50%;
-  background: rgba(38, 38, 38, 0.08);
-}
-.partner[data-character="landlord"] .partner__shadow { background: rgba(38, 38, 38, 0.1); }
 .partner__entry {
   position: absolute;
   left: 50%;
@@ -1141,6 +1130,10 @@ button { font-family: inherit; }
   height: 190px;
   margin-left: -120px;
 }
+/* On their card each partner stands in its bottom-right corner, running past
+   its right and bottom edges. */
+.partner .partner__entry { left: auto; right: 0; margin-left: 0; }
+.partner[data-character="stall-owner"] .partner__entry { width: min(280px, 100%); }
 
 .partner__about { padding: 16px 18px 6px; }
 .partner__about h4 { font-size: 24px; line-height: 1.05; }
@@ -1187,60 +1180,31 @@ button { font-family: inherit; }
   color: var(--white);
 }
 
-/* The cast, drawn in CSS on a 240 by 190 box, each bobbing at their own
+/* The cast as Ella Mobile draws them on a 240 by 190 box: Bippo in CSS, the
+   others in SVG. Each breathes from the corner they stand in, at their own
    pace. */
 .figure {
   position: absolute;
   inset: 0;
-  transform-origin: 50% 100%;
-  animation: bobIdle var(--bob) ease-in-out var(--bob-delay, 0s) infinite;
+  transform-origin: 100% 100%;
+  animation: partnerBreathe var(--bob) ease-in-out var(--bob-delay, 0s) infinite;
 }
 .figure i { position: absolute; display: block; }
+.figure__portrait { display: block; width: 100%; height: 100%; color: var(--accent); }
 
 .figure--stall-owner { --bob: 4.6s; }
-.figure--stall-owner .figure__body { left: 30px; bottom: -8px; width: 180px; height: 112px; border-radius: 90px 90px 0 0 / 80px 80px 0 0; background: var(--orange); }
-.figure--stall-owner .figure__eye { bottom: 66px; width: 18px; height: 9px; border: 3px solid var(--ink); border-bottom: none; border-radius: 12px 12px 0 0; }
-.figure--stall-owner .figure__eye--left { left: 86px; }
-.figure--stall-owner .figure__eye--right { left: 136px; }
-.figure--stall-owner .figure__cheek { bottom: 50px; width: 14px; height: 14px; border-radius: 50%; background: #ffb48a; }
-.figure--stall-owner .figure__cheek--left { left: 66px; }
-.figure--stall-owner .figure__cheek--right { left: 160px; }
-.figure--stall-owner .figure__mouth { left: 102px; bottom: 40px; width: 36px; height: 16px; border: 3px solid var(--ink); border-top: none; border-radius: 0 0 24px 24px; }
+.figure--stall-owner .figure__body { left: 20%; bottom: -12px; width: 100%; height: 162px; border-radius: 50% 50% 0 0 / 80% 80% 0 0; background: var(--orange); }
+.figure--stall-owner .figure__eye { bottom: 96px; width: 26px; height: 13px; border: 4px solid var(--ink); border-bottom: none; border-radius: 18px 18px 0 0; }
+.figure--stall-owner .figure__eye--left { left: 50%; }
+.figure--stall-owner .figure__eye--right { left: 72%; }
+.figure--stall-owner .figure__cheek { bottom: 72px; width: 20px; height: 20px; border-radius: 50%; background: #ffb48a; }
+.figure--stall-owner .figure__cheek--left { left: 40%; }
+.figure--stall-owner .figure__cheek--right { left: 84%; }
+.figure--stall-owner .figure__mouth { left: calc(61% - 13px); bottom: 58px; width: 52px; height: 23px; border: 4px solid var(--ink); border-top: none; border-radius: 0 0 35px 35px; }
 
 .figure--landlord { --bob: 5.4s; --bob-delay: 0.6s; }
-.figure--landlord .figure__body { left: 80px; bottom: -6px; width: 80px; height: 166px; border-radius: 40px 40px 0 0 / 56px 56px 0 0; background: #3b3b3b; transform: skewX(-3deg); transform-origin: 50% 100%; }
-.figure--landlord .figure__brow { bottom: 122px; width: 22px; height: 4px; border-radius: 2px; background: var(--white); }
-.figure--landlord .figure__brow--left { left: 92px; transform: rotate(16deg); }
-.figure--landlord .figure__brow--right { left: 128px; transform: rotate(-16deg); }
-.figure--landlord .figure__eye { bottom: 106px; width: 9px; height: 9px; border-radius: 50%; background: var(--white); }
-.figure--landlord .figure__eye--left { left: 100px; }
-.figure--landlord .figure__eye--right { left: 132px; }
-.figure--landlord .figure__pupil { top: 2px; left: 3px; width: 4px; height: 4px; border-radius: 50%; background: var(--ink); }
-.figure--landlord .figure__eye--right .figure__pupil { left: 2px; }
-.figure--landlord .figure__mouth { left: 111px; bottom: 86px; width: 18px; height: 3px; border-radius: 2px; background: var(--white); }
-
 .figure--doctor { --bob: 3.8s; --bob-delay: 1.1s; }
-.figure--doctor .figure__body { left: 20px; bottom: -10px; width: 200px; height: 118px; border-radius: 100px 100px 0 0 / 96px 96px 0 0; background: var(--pink); transform: rotate(-4deg); transform-origin: 50% 100%; }
-.figure--doctor .figure__eye { width: 10px; height: 10px; border-radius: 50%; background: var(--ink); }
-.figure--doctor .figure__eye--left { left: 100px; bottom: 60px; }
-.figure--doctor .figure__eye--right { left: 134px; bottom: 62px; }
-.figure--doctor .figure__mouth { left: 112px; bottom: 42px; width: 20px; height: 9px; border: 3px solid var(--ink); border-top: none; border-radius: 0 0 14px 14px; transform: rotate(-4deg); }
-
 .figure--debater { --bob: 3.2s; --bob-delay: 0.3s; }
-.figure--debater .figure__body { left: 30px; bottom: -8px; width: 184px; height: 120px; border-radius: 110px 74px 0 0 / 118px 96px 0 0; background: var(--green); }
-.figure--debater .figure__lobe { background: var(--green); transform-origin: 50% 100%; }
-.figure--debater .figure__lobe--left { left: 84px; bottom: 60px; width: 52px; height: 72px; border-radius: 26px 26px 0 0 / 40px 40px 0 0; transform: rotate(-16deg); }
-.figure--debater .figure__lobe--middle { left: 122px; bottom: 64px; width: 56px; height: 90px; border-radius: 28px 28px 0 0 / 44px 44px 0 0; transform: rotate(-2deg); }
-.figure--debater .figure__lobe--right { left: 160px; bottom: 58px; width: 48px; height: 74px; border-radius: 24px 24px 0 0 / 38px 38px 0 0; transform: rotate(22deg); }
-.figure--debater .figure__brow { width: 22px; border: 3px solid var(--ink); border-bottom: none; border-radius: 14px 14px 0 0; }
-.figure--debater .figure__brow--left { left: 94px; bottom: 84px; height: 10px; transform: rotate(-4deg); }
-.figure--debater .figure__brow--right { left: 140px; bottom: 90px; height: 12px; transform: rotate(14deg); }
-.figure--debater .figure__eye { width: 20px; height: 20px; border-radius: 50%; background: var(--white); }
-.figure--debater .figure__eye--left { left: 96px; bottom: 60px; }
-.figure--debater .figure__eye--right { left: 140px; bottom: 62px; }
-.figure--debater .figure__pupil { top: 6px; left: 7px; width: 10px; height: 10px; border-radius: 50%; background: var(--ink); }
-.figure--debater .figure__eye--right .figure__pupil { left: 6px; }
-.figure--debater .figure__mouth { left: 112px; bottom: 40px; width: 40px; height: 14px; border: 3px solid var(--ink); border-top: none; border-radius: 0 0 26px 26px; transform: rotate(-10deg); }
 
 /* ------------------------------------------------------------- Profile ---- */
 
@@ -2400,10 +2364,10 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   background: var(--role-tint);
 }
 .recap-band--role[data-character="landlord"] {
-  --role-tint: #ececec;
-  --role-deep: #3b3b3b;
-  --role-ray: #dcdcdc;
-  --role-tick: var(--ink);
+  --role-tint: #e4ecfb;
+  --role-deep: #3d5fcf;
+  --role-ray: #cbd8f7;
+  --role-tick: #5b7def;
 }
 .recap-band--role .recap-band__text { flex: none; }
 .recap-band--role .recap-band__eyebrow { color: var(--role-deep); }
@@ -2548,8 +2512,6 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   transform-origin: 0 0;
 }
 .recap-band__partner .partner__entry { position: absolute; inset: 0; margin: 0; }
-/* On the recap the partner breathes rather than bobs, as its design has it. */
-.recap-band__partner .figure { animation-name: partnerBreathe; }
 .recap-band__bubble {
   position: absolute;
   z-index: 3;
