@@ -1,11 +1,9 @@
 import { FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
-import type { RefObject } from "react";
 import { LoaderCircle, Send } from "lucide-react";
 import {
   EllaMascot,
   SpeakingWave,
   ThinkingDots,
-  prefersReducedMotion,
   type EllaState,
 } from "./EllaMascot";
 import { PartnerFigure } from "./CastScreen";
@@ -141,11 +139,9 @@ export function TalkScreen({
   const micButton = useRef<HTMLButtonElement>(null);
   const focusMicAfterModeSwitch = useRef(false);
   const mounted = useRef(true);
-  const entryFrame = useRef<HTMLDivElement>(null);
   /** What Space does right now; refreshed every render so the one key listener
    * never acts on a stale state. */
   const spaceAction = useRef<() => void>(() => undefined);
-  const loom = useListenEntrance(entryFrame, state === "listening");
   // Her mouth follows whichever queue is playing. With none — the system voice
   // — there is nothing timed to follow, and the design's static "o" stands in.
   const speechMouth = useMemo<SpeechMouth>(
@@ -796,16 +792,18 @@ export function TalkScreen({
           </div>
         </div>
       ) : (
-        // Ella stands behind the whole stage rather than in a dock, so that
-        // when the mic opens she can dive away into it and come back from any
-        // side.
+        // Ella stands behind the whole stage rather than in a dock. As on Ella
+        // Mobile she holds her place there when the mic opens, leaning in to
+        // listen; in the first talk her face keeps its smile and her ears stay
+        // down.
         <div className="talk-entry-frame" aria-hidden="true">
-          <div ref={entryFrame} className="talk-entry">
+          <div className="talk-entry">
             <EllaMascot
               variant="conversation"
               className="ella--stage-talk"
               state={state}
-              ears={state === "listening" ? (loom ? "loom" : "listen") : "rest"}
+              ears={state === "listening" && variant !== "placement" ? "listen" : "rest"}
+              faceFollowsState={variant !== "placement"}
               speech={speechMouth}
               pokeable
               decorative
@@ -1003,101 +1001,4 @@ function errorMessage(reason: unknown): string {
   if (typeof reason === "string") return reason;
   if (reason instanceof Error) return reason.message;
   return "Something unexpected happened. Please try again.";
-}
-
-/** Where Ella can come back from after diving away: either side, below, above
- * (ears looming), or tumbling in upside down from high above. */
-const LISTEN_ENTRANCES: Array<{ x: number; y: number; rot: number; top?: boolean }> = [
-  { x: -820, y: 80, rot: -22 },
-  { x: 820, y: 80, rot: 22 },
-  { x: -640, y: -420, rot: -34, top: true },
-  { x: 640, y: -420, rot: 34, top: true },
-  { x: 0, y: 560, rot: 8 },
-  { x: -240, y: -640, rot: 180, top: true },
-  { x: 260, y: -640, rot: 180, top: true },
-];
-
-/**
- * The cue that the microphone is open: Ella dives away into the stage and comes
- * back from a random side, and now and then lands upside down and flips herself
- * upright. When listening ends she eases back from wherever the dive had got
- * to. Returns whether she came back from above, which is what makes her ears
- * loom instead of just pricking up.
- */
-function useListenEntrance(frame: RefObject<HTMLDivElement | null>, listening: boolean): boolean {
-  const [loom, setLoom] = useState(false);
-  const wasListening = useRef(false);
-
-  useEffect(() => {
-    const began = listening && !wasListening.current;
-    const ended = !listening && wasListening.current;
-    wasListening.current = listening;
-    if (!began && !ended) return;
-    if (ended) setLoom(false);
-
-    const element = frame.current;
-    if (!element || typeof element.animate !== "function" || prefersReducedMotion()) return;
-
-    if (ended) {
-      const from = getComputedStyle(element).transform;
-      element.getAnimations().forEach((animation) => animation.cancel());
-      element.animate(
-        [{ transform: from === "none" ? "none" : from }, { transform: "translate3d(0, 0, 0) rotate(0deg) scale(1)" }],
-        { duration: 500, easing: "ease-out" },
-      );
-      return;
-    }
-
-    const side = LISTEN_ENTRANCES[Math.floor(Math.random() * LISTEN_ENTRANCES.length)];
-    const upsideDown = Math.abs(side.rot) === 180;
-    setLoom(Boolean(side.top));
-    element.getAnimations().forEach((animation) => animation.cancel());
-    element.animate(
-      [
-        { transform: "translate3d(0, 0, 0) rotate(0deg) scale(1)", opacity: 1, offset: 0 },
-        { transform: "translate3d(0, 30px, -700px) rotate(-3deg) scale(0.94)", opacity: 0.55, offset: 0.3 },
-        {
-          transform: `translate3d(${side.x * 0.5}px, ${side.y * 0.5}px, -760px) rotate(${side.rot * 0.5}deg) scale(0.6)`,
-          opacity: 0.25,
-          offset: 0.45,
-        },
-        {
-          transform: `translate3d(${side.x}px, ${side.y}px, -360px) rotate(${side.rot}deg) scale(0.7)`,
-          opacity: 0,
-          offset: 0.52,
-        },
-        {
-          transform: `translate3d(${side.x * 0.55}px, ${side.y * 0.55}px, -140px) rotate(${side.rot * 0.7}deg) scale(0.86)`,
-          opacity: 1,
-          offset: 0.62,
-        },
-        {
-          transform: `translate3d(${side.x * 0.12}px, ${side.y * 0.1}px, 70px) rotate(${upsideDown ? 172 : side.rot * 0.2}deg) scale(1.05)`,
-          opacity: 1,
-          offset: 0.82,
-        },
-        {
-          transform: `translate3d(0, ${upsideDown ? -8 : 0}px, 0) rotate(${upsideDown ? 180 : 0}deg) scale(1)`,
-          opacity: 1,
-          offset: 1,
-        },
-      ],
-      { duration: 1500, easing: "cubic-bezier(0.32, 0.9, 0.28, 1)", fill: "forwards" },
-    );
-    if (!upsideDown) return;
-    const flip = window.setTimeout(() => {
-      element.animate(
-        [
-          { transform: "translate3d(0, -8px, 0) rotate(180deg) scale(1)" },
-          { transform: "translate3d(0, -6px, 0) rotate(96deg) scale(1.03)", offset: 0.55 },
-          { transform: "translate3d(0, 0, 0) rotate(-6deg) scale(1.01)", offset: 0.85 },
-          { transform: "translate3d(0, 0, 0) rotate(0deg) scale(1)" },
-        ],
-        { duration: 780, easing: "cubic-bezier(0.3, 1.05, 0.35, 1)", fill: "forwards" },
-      );
-    }, 1750);
-    return () => window.clearTimeout(flip);
-  }, [frame, listening]);
-
-  return loom;
 }

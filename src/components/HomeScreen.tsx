@@ -29,12 +29,16 @@ const ALL_TONES: Tone[] = ["green", "pink", "orange", "ink", "violet"];
 export function HomeScreen({
   snapshot,
   busy,
+  mood = "eager",
   onStart,
   onResume,
   onLevels,
 }: {
   snapshot: AppSnapshot;
   busy: boolean;
+  /** How Ella greets the learner, as on Ella Mobile: eager for the next talk,
+   * or happy once they have finished one. */
+  mood?: "eager" | "happy";
   onStart: (topic: Topic) => void;
   onResume: (sessionId: string) => void;
   onLevels: () => void;
@@ -66,7 +70,13 @@ export function HomeScreen({
         <div className="home-main">
           {featured && (
             <section className="today">
-              <EllaMascot variant="home" className="ella--home-peek" pokeable decorative />
+              <EllaMascot
+                variant="home"
+                className="ella--home-peek"
+                expression={mood === "happy" ? "homeHappy" : "homeEager"}
+                pokeable
+                decorative
+              />
               <div className="today__card">
                 <div className="today__text">
                   <p className="eyebrow">Today&rsquo;s talk</p>

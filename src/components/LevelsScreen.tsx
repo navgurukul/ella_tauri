@@ -300,7 +300,7 @@ function LevelPage({
           <p>{sub}</p>
         </div>
         {current && (
-          <EllaMascot variant="profile" color={avatarColor} className="ella--level-peek" entrance={false} decorative />
+          <EllaMascot variant="profile" color={avatarColor} className="ella--level-peek" decorative />
         )}
       </header>
 

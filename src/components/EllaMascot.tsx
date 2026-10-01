@@ -1,5 +1,16 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent, ReactNode, RefObject } from "react";
+import {
+  bodyKeyframes,
+  bodyLoop,
+  bodyTransform,
+  easeInOut,
+  easeOut,
+  faceClock,
+  LOOP_HANDOFF_MS,
+  POKE,
+  type BodyLoopName,
+} from "../lib/motion";
 import { mouthGeometry, type Box } from "../lib/mouth";
 import type { SpeechMouth } from "../lib/speech";
 import { lerpMouth, SMILE, SMILE_LIFT, VISEMES, type MouthShape } from "../lib/visemes";
@@ -23,22 +34,46 @@ export type EllaState = "resting" | "listening" | "thinking" | "speaking";
  */
 export type EllaVariant = "welcome" | "corner" | "age" | "conversation" | "home" | "mentor" | "profile";
 
-/** How her ears stand: at rest, pricked up while she listens, or looming
- * after she has dived back in from above. */
-export type EllaEars = "rest" | "listen" | "loom";
+/** How her ears stand: at rest, or lifted a little and twitching now and
+ * then while she listens on the talk stage. */
+export type EllaEars = "rest" | "listen";
 
-const BLOB: Record<EllaVariant, { width: number; height: number }> = {
-  welcome: { width: 1100, height: 570 },
-  corner: { width: 440, height: 320 },
-  age: { width: 760, height: 420 },
-  conversation: { width: 660, height: 450 },
-  home: { width: 300, height: 210 },
-  mentor: { width: 380, height: 200 },
-  profile: { width: 190, height: 135 },
+/**
+ * Ella Mobile's expressions that change how she holds herself, in place of
+ * her pose's loop. `listening` comes by itself whenever she listens; Home
+ * picks `homeEager`, or `homeHappy` once a talk has been finished.
+ */
+export type EllaExpression = "listening" | "homeEager" | "homeHappy";
+
+/** Each variant's design size, and the width of her mouth there, which an
+ * expression's lifts are measured in. */
+const BLOB: Record<EllaVariant, { width: number; height: number; mouth: number }> = {
+  welcome: { width: 1100, height: 570, mouth: 64 },
+  corner: { width: 440, height: 320, mouth: 32 },
+  age: { width: 760, height: 420, mouth: 52 },
+  conversation: { width: 660, height: 450, mouth: 30 },
+  home: { width: 300, height: 210, mouth: 24 },
+  mentor: { width: 380, height: 200, mouth: 26 },
+  profile: { width: 190, height: 135, mouth: 35 },
 };
 
-/** The placements whose smile widens into a grin now and then while resting. */
-const GRINS = new Set<EllaVariant>(["welcome", "corner", "age", "home"]);
+/** Her pose's loop: `bobIdle`, `bounceSpeak` and `thinkSway`. Listening
+ * always wears its expression instead. */
+const POSE_LOOP: Record<EllaState, BodyLoopName> = {
+  resting: "idle",
+  listening: "listening",
+  thinking: "thinking",
+  speaking: "speaking",
+};
+
+/** The learner's own Ella on the profile keeps her body still, as Ella
+ * Mobile's avatar does; only her eyes move. */
+const STILL = new Set<EllaVariant>(["profile"]);
+
+/** The placements whose smile widens into a grin now and then, as on Ella
+ * Mobile. Home wears an expression instead, which never grins, and the
+ * learner's own Ella only blinks. */
+const GRINS = new Set<EllaVariant>(["welcome", "corner", "age", "conversation", "mentor"]);
 
 /** Where lip sync draws her mouth: the box `.ella--conversation` gives her
  * smile in the stylesheet, and its line. Only the talk stage speaks. */
@@ -51,51 +86,121 @@ const SPEECH_MOUTH: Partial<Record<EllaVariant, Box & { line: number }>> = {
 const HANDOFF_IN_MS = 60;
 const HANDOFF_OUT_MS = 160;
 
-/** Where a mascot flies in from when its screen opens, as a direction off-screen. */
-const ENTRANCE_FROM: Array<[number, number]> = [
-  [-1, 0.25],
-  [1, 0.25],
-  [0, 1],
-  [-0.9, 0.9],
-  [0.9, 0.9],
-  [-0.8, -0.7],
-  [0.8, -0.7],
-  [0, -1],
-];
-
 export function prefersReducedMotion(): boolean {
   return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 }
 
 /**
- * Sends an element in from a random direction off-screen, the way every mascot
- * and talk partner arrives when a screen opens. It is put out of place before
- * the first paint, then released on the frame after.
+ * Plays her body's loop on `target`, easing her over from wherever the loop
+ * before had got to, as Ella Mobile does: without it, being cut off into
+ * listening would lift and tilt her in a single frame. A loop starts from its
+ * own first frame, so the handoff aims for where the new loop will be once it
+ * is over. With reduced motion she holds the loop's first frame, which for
+ * listening is the lean itself.
  */
-export function useEntrance(ref: RefObject<HTMLElement | null>, enabled = true) {
+function useBodyMotion(target: RefObject<HTMLElement | null>, name: BodyLoopName | null, mouth: number) {
+  const moving = useRef(false);
+
   useLayoutEffect(() => {
-    const element = ref.current;
-    if (!enabled || !element || prefersReducedMotion() || typeof requestAnimationFrame !== "function") {
+    const element = target.current;
+    if (!element) return;
+    const playing = typeof element.getAnimations === "function" ? element.getAnimations() : [];
+    // Read before cancelling: the loop being replaced still holds her pose.
+    const from = moving.current && playing.length > 0 ? getComputedStyle(element).transform : "none";
+    playing.forEach((animation) => animation.cancel());
+    moving.current = false;
+    if (!name) {
+      element.style.transform = "";
       return;
     }
-    const [x, y] = ENTRANCE_FROM[Math.floor(Math.random() * ENTRANCE_FROM.length)];
-    const rotation = (Math.random() * 26 - 13).toFixed(1);
-    element.style.transition = "none";
-    element.style.transform = `translate(${x * 1000}px, ${y * 800}px) rotate(${rotation}deg)`;
-    let release = 0;
-    const arm = requestAnimationFrame(() => {
-      release = requestAnimationFrame(() => {
-        element.style.transition = "transform 0.82s cubic-bezier(0.22, 1.08, 0.36, 1)";
-        element.style.transform = "translate(0px, 0px) rotate(0deg)";
-      });
-    });
-    return () => {
-      cancelAnimationFrame(arm);
-      cancelAnimationFrame(release);
-      element.style.transition = "";
-      element.style.transform = "";
+    const loop = bodyLoop(name, mouth);
+    if (prefersReducedMotion() || typeof element.animate !== "function") {
+      element.style.transform = bodyTransform(loop.at(0));
+      return;
+    }
+    element.style.transform = "";
+    element.animate(bodyKeyframes(loop), { duration: loop.period, iterations: Infinity });
+    // Made after the loop, so it plays over it until the two meet.
+    if (from && from !== "none") {
+      element.animate(
+        [{ transform: from }, { transform: bodyTransform(loop.at(LOOP_HANDOFF_MS / loop.period)) }],
+        { duration: LOOP_HANDOFF_MS, easing: "ease" },
+      );
+    }
+    moving.current = true;
+  }, [target, name, mouth]);
+
+  useEffect(() => {
+    const element = target.current;
+    return () => element?.getAnimations?.().forEach((animation) => animation.cancel());
+  }, [target]);
+}
+
+/**
+ * Her eyes follow the pointer, and she blinks and grins with every other
+ * Ella on screen (`faceClock`). While she listens she looks straight out at
+ * the learner instead, as on Ella Mobile.
+ */
+function useFaceLife({
+  root,
+  eyes,
+  lively,
+  eyesShown,
+  gazes,
+  grins,
+}: {
+  root: RefObject<HTMLElement | null>;
+  eyes: Array<RefObject<HTMLElement | null>>;
+  lively: boolean;
+  eyesShown: boolean;
+  gazes: boolean;
+  grins: boolean;
+}) {
+  const pointer = useRef<{ x: number; y: number } | null>(null);
+  const apply = useRef<() => void>(() => undefined);
+  apply.current = () => {
+    if (eyesShown) {
+      for (const eye of eyes) {
+        const element = eye.current;
+        if (!element) continue;
+        let dx = 0;
+        let dy = 0;
+        const at = pointer.current;
+        if (gazes && at) {
+          const box = element.getBoundingClientRect();
+          const cx = box.left + box.width / 2;
+          const cy = box.top + box.height / 2;
+          const distance = Math.min(5, Math.hypot(at.x - cx, at.y - cy) / 40);
+          const angle = Math.atan2(at.y - cy, at.x - cx);
+          dx = Math.cos(angle) * distance;
+          dy = Math.sin(angle) * distance;
+        }
+        element.style.transform = `translate(${dx}px, ${dy}px) scaleY(${faceClock.blinking ? 0.12 : 1})`;
+      }
+    }
+    // A data attribute rather than a class, which React would drop the next
+    // time it writes her classes.
+    const element = root.current;
+    if (!element) return;
+    if (grins && faceClock.grinning) element.dataset.grinning = "";
+    else delete element.dataset.grinning;
+  };
+
+  useLayoutEffect(() => apply.current(), [eyesShown, gazes, grins]);
+
+  useEffect(() => {
+    if (!lively) return;
+    const onPointerMove = (event: globalThis.MouseEvent) => {
+      pointer.current = { x: event.clientX, y: event.clientY };
+      apply.current();
     };
-  }, [ref, enabled]);
+    window.addEventListener("mousemove", onPointerMove);
+    const unsubscribe = faceClock.subscribe(() => apply.current());
+    return () => {
+      window.removeEventListener("mousemove", onPointerMove);
+      unsubscribe();
+    };
+  }, [lively]);
 }
 
 /** `cheer` closes her eyes into happy arcs and opens her mouth in a grin, as
@@ -111,8 +216,17 @@ interface EllaMascotProps {
   /** 1 renders the variant at its designed size. */
   scale?: number;
   ears?: EllaEars;
-  /** Fly in from off-screen when she mounts. */
-  entrance?: boolean;
+  /** How she holds herself in place of her pose's loop. Listening needs no
+   * asking. */
+  expression?: EllaExpression;
+  /** Whether her face follows what she is doing: bars for eyes while she
+   * thinks, and the design's "o" for a voice her mouth cannot follow. The
+   * first talk keeps her smile and open eyes throughout, as Ella Mobile's
+   * does. */
+  faceFollowsState?: boolean;
+  /** False where what holds her moves her instead, as the recap's rise and
+   * hops do: no loop, blink, gaze, grin or squish of her own. */
+  animate?: boolean;
   /** Squish when clicked. */
   pokeable?: boolean;
   /** Decorative instances defer announcements to a dedicated status region. */
@@ -131,6 +245,11 @@ interface EllaMascotProps {
  * Ella is drawn, not illustrated: a purple blob with two capsule ears, two eyes
  * that follow the cursor and blink, and a mouth that opens while she talks —
  * on the talk stage, into the shape of each sound she makes.
+ *
+ * She moves as Ella Mobile moves her, nested as the design nests her: the
+ * corner peek outermost, then her variant's scale, the body loop for her pose
+ * or expression (`useBodyMotion`), and the poke's squish inside that, so a
+ * prod never stops her bobbing.
  */
 export function EllaMascot({
   state = "resting",
@@ -139,7 +258,9 @@ export function EllaMascot({
   color,
   scale = 1,
   ears = "rest",
-  entrance = true,
+  expression,
+  faceFollowsState = true,
+  animate = true,
   pokeable = false,
   decorative = false,
   speech,
@@ -147,110 +268,47 @@ export function EllaMascot({
   style,
   children,
 }: EllaMascotProps) {
-  const entry = useRef<HTMLDivElement>(null);
+  const root = useRef<HTMLDivElement>(null);
   const inner = useRef<HTMLDivElement>(null);
+  const squish = useRef<HTMLDivElement>(null);
+  const squishing = useRef<Animation | null>(null);
   const leftEye = useRef<HTMLDivElement>(null);
   const rightEye = useRef<HTMLDivElement>(null);
-  const mouth = useRef<HTMLSpanElement>(null);
-  const pokeTimer = useRef(0);
   const speechBox = speech ? SPEECH_MOUTH[variant] : undefined;
   // Audio without Piper's timings, which her drawn mouth cannot follow.
   const [untimed, setUntimed] = useState(false);
 
-  useEntrance(entry, entrance);
+  // The face she wears, which in the first talk stays her resting one.
+  const face: EllaState = faceFollowsState ? state : "resting";
+  const shown = expression ?? (state === "listening" ? "listening" : null);
+  const loop = !animate || STILL.has(variant) ? null : (shown ?? POSE_LOOP[state]);
+  useBodyMotion(inner, loop, BLOB[variant].mouth);
 
-  useEffect(() => () => window.clearTimeout(pokeTimer.current), []);
+  const lively = animate && !prefersReducedMotion();
+  // Thinking closes her eyes into lines, and cheering into arcs, so there is
+  // nothing to follow.
+  const eyesShown = lively && face !== "thinking" && mood !== "cheer";
+  useFaceLife({
+    root,
+    eyes: [leftEye, rightEye],
+    lively,
+    eyesShown,
+    gazes: eyesShown && shown !== "listening",
+    // Only her own smile grins: not while her voice has her mouth, nor while
+    // an expression holds her face.
+    grins: eyesShown && GRINS.has(variant) && face === "resting" && state !== "speaking" && !shown,
+  });
 
-  useEffect(() => {
-    // Thinking closes her eyes into lines, and cheering into arcs, so there
-    // is nothing to follow.
-    if (prefersReducedMotion() || state === "thinking" || mood === "cheer") return;
-
-    const eyes = [leftEye, rightEye];
-    let pointerX: number | null = null;
-    let pointerY: number | null = null;
-    let blinking = false;
-
-    const applyEyes = () => {
-      for (const eye of eyes) {
-        const element = eye.current;
-        if (!element) continue;
-        let dx = 0;
-        let dy = 0;
-        if (pointerX !== null && pointerY !== null) {
-          const box = element.getBoundingClientRect();
-          const cx = box.left + box.width / 2;
-          const cy = box.top + box.height / 2;
-          const distance = Math.min(5, Math.hypot(pointerX - cx, pointerY - cy) / 40);
-          const angle = Math.atan2(pointerY - cy, pointerX - cx);
-          dx = Math.cos(angle) * distance;
-          dy = Math.sin(angle) * distance;
-        }
-        element.style.transform = `translate(${dx}px, ${dy}px) scaleY(${blinking ? 0.12 : 1})`;
-      }
-    };
-
-    const onPointerMove = (event: globalThis.MouseEvent) => {
-      pointerX = event.clientX;
-      pointerY = event.clientY;
-      applyEyes();
-    };
-    window.addEventListener("mousemove", onPointerMove);
-
-    let blinkTimer = 0;
-    let blinkCloseTimer = 0;
-    const scheduleBlink = () => {
-      blinkTimer = window.setTimeout(() => {
-        blinking = true;
-        applyEyes();
-        blinkCloseTimer = window.setTimeout(() => {
-          blinking = false;
-          applyEyes();
-          scheduleBlink();
-        }, 140);
-      }, 2600 + Math.random() * 3400);
-    };
-    scheduleBlink();
-
-    let grinTimer = 0;
-    let grinResetTimer = 0;
-    const scheduleGrin = () => {
-      grinTimer = window.setTimeout(() => {
-        const element = mouth.current;
-        if (element) {
-          element.style.transform = "scale(1.4)";
-          grinResetTimer = window.setTimeout(() => {
-            element.style.transform = "";
-          }, 650);
-        }
-        scheduleGrin();
-      }, 5000 + Math.random() * 4000);
-    };
-    if (GRINS.has(variant) && state === "resting") scheduleGrin();
-
-    return () => {
-      window.removeEventListener("mousemove", onPointerMove);
-      window.clearTimeout(blinkTimer);
-      window.clearTimeout(blinkCloseTimer);
-      window.clearTimeout(grinTimer);
-      window.clearTimeout(grinResetTimer);
-    };
-  }, [state, variant, mood]);
+  useEffect(() => () => squishing.current?.cancel(), []);
 
   function poke(event: MouseEvent<HTMLDivElement>) {
     // A click on a control sitting on her, like the first talk's mic, is not a poke.
     if ((event.target as Element).closest("button")) return;
-    const element = inner.current;
-    if (!element || prefersReducedMotion()) return;
-    // Dropping the animation and reading layout restarts it from the top, so a
-    // second poke mid-squish squishes again.
-    element.style.animation = "none";
-    void element.offsetWidth;
-    element.style.animation = "pokeSquish 0.6s cubic-bezier(0.3, 1.2, 0.4, 1)";
-    window.clearTimeout(pokeTimer.current);
-    pokeTimer.current = window.setTimeout(() => {
-      element.style.animation = "";
-    }, 640);
+    const element = squish.current;
+    if (!element || !lively || typeof element.animate !== "function") return;
+    // From the top again, so a second poke mid-squish squishes again.
+    squishing.current?.cancel();
+    squishing.current = element.animate(POKE.keyframes, { duration: POKE.duration, easing: POKE.easing });
   }
 
   const label = {
@@ -262,8 +320,9 @@ export function EllaMascot({
   const classes = [
     "ella",
     `ella--${variant}`,
-    `ella--${state}`,
+    `ella--${face}`,
     ears !== "rest" ? `ella--ears-${ears}` : "",
+    shown ? `ella--expression-${shown}` : "",
     mood === "cheer" ? "ella--cheer" : "",
     speechBox ? "ella--lipsync" : "",
     speechBox && untimed ? "is-untimed" : "",
@@ -275,6 +334,7 @@ export function EllaMascot({
 
   return (
     <div
+      ref={root}
       className={classes}
       style={
         {
@@ -287,7 +347,7 @@ export function EllaMascot({
       }
       onClick={pokeable ? poke : undefined}
     >
-      <div ref={entry} className="ella__entry">
+      <div className="ella__peek">
         <div className="ella__stage">
           <div
             ref={inner}
@@ -296,41 +356,43 @@ export function EllaMascot({
             aria-label={decorative ? undefined : label}
             aria-hidden={decorative || undefined}
           >
-            <span className="ella__ear ella__ear--left">
-              <i />
-            </span>
-            <span className="ella__ear ella__ear--right">
-              <i />
-            </span>
-            <span className="ella__body" />
-            <div ref={leftEye} className="ella__eye ella__eye--left">
-              <span className="ella__glint" />
+            <div ref={squish} className="ella__squish">
+              <span className="ella__ear ella__ear--left">
+                <i />
+              </span>
+              <span className="ella__ear ella__ear--right">
+                <i />
+              </span>
+              <span className="ella__body" />
+              <div ref={leftEye} className="ella__eye ella__eye--left">
+                <span className="ella__glint" />
+              </div>
+              <div ref={rightEye} className="ella__eye ella__eye--right">
+                <span className="ella__glint" />
+              </div>
+              <span className="ella__eye-line ella__eye-line--left" />
+              <span className="ella__eye-line ella__eye-line--right" />
+              <span className="ella__mouth ella__mouth--smile" />
+              <span className="ella__mouth ella__mouth--open" />
+              {mood === "cheer" && (
+                <>
+                  <span className="ella__happy-eye ella__happy-eye--left" />
+                  <span className="ella__happy-eye ella__happy-eye--right" />
+                  <span className="ella__grin">
+                    <i />
+                  </span>
+                </>
+              )}
+              {speech && speechBox && (
+                <SpeechMouthDrawing
+                  speech={speech}
+                  box={speechBox}
+                  stage={BLOB[variant]}
+                  state={state}
+                  onUntimed={setUntimed}
+                />
+              )}
             </div>
-            <div ref={rightEye} className="ella__eye ella__eye--right">
-              <span className="ella__glint" />
-            </div>
-            <span className="ella__eye-line ella__eye-line--left" />
-            <span className="ella__eye-line ella__eye-line--right" />
-            <span ref={mouth} className="ella__mouth ella__mouth--smile" />
-            <span className="ella__mouth ella__mouth--open" />
-            {mood === "cheer" && (
-              <>
-                <span className="ella__happy-eye ella__happy-eye--left" />
-                <span className="ella__happy-eye ella__happy-eye--right" />
-                <span className="ella__grin">
-                  <i />
-                </span>
-              </>
-            )}
-            {speech && speechBox && (
-              <SpeechMouthDrawing
-                speech={speech}
-                box={speechBox}
-                stage={BLOB[variant]}
-                state={state}
-                onUntimed={setUntimed}
-              />
-            )}
           </div>
           {children && <div className="ella__slot">{children}</div>}
         </div>
@@ -477,14 +539,21 @@ function SpeechMouthDrawing({
           <rect ref={teethClip} />
         </clipPath>
       </defs>
-      <g ref={group}>
-        <path ref={lips} className="ella__lips" />
-        {/* Upper teeth go last: the tongue sits behind them. */}
-        <g clipPath={`url(#${clip}-lips)`}>
-          <rect ref={lowerTeeth} className="ella__teeth" />
-          <ellipse ref={tongue} className="ella__tongue" />
-          <g clipPath={`url(#${clip}-teeth)`}>
-            <rect ref={teeth} className="ella__teeth" />
+      {/* A grin widens her smile about the middle of its box, as the
+          stylesheet's smile grows on every other face. */}
+      <g
+        className="ella__speech-grin"
+        style={{ transformOrigin: `${box.x + box.width / 2}px ${box.y + box.height / 2}px` }}
+      >
+        <g ref={group} className="ella__speech-mouth">
+          <path ref={lips} className="ella__lips" />
+          {/* Upper teeth go last: the tongue sits behind them. */}
+          <g clipPath={`url(#${clip}-lips)`}>
+            <rect ref={lowerTeeth} className="ella__teeth" />
+            <ellipse ref={tongue} className="ella__tongue" />
+            <g clipPath={`url(#${clip}-teeth)`}>
+              <rect ref={teeth} className="ella__teeth" />
+            </g>
           </g>
         </g>
       </g>
@@ -504,28 +573,6 @@ function place(element: SVGRectElement | null, box: Box | null) {
   element.setAttribute("width", `${box.width}`);
   element.setAttribute("height", `${box.height}`);
 }
-
-/** A CSS `cubic-bezier` timing function, solved for its progress. */
-function cubicBezier(x1: number, y1: number, x2: number, y2: number): (t: number) => number {
-  const at = (a: number, b: number, s: number) => 3 * a * s * (1 - s) ** 2 + 3 * b * s * s * (1 - s) + s ** 3;
-  const slope = (a: number, b: number, s: number) =>
-    3 * a * (1 - s) ** 2 + 6 * (b - a) * s * (1 - s) + 3 * (1 - b) * s * s;
-  return (t) => {
-    if (t <= 0) return 0;
-    if (t >= 1) return 1;
-    let s = t;
-    for (let step = 0; step < 8; step += 1) {
-      const d = slope(x1, x2, s);
-      if (Math.abs(d) < 1e-6) break;
-      s = Math.min(1, Math.max(0, s - (at(x1, x2, s) - t) / d));
-    }
-    return at(y1, y2, s);
-  };
-}
-
-/** Flutter's `Curves.easeOut` and `Curves.easeInOut`, as Ella Mobile hands over. */
-const easeOut = cubicBezier(0, 0, 0.58, 1);
-const easeInOut = cubicBezier(0.42, 0, 0.58, 1);
 
 /** The learner's own little blob, in the colour they picked on their profile. */
 export function LearnerAvatar({ color, size = "sm" }: { color: string; size?: "sm" | "lg" }) {

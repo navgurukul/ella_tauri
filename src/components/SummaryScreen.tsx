@@ -221,13 +221,14 @@ function TalkBand({
       <div className="recap-band__ella">
         <div className="recap-band__ella-rise">
           <div className={`recap-band__ella-hop ${cheer ? "is-cheering" : ""}`.trim()}>
+            {/* The band rises and hops her, so she has no motion of her own,
+                as Ella Mobile's recap draws her. */}
             <EllaMascot
               variant="conversation"
               mood={cheer ? "cheer" : "calm"}
               scale={0.62}
-              entrance={false}
+              animate={false}
               className="ella--recap"
-              pokeable
               decorative
             />
           </div>
@@ -273,7 +274,7 @@ function RoleBand({
       {badge && <RecapBadge name={badge} chore={chore} />}
       <div className="recap-band__partner" aria-hidden="true">
         <div className="recap-band__partner-box">
-          <PartnerFigure id={chore.character_id as CastId} entrance={false} />
+          <PartnerFigure id={chore.character_id as CastId} />
         </div>
       </div>
       {chore.last_line && (

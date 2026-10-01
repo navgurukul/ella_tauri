@@ -200,7 +200,8 @@ export function PlacementTalk({
       </div>
 
       <div className="talk-dock">
-        <EllaMascot variant="conversation" className="ella--stage-talk" state={ella}>
+        {/* As in the talk itself, her face keeps its smile through the first talk. */}
+        <EllaMascot variant="conversation" className="ella--stage-talk" state={ella} faceFollowsState={false}>
           <div className="mic-stack">
             <div className="mic-wrap">
               <button

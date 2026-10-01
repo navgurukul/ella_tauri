@@ -313,7 +313,6 @@ function AgeStep({
       <EllaMascot
         variant="age"
         className={`ella--ob-age ${value ? "is-up" : ""}`.trim()}
-        entrance={false}
         pokeable
         decorative
       />

@@ -170,7 +170,6 @@ export function ProfileScreen({
               variant="profile"
               color={avatarColor}
               className="ella--profile-peek"
-              entrance={false}
               decorative
             />
           </section>
