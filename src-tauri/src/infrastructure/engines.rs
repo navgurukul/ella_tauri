@@ -5480,6 +5480,32 @@ mod ledger_tests {
     }
 
     #[test]
+    fn a_partner_plays_their_chores_under_the_name_the_app_shows() {
+        // The talk stage draws Bippo and Grumble, as Talk partners does, so a
+        // character still calling himself Ramesh or Mr Khanna would be a
+        // stranger with their face.
+        for (chore_id, name) in [
+            ("market-cloth-price", "Bippo"),
+            ("deposit-refund", "Grumble"),
+            ("sell-me-a-pen", "Grumble"),
+        ] {
+            let chore = find_chore(chore_id).unwrap();
+            let context = ChoreContext {
+                chore_id: chore.id,
+                level: "A1".into(),
+                character: crate::domain::find_character(&chore.character_id).unwrap(),
+                setting: chore.setting,
+                learner_goal: chore.learner_goal,
+                character_brief: chore.character_brief,
+                max_turns: chore.max_turns,
+                ledger: None,
+            };
+            assert!(chore_system_prompt("Souvik", &context).starts_with(&format!("You are {name}, ")));
+            assert!(fallback_opening(&context).starts_with(&format!("{name} here.")));
+        }
+    }
+
+    #[test]
     fn a_chore_character_is_told_not_to_play_along_with_a_romantic_advance_either() {
         // The free-conversation guardrail alone would not have caught this: a
         // chore character has its own "stay in character at all times" line,

@@ -1206,13 +1206,16 @@ button { font-family: inherit; }
 
 .figure--stall-owner { --bob: 4.6s; }
 .figure--stall-owner .figure__body { left: 20%; bottom: -12px; width: 100%; height: 162px; border-radius: 50% 50% 0 0 / 80% 80% 0 0; background: var(--orange); }
-.figure--stall-owner .figure__eye { bottom: 96px; width: 26px; height: 13px; border: 4px solid var(--ink); border-bottom: none; border-radius: 18px 18px 0 0; }
+/* His eyes and grin are borders with one side left open, and the browser
+   draws a hairline along that open edge, plain to see once he is scaled up
+   on the talk stage. Half a pixel off that edge takes it away. */
+.figure--stall-owner .figure__eye { bottom: 96px; width: 26px; height: 13px; border: 4px solid var(--ink); border-bottom: none; border-radius: 18px 18px 0 0; clip-path: inset(0 0 0.5px 0); }
 .figure--stall-owner .figure__eye--left { left: 50%; }
 .figure--stall-owner .figure__eye--right { left: 72%; }
 .figure--stall-owner .figure__cheek { bottom: 72px; width: 20px; height: 20px; border-radius: 50%; background: #ffb48a; }
 .figure--stall-owner .figure__cheek--left { left: 40%; }
 .figure--stall-owner .figure__cheek--right { left: 84%; }
-.figure--stall-owner .figure__mouth { left: calc(61% - 13px); bottom: 58px; width: 52px; height: 23px; border: 4px solid var(--ink); border-top: none; border-radius: 0 0 35px 35px; }
+.figure--stall-owner .figure__mouth { left: calc(61% - 13px); bottom: 58px; width: 52px; height: 23px; border: 4px solid var(--ink); border-top: none; border-radius: 0 0 35px 35px; clip-path: inset(0.5px 0 0 0); }
 
 .figure--landlord { --bob: 5.4s; --bob-delay: 0.6s; }
 .figure--doctor { --bob: 3.8s; --bob-delay: 1.1s; }
@@ -1712,6 +1715,41 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 .talk-entry .ella--listening .ella__inner { animation: leanListen 2.6s ease-in-out infinite; }
 .talk-entry .ella--speaking .ella__inner { animation: bounceSpeak 0.85s ease-in-out infinite; }
 .talk-entry .ella--thinking .ella__inner { animation: thinkSway 2.2s ease-in-out infinite; }
+
+/* A talk partner in Ella's place: their card's 240 by 190 drawing, scaled up
+   in the stage's bottom-right corner, where the stage's edges crop them as
+   their card's do. Their face sits beside the mic, not behind it. */
+.talk-partner {
+  --partner-scale: 2.5;
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: calc(240px * var(--partner-scale));
+  height: calc(190px * var(--partner-scale));
+  pointer-events: none;
+}
+.talk-partner__box {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 240px;
+  height: 190px;
+  transform: scale(var(--partner-scale));
+  transform-origin: 0 0;
+}
+/* With no purple body behind them, the lines under the mic are ink on the
+   paper, and the typing field needs an edge to stand out from it. */
+.has-partner .mic-hint { color: var(--ink-70); text-shadow: none; }
+.has-partner .mic-hint .key { border-color: var(--ink-40); }
+.has-partner .talk-controls .link-button { color: var(--ink); text-shadow: none; }
+.has-partner .talk-controls .link-button:hover { color: var(--ink-60); }
+.has-partner .composer input { box-shadow: inset 0 0 0 1.5px var(--ink-14); }
+.has-partner .mic:focus-visible,
+.has-partner .talk-controls .link-button:focus-visible,
+.has-partner .composer__send:focus-visible {
+  outline-color: var(--violet);
+  box-shadow: none;
+}
 
 .talk-head {
   position: relative;
@@ -3737,6 +3775,7 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   .section-head { margin-top: 20px; }
   .talk-stage { padding-bottom: 290px; }
   .ella--stage-talk { bottom: -120px; --ella-scale: 0.9 !important; }
+  .talk-partner { --partner-scale: 2.2; }
   .talk-controls { bottom: 28px; }
   .talk-copy { gap: 14px; }
   .talk-prompt { font-size: 24px; line-height: 1.38; }

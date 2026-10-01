@@ -869,22 +869,22 @@ pub fn characters() -> Vec<Character> {
         },
         Character {
             id: "stall-owner".into(),
-            name: "Ramesh".into(),
+            name: "Bippo".into(),
             kind: CharacterKind::Cast,
             blob: BlobStyle { palette: "orange".into(), eyes: "narrow".into(), mouth: "flat".into() },
             voice: "en_IN-navgurukul-medium".into(),
-            persona: "You are Ramesh, who runs a busy cloth stall in a crowded market. \
+            persona: "You are Bippo, who runs a busy cloth stall in a crowded market. \
                       You are friendly but you have sold here for twenty years and you do \
                       not give things away. You speak in short, quick sentences."
                 .into(),
         },
         Character {
             id: "landlord".into(),
-            name: "Mr Khanna".into(),
+            name: "Grumble".into(),
             kind: CharacterKind::Cast,
             blob: BlobStyle { palette: "ink".into(), eyes: "narrow".into(), mouth: "flat".into() },
             voice: "en_IN-navgurukul-medium".into(),
-            persona: "You are Mr Khanna, a landlord who is polite but reluctant and \
+            persona: "You are Grumble, a landlord who is polite but reluctant and \
                       always a little busy. You would rather not return money you are \
                       already holding."
                 .into(),
@@ -915,7 +915,7 @@ pub fn chores() -> Vec<Chore> {
             level: 1,
             min_age: 10,
             interests: vec!["shopping".into(), "food".into()],
-            setting: "A cloth stall in a crowded market. Ramesh is folding shirts.".into(),
+            setting: "A cloth stall in a crowded market. Bippo is folding shirts.".into(),
             learner_goal: "Get the price down to Rs 400 or less, and get him to agree.".into(),
             character_brief: "You opened at Rs 600 for the shirt. You will not go below \
                               Rs 350 under any circumstances. Come down only when the \
@@ -943,7 +943,7 @@ pub fn chores() -> Vec<Chore> {
             level: 1,
             min_age: 14,
             interests: vec!["work".into()],
-            setting: "Mr Khanna's doorway. You moved out last week and he still has \
+            setting: "Grumble's doorway. You moved out last week and he still has \
                       your Rs 5000 deposit. He has offered you Rs 500 back."
                 .into(),
             learner_goal: "Get him to agree to return at least Rs 3500 of the deposit."

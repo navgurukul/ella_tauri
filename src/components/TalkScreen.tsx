@@ -8,8 +8,10 @@ import {
   prefersReducedMotion,
   type EllaState,
 } from "./EllaMascot";
+import { PartnerFigure } from "./CastScreen";
 import { MicGlyph } from "./HomeScreen";
 import { bridge } from "../lib/bridge";
+import { castName } from "../lib/presentation";
 import {
   createSpeechQueue,
   createVoiceCapture,
@@ -22,6 +24,7 @@ import { llog, logServerTimings, markTurnStart, turnElapsed } from "../lib/laten
 import { VISEMES } from "../lib/visemes";
 import type {
   AudioPayload,
+  CastId,
   PhonemeSpan,
   Session,
   SessionSummary,
@@ -36,13 +39,14 @@ type Playback = { audio?: AudioPayload | null; speech_words: WordSpan[]; speech_
 /** How the last turn went, for the screen reader's status line. */
 type Reaction = "success" | "error" | null;
 
-/** The line under the mic. While Ella is resting or listening, Space works the
- * mic too, and a key cap follows the line to say so. */
-const MIC_HINT: Record<EllaState, string> = {
-  resting: "Click or press",
-  listening: "Listening… press again when you finish",
-  thinking: "Ella is thinking…",
-  speaking: "Ella is speaking",
+/** The line under the mic, naming whoever is talking with the learner. While
+ * they are resting or listening, Space works the mic too, and a key cap
+ * follows the line to say so. */
+const MIC_HINT: Record<EllaState, (speaker: string) => string> = {
+  resting: () => "Click or press",
+  listening: () => "Listening… press again when you finish",
+  thinking: (speaker) => `${speaker} is thinking…`,
+  speaking: (speaker) => `${speaker} is speaking`,
 };
 
 // Below this, `voiceLevel` (0-1, from the same RMS meter that drives the mic's
@@ -59,6 +63,7 @@ const SPEAK_UP_DELAY_MS = 4000;
 export function TalkScreen({
   session,
   variant = "talk",
+  partner = null,
   onSessionChange,
   onClosing,
   onComplete,
@@ -67,6 +72,10 @@ export function TalkScreen({
   /** `placement` is the first talk, which finds the learner's level: it says
    * so in its chip, and its way out is Skip rather than End talk. */
   variant?: "talk" | "placement";
+  /** The talk partner playing this talk, as on Ella Mobile: they stand on the
+   * stage in Ella's place, and the lines under the mic name them. Null for
+   * Ella's own talks. */
+  partner?: CastId | null;
   onSessionChange: (session: Session) => void;
   /** The moment a turn arrives that closed the session, before Ella has said
    * it: a placement starts reading the level then, while she talks. */
@@ -153,6 +162,11 @@ export function TalkScreen({
   );
 
   const latestElla = [...session.messages].reverse().find((message) => message.speaker === "ella");
+  // Who the learner is talking with, for every line that names them.
+  const speaker = partner ? castName(partner) : "Ella";
+  const playbackError = partner
+    ? `This could not be played aloud. You can still read what ${speaker} said.`
+    : "Ella could not play this aloud. You can still read her message.";
 
   async function cancelVoiceStream() {
     const streamId = voiceStreamId.current;
@@ -390,7 +404,7 @@ export function TalkScreen({
         rest();
         if (!live()) return;
         flashReaction("error", 1800);
-        setError("Ella could not play this aloud. You can still read her message.");
+        setError(playbackError);
       },
     };
   }
@@ -439,7 +453,7 @@ export function TalkScreen({
           playbackWatchdog.current = null;
           setState("resting");
           flashReaction("error", 1800);
-          setError("Ella could not play this aloud. You can still read her message.");
+          setError(playbackError);
         },
       });
       stopSpeech.current = playbackSettled ? () => undefined : cancel;
@@ -447,7 +461,7 @@ export function TalkScreen({
       playbackSettled = true;
       setState("resting");
       flashReaction("error", 1800);
-      setError("Ella could not play this aloud. You can still read her message.");
+      setError(playbackError);
     }
     if (playbackSettled) return;
     // Defensive fallback for platform speech engines that never dispatch `end`.
@@ -756,8 +770,8 @@ export function TalkScreen({
   const micHint = micStarting
     ? "Opening the microphone…"
     : state === "speaking" && sending
-      ? "Ella is answering…"
-      : MIC_HINT[state];
+      ? `${speaker} is answering…`
+      : MIC_HINT[state](speaker);
   const spaceWorks = !micStarting && !sending && (state === "resting" || state === "listening");
   const announcedStatus = `${micHint}${spaceWorks && state === "resting" ? " Space" : ""}${
     reaction === "success" ? " Nice work." : ""
@@ -771,22 +785,34 @@ export function TalkScreen({
   });
 
   return (
-    <div className="screen screen--talk" data-screen="talk">
-      {/* Ella stands behind the whole stage rather than in a dock, so that when
-          the mic opens she can dive away into it and come back from any side. */}
-      <div className="talk-entry-frame" aria-hidden="true">
-        <div ref={entryFrame} className="talk-entry">
-          <EllaMascot
-            variant="conversation"
-            className="ella--stage-talk"
-            state={state}
-            ears={state === "listening" ? (loom ? "loom" : "listen") : "rest"}
-            speech={speechMouth}
-            pokeable
-            decorative
-          />
+    <div className={`screen screen--talk${partner ? " has-partner" : ""}`} data-screen="talk">
+      {partner ? (
+        // A partner stands where their card puts them, in the bottom-right
+        // corner with the stage's edges cropping them, and holds their place
+        // while the mic is open, as on Ella Mobile.
+        <div className="talk-partner" data-character={partner} aria-hidden="true">
+          <div className="talk-partner__box">
+            <PartnerFigure id={partner} />
+          </div>
         </div>
-      </div>
+      ) : (
+        // Ella stands behind the whole stage rather than in a dock, so that
+        // when the mic opens she can dive away into it and come back from any
+        // side.
+        <div className="talk-entry-frame" aria-hidden="true">
+          <div ref={entryFrame} className="talk-entry">
+            <EllaMascot
+              variant="conversation"
+              className="ella--stage-talk"
+              state={state}
+              ears={state === "listening" ? (loom ? "loom" : "listen") : "rest"}
+              speech={speechMouth}
+              pokeable
+              decorative
+            />
+          </div>
+        </div>
+      )}
 
       <header className="talk-head">
         <span className="pill pill--white">
@@ -930,7 +956,7 @@ export function TalkScreen({
                     : state === "listening"
                       ? "Stop and send"
                       : state === "speaking"
-                        ? "Interrupt Ella and start speaking"
+                        ? `Interrupt ${speaker} and start speaking`
                         : "Start speaking"
                 }
                 onClick={() => (state === "listening" ? void finishListening() : void beginListening())}
