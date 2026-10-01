@@ -2,6 +2,7 @@ pub mod audio;
 pub mod database;
 pub mod engine_manager;
 pub mod engines;
+pub mod model_queue;
 pub mod models;
 pub mod safety;
 pub mod speech_timing;

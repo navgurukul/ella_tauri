@@ -13,6 +13,9 @@ WHISPER_BIN="$ENGINE_ROOT/bin/whisper/whisper-server"
 LLM_MODEL="$ENGINE_ROOT/models/llm/model.gguf"
 STT_MODEL="$ENGINE_ROOT/models/stt/ggml-small.bin"
 CANARY_MODEL="${ELLA_CANARY_MODEL:-$ENGINE_ROOT/models/stt/canary-180m-flash-Q8_0.gguf}"
+# Where llama-server keeps talks' evaluated instructions, as the installed app
+# does beside its model. Ella reads them too when told with ELLA_LLM_SLOT_DIR.
+SLOT_DIR="${ELLA_LLM_SLOT_DIR:-$ENGINE_ROOT/models/llm-slots}"
 
 for required in "$LLAMA_BIN" "$WHISPER_BIN" "$LLM_MODEL" "$STT_MODEL" "$CANARY_MODEL"; do
   if [[ ! -e "$required" ]]; then
@@ -27,6 +30,8 @@ if [[ "$(head -c 4 "$CANARY_MODEL")" != "GGUF" ]]; then
   echo "Repair it from $PROJECT_DIR with: npm run models:install" >&2
   exit 1
 fi
+
+mkdir -p "$SLOT_DIR"
 
 export DYLD_LIBRARY_PATH="$ENGINE_ROOT/bin/llama:$ENGINE_ROOT/bin/whisper:${DYLD_LIBRARY_PATH:-}"
 
@@ -43,6 +48,7 @@ trap cleanup EXIT INT TERM
   --ctx-size 4096 \
   --threads "${ELLA_LLAMA_THREADS:-4}" \
   --cors-origins "tauri://localhost,http://tauri.localhost" \
+  --slot-save-path "$SLOT_DIR" \
   --parallel 1 &
 LLAMA_PID=$!
 
@@ -61,5 +67,5 @@ WHISPER_PID=$!
 
 echo "Canary native STT will load from $CANARY_MODEL (Whisper remains on $STT_PORT as fallback)."
 echo "Local Ella sidecars are starting on 127.0.0.1:$LLM_PORT and 127.0.0.1:$STT_PORT"
-echo "In another terminal run: ELLA_ENGINE_MODE=local npm run desktop:dev"
+echo "In another terminal run: ELLA_ENGINE_MODE=local ELLA_LLM_BASE_URL=http://127.0.0.1:$LLM_PORT/v1 ELLA_LLM_SLOT_DIR=\"$SLOT_DIR\" npm run desktop:dev"
 wait

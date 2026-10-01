@@ -21,7 +21,10 @@ use crate::{
     infrastructure::{
         audio::{quietest_cut_index, trim_to_speech, VadOutput},
         database::{AssessmentWrite, Database},
-        engines::{trailing_question, GeneratedReply, SpeechSegment, SpeechSink, TutorEngine, FREE_TOPIC_TURNS},
+        engines::{
+            trailing_question, GeneratedReply, NextTalk, SpeechSegment, SpeechSink, TutorEngine,
+            FREE_TOPIC_TURNS,
+        },
         safety,
     },
     notes,
@@ -211,6 +214,11 @@ impl AppService {
         } else {
             (Vec::new(), LearnerProgress::default(), None)
         };
+        if let Some(learner) = &learner {
+            if let Err(error) = self.prepare_next_talk(learner, recent_sessions.is_empty()) {
+                eprintln!("[engines] could not tell what to get ready next: {error}");
+            }
+        }
         Ok(AppSnapshot {
             topics: topics_for_age(learner.as_ref().and_then(|learner| learner.age)),
             learner,
@@ -220,6 +228,34 @@ impl AppService {
             standing,
             engine_status: self.engine.status(),
         })
+    }
+
+    /// Has the engine get the talk the learner will most likely open next
+    /// ready, while they look at the window: the placement chat for someone
+    /// who has not talked to Ella yet, since onboarding ends in it, and
+    /// otherwise Home's "Today's talk", the first topic offered them. The
+    /// window reads Home again after onboarding saves the learner, after a log
+    /// in, and after every talk, and each time asks for this; once it is ready,
+    /// asking again costs a look at a file.
+    fn prepare_next_talk(&self, learner: &Learner, never_talked: bool) -> EllaResult<()> {
+        let next = if never_talked && !self.database.placed()? {
+            NextTalk::Placement {
+                learner_name: learner.name.clone(),
+                age: learner.age,
+            }
+        } else {
+            let Some(topic) = topics_for_age(learner.age).into_iter().next() else {
+                return Ok(());
+            };
+            NextTalk::Topic {
+                learner_name: learner.name.clone(),
+                topic_id: topic.id,
+                topic_label: topic.label,
+                level: self.placement()?.0.level,
+            }
+        };
+        self.engine.prepare(&next);
+        Ok(())
     }
 
     /// Where the learner is, and whether a placement chat has read a level for
@@ -1256,6 +1292,8 @@ impl AppService {
     pub fn complete_session(&self, session_id: &str) -> EllaResult<SessionSummary> {
         let session = self.database.session(session_id)?;
         self.database.complete_session(session_id, &now())?;
+        // The recap's assessment, asked for next, can have the model now.
+        self.engine.talk_over();
         // A placement chat ended early — Skip — has a check nobody will read.
         self.placement_checks
             .lock()
@@ -2567,6 +2605,10 @@ mod curriculum_flow_tests {
         scored: Vec<Vec<String>>,
         /// The answers each correction was asked for.
         corrected: Vec<Vec<String>>,
+        /// What it was asked to get ready, in order.
+        prepared: Vec<NextTalk>,
+        /// How many times it heard that a talk was over.
+        talks_over: usize,
     }
 
     /// A model that always answers the same: ready or not, one level, and the
@@ -2598,6 +2640,12 @@ mod curriculum_flow_tests {
     impl TutorEngine for Judge {
         fn status(&self) -> EngineStatus {
             DemoEngine.status()
+        }
+        fn prepare(&self, next: &NextTalk) {
+            self.heard.lock().unwrap().prepared.push(next.clone());
+        }
+        fn talk_over(&self) {
+            self.heard.lock().unwrap().talks_over += 1;
         }
         fn opening(&self, topic: &Topic, learner_name: &str, pitch: &Pitch) -> EllaResult<String> {
             self.heard.lock().unwrap().pitches.push(pitch.clone());
@@ -2658,6 +2706,68 @@ mod curriculum_flow_tests {
         let service = AppService::new(Database::in_memory().unwrap(), Box::new(DemoEngine));
         service.save_learner("Asha", Some(14)).unwrap();
         service
+    }
+
+    #[test]
+    fn the_window_reading_home_gets_the_talk_the_learner_will_open_next_ready() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let service = judged(Judge::new(&heard));
+        service.bootstrap().unwrap();
+        assert_eq!(
+            heard.lock().unwrap().prepared.last(),
+            Some(&NextTalk::Placement { learner_name: "Asha".into(), age: Some(14) }),
+            "onboarding ends in the placement chat"
+        );
+
+        // Skipped, it leaves Home's "Today's talk" next, at the level they
+        // stand at.
+        let skipped = service.start_placement().unwrap();
+        service.complete_session(&skipped.id).unwrap();
+        service.bootstrap().unwrap();
+        let today = topics_for_age(Some(14)).remove(0);
+        let todays_talk = NextTalk::Topic {
+            learner_name: "Asha".into(),
+            topic_id: today.id.clone(),
+            topic_label: today.label.clone(),
+            level: curriculum::start().level,
+        };
+        assert_eq!(heard.lock().unwrap().prepared.last(), Some(&todays_talk));
+
+        // Placed, at the level the placement found.
+        let placement = service.start_placement().unwrap();
+        answer_placement(&service, &placement.id);
+        service.assess_session(&placement.id).unwrap();
+        service.bootstrap().unwrap();
+        assert_eq!(
+            heard.lock().unwrap().prepared.last(),
+            Some(&NextTalk::Topic {
+                learner_name: "Asha".into(),
+                topic_id: today.id,
+                topic_label: today.label,
+                level: "B1".into(),
+            })
+        );
+
+        let asked = heard.lock().unwrap().prepared.len();
+        service.log_out().unwrap();
+        assert_eq!(heard.lock().unwrap().prepared.len(), asked, "nobody signed in, nothing to get ready");
+    }
+
+    #[test]
+    fn a_talk_that_ends_lets_the_engine_get_on_with_what_waited_for_it() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let service = judged(Judge::new(&heard));
+        let ended = service.start_session("street-food").unwrap();
+        service.send_text_turn(&ended.id, "I ate samosa at the station").unwrap();
+        assert_eq!(heard.lock().unwrap().talks_over, 0, "not while it is going");
+        service.complete_session(&ended.id).unwrap();
+        assert_eq!(heard.lock().unwrap().talks_over, 1, "finished by the learner");
+
+        let closed = service.start_session("street-food").unwrap();
+        for _ in 0..crate::infrastructure::engines::FREE_TOPIC_TURNS {
+            service.send_text_turn(&closed.id, "I ate samosa at the station").unwrap();
+        }
+        assert_eq!(heard.lock().unwrap().talks_over, 2, "and closed by its own last turn");
     }
 
     /// Answers until the chat closes itself, and says how many that took.
@@ -3284,6 +3394,113 @@ mod curriculum_flow_tests {
         ]);
         assert!(fluent.checked);
         assert_eq!(fluent.fix, None, "nothing to fix in a fluent talk");
+    }
+
+    /// The first answer of a chore opened while the talk before it is still
+    /// being scored, as a learner who goes straight on from the recap meets
+    /// it, twice: the second time the chore has been talked before. Against a
+    /// llama-server held to one CPU thread, about a classroom laptop's speed,
+    /// with its saved slots where Ella can see them:
+    ///
+    /// ELLA_LLM_BASE_URL=http://127.0.0.1:39191/v1 ELLA_LLM_SLOT_DIR=<its --slot-save-path> \
+    ///   cargo test --lib live_model_a_chore_opened -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn live_model_a_chore_opened_while_the_talk_before_is_scored() {
+        use crate::infrastructure::engines::{EnginePaths, LocalEngine};
+        assert!(std::env::var("ELLA_LLM_BASE_URL").is_ok(), "point ELLA_LLM_BASE_URL at llama-server");
+        std::env::set_var("ELLA_PIPER_DAEMON", "0");
+        let service = Arc::new(AppService::new(
+            Database::in_memory().unwrap(),
+            Box::new(LocalEngine::from_environment(EnginePaths::default())),
+        ));
+        service.save_learner("Asha", Some(16)).unwrap();
+        for round in 1..=2 {
+            let talk = service.start_session("street-food").unwrap();
+            for answer in [
+                "Yesterday I ate vada pav near the railway station. It was spicy and crispy.",
+                "The stall belongs to an old man who has been selling it for twenty years.",
+                "I would recommend it to anyone, because it tastes better than a fancy restaurant.",
+            ] {
+                service.send_text_turn(&talk.id, answer).unwrap();
+            }
+            service.complete_session(&talk.id).unwrap();
+            let ended = Instant::now();
+            let scoring = {
+                let service = Arc::clone(&service);
+                thread::spawn(move || {
+                    let scored = service.assess_session(&talk.id).is_ok();
+                    (scored, ended.elapsed())
+                })
+            };
+            // A moment on the recap, then a chore; Ella's opening line, then
+            // the learner's answer.
+            thread::sleep(std::time::Duration::from_secs(3));
+            let chore = service.start_chore("market-cloth-price").unwrap();
+            thread::sleep(std::time::Duration::from_secs(8));
+            let asked = Instant::now();
+            let turn = service
+                .send_text_turn(&chore.id, "Hello uncle, how much is this blue cotton cloth?")
+                .unwrap();
+            let waited = asked.elapsed();
+            let timings = turn.timings.expect("a turn is timed");
+            service.complete_session(&chore.id).unwrap();
+            let (scored, took) = scoring.join().unwrap();
+            println!(
+                "== round {round}: the chore's first answer waited {:.1} s for its first token \
+                 and {:.1} s in all; the talk before it was scored ({scored}) {:.1} s after it ended",
+                timings.llm_ttft_ms.unwrap_or_default() as f64 / 1_000.0,
+                waited.as_secs_f64(),
+                took.as_secs_f64(),
+            );
+        }
+    }
+
+    /// A topic got ready the way Home's "Today's talk" is, while nothing else
+    /// wants the model, then opened: its warm-up restores what was got ready,
+    /// and the first answer waits only for the aim and the opening. Against
+    /// the same llama-server as the test above, with an empty slot directory.
+    #[test]
+    #[ignore]
+    fn live_model_a_topic_got_ready_ahead_opens_without_its_wait() {
+        use crate::infrastructure::engines::{EnginePaths, LocalEngine};
+        let slots = std::path::PathBuf::from(std::env::var("ELLA_LLM_SLOT_DIR").expect("point ELLA_LLM_SLOT_DIR at the server's slots"));
+        std::env::set_var("ELLA_PIPER_DAEMON", "0");
+        let service = AppService::new(
+            Database::in_memory().unwrap(),
+            Box::new(LocalEngine::from_environment(EnginePaths::default())),
+        );
+        service.save_learner("Asha", Some(16)).unwrap();
+        let topic = find_topic("booking-a-cab").unwrap();
+        let kept = || {
+            std::fs::read_dir(&slots)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("ella-topic-"))
+                .count()
+        };
+        let before = kept();
+        let asked = Instant::now();
+        service.engine.prepare(&NextTalk::Topic {
+            learner_name: "Asha".into(),
+            topic_id: topic.id.clone(),
+            topic_label: topic.label.clone(),
+            level: curriculum::start().level,
+        });
+        while kept() == before {
+            assert!(asked.elapsed() < std::time::Duration::from_secs(300), "never got ready");
+            thread::sleep(std::time::Duration::from_millis(250));
+        }
+        println!("== got ready in {:.1} s", asked.elapsed().as_secs_f64());
+
+        let talk = service.start_session(&topic.id).unwrap();
+        thread::sleep(std::time::Duration::from_secs(8));
+        let turn = service.send_text_turn(&talk.id, "I need to go to the railway station, please.").unwrap();
+        let timings = turn.timings.expect("a turn is timed");
+        println!(
+            "== its first answer waited {:.1} s for its first token",
+            timings.llm_ttft_ms.unwrap_or_default() as f64 / 1_000.0
+        );
     }
 
     #[test]

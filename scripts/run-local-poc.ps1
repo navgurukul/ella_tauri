@@ -15,6 +15,9 @@ $Whisper = Join-Path $EngineRoot "bin\whisper\whisper-server.exe"
 $LlmModel = Join-Path $EngineRoot "models\llm\model.gguf"
 $WhisperModel = Join-Path $EngineRoot "models\stt\ggml-small.bin"
 $CanaryModel = Join-Path $EngineRoot "models\stt\canary-180m-flash-Q8_0.gguf"
+# Where llama-server keeps talks' evaluated instructions, as the installed app
+# does beside its model, so a talk done before does not evaluate them again.
+$SlotDir = Join-Path $EngineRoot "models\llm-slots"
 
 foreach ($Required in @($Llama, $Whisper, $LlmModel, $WhisperModel, $CanaryModel)) {
   if (-not (Test-Path -PathType Leaf $Required)) {
@@ -28,12 +31,15 @@ if ([Text.Encoding]::ASCII.GetString($Header) -ne "GGUF") {
   throw "Canary model has an invalid GGUF header: $CanaryModel"
 }
 
+New-Item -ItemType Directory -Force -Path $SlotDir | Out-Null
+
 $LlamaProcess = $null
 $WhisperProcess = $null
 try {
   $LlamaProcess = Start-Process -PassThru -NoNewWindow -FilePath $Llama -ArgumentList @(
     "--model", $LlmModel, "--host", "127.0.0.1", "--port", $LlmPort,
-    "--ctx-size", "4096", "--threads", "4", "--parallel", "1"
+    "--ctx-size", "4096", "--threads", "4", "--parallel", "1",
+    "--slot-save-path", "`"$SlotDir`""
   )
   $WhisperProcess = Start-Process -PassThru -NoNewWindow -FilePath $Whisper -ArgumentList @(
     "--model", $WhisperModel, "--host", "127.0.0.1", "--port", $WhisperPort,
@@ -57,6 +63,7 @@ try {
   $env:ELLA_ENGINE_MODE = "local"
   $env:ELLA_ENGINE_ROOT = $EngineRoot
   $env:ELLA_LLM_BASE_URL = "http://127.0.0.1:$LlmPort/v1"
+  $env:ELLA_LLM_SLOT_DIR = $SlotDir
   $env:ELLA_STT_BASE_URL = "http://127.0.0.1:$WhisperPort"
   Push-Location $ProjectDir
   try { npm run desktop:dev } finally { Pop-Location }

@@ -403,7 +403,8 @@ Environment overrides:
 - `ELLA_LLAMA_THREADS`, llama.cpp's threads when Ella starts the server; one
   per physical performance core by default
 - `ELLA_LLM_SLOT_DIR`, where a llama-server someone else started with
-  `--slot-save-path` keeps its saved slots, so Ella can use them too
+  `--slot-save-path` keeps its saved slots, so Ella can use them too; the
+  development scripts start theirs with `engines/models/llm-slots` and set it
 - `ELLA_CANARY_MODEL`, `ELLA_STT_THREADS`, `ELLA_CANARY_VERIFY_SHA256`
 
 ## Timing telemetry
@@ -454,12 +455,14 @@ evaluated once when the talk opens, and its first reply waits for them.
   daemon's Piper uses two threads that sleep between sentences: onnxruntime's
   default, a spinning thread per core, cost the model 12% of its decode speed
   while Piper worked beside it, for 30 ms less per sentence.
-- **A topic's instructions are kept on disk.** A talk's aim changes from one
+- **A talk's instructions are kept on disk.** A talk's aim changes from one
   talk to the next, so it comes last, and the topic's instructions before it are
-  the same for every talk on the topic at the learner's level. The first talk on
-  a topic evaluates them and has llama-server save the slot (`--slot-save-path`,
-  in `models/llm-slots`, the four most recent topics at 35-45 MB each). Every
-  later talk on it, after a restart too, restores them in milliseconds and
+  the same for every talk on the topic at the learner's level. A chore's are the
+  same for every talk of it at that level, and the placement chat's for the
+  learner, because everything that moves between turns is in the turn's note.
+  The first talk of each evaluates them and has llama-server save the slot
+  (`--slot-save-path`, in `models/llm-slots`, the six most recent at 23-45 MB
+  each). Every later one, after a restart too, restores them in milliseconds and
   evaluates only its aim and its opening. On the M1 Pro's CPU a talk on a topic
   done before warmed up in 1.7 s instead of 10 s, and its first reply, answered
   at once, came in 1.3 s instead of 10.2 s. A talk's replies wait for its
@@ -467,6 +470,38 @@ evaluated once when the talk opens, and its first reply waits for them.
   a conversation in it, and a slot's file name carries the model file, its size
   and date, and the server's build, so it is only ever restored into the model
   and server that made it.
+- **A talk goes first** (`ModelQueue`). llama-server answers one request at a
+  time, and the recap's scoring and fix (or a placement's level) used to go to
+  it the moment a talk ended. A learner who went straight on to another talk had
+  its warm-up queued behind them, and a judge could land between the warm-up and
+  the first reply and take the talk's instructions out of the slot, so the
+  first reply evaluated them again. Now everything a learner is not waiting on
+  is an errand: it runs only while no talk is open (a talk is open until it is
+  finished, or 3 minutes after its last request), reads its prompt in pieces of
+  about 400 characters, streams its answer, and gives way at the next piece
+  when a talk wants the model, carrying on once the talk is over. Pieces,
+  because llama-server reads a request's whole prompt before it looks at
+  anything else: on the M1's CPU a request cancelled 2 s into a 1,400-token
+  prompt held the next one for 10.6 s, and the same prompt read in pieces held
+  it for 0.4 s; a dropped stream frees it in 0.4 s too. A smaller server batch
+  would have done the same for every request at a cost of 5-10% of prompt speed.
+  On a llama-server held to one CPU thread, about a classroom laptop
+  (31 prompt tokens a second, 16 written), a chore opened 3 s into the last
+  talk's scoring and answered 8 s later had its first token after 38 s instead
+  of 67 s the first time, which is its own 1,139 tokens of instructions, and
+  after 2.9 s instead of 90 s the second, when it restored them: in the 90 s,
+  the fix had run between the chore's warm-up and its first answer, and the
+  answer evaluated 1,226 of its 1,230 prompt tokens.
+- **Home's talk is got ready ahead.** Whenever the window reads Home (after
+  onboarding saves the learner, a log in, or a talk), the engine is asked to get
+  the talk it offers first ready: the placement chat for a learner who has not
+  talked yet, else "Today's talk", the first topic, at their level. It is an
+  errand like the scoring, after it in line, so it runs while the learner looks
+  at Home or the recap, is dropped the moment a talk opens, and costs a look at
+  a file once that topic's instructions are kept. On the one-thread server it
+  was ready 41 s after it was asked for, and the talk then restored 1,092
+  tokens in 15 ms and had its first answer's first token after 1.2 s, against
+  a 39 s wait for the warm-up of a first talk on a topic.
 
 Tried and not kept:
 
@@ -630,8 +665,8 @@ before Ella moves on (`synchronous = FULL`, plus `fullfsync` on macOS), so it
 survives a crash, a force-quit or a battery that dies.
 
 `models/llm-slots/` beside it holds llama.cpp's saved slots: the evaluated
-instructions of the last four topics talked about (see
-[Latency on laptops](#latency-on-laptops)). They name the learner, since the
+instructions of the last six talks' topics, chores and placement chat, and of
+the talk Home offers next (see [Latency on laptops](#latency-on-laptops)). They name the learner, since the
 instructions do, but hold nothing they said. Deleting them loses nothing: the
 next talk on a topic evaluates its instructions again and saves them afresh.
 
