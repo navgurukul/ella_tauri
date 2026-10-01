@@ -246,3 +246,10 @@ pub async fn levels(state: State<'_, AppState>) -> Result<Vec<LevelView>, String
     let service = state.0.clone();
     off_main_thread(move || service.levels()).await
 }
+
+/// The page's own size in CSS pixels, sent when it loads and on every resize,
+/// so the page can be zoomed to the design's room. See `window_fit`.
+#[tauri::command]
+pub fn fit_page_zoom(window: tauri::WebviewWindow, width: f64, height: f64) {
+    crate::window_fit::zoom_to_page(&window, width, height);
+}

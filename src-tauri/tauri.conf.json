@@ -15,11 +15,12 @@
         "title": "Ella \u2014 Speak English every day",
         "width": 1440,
         "height": 900,
-        "minWidth": 1240,
-        "minHeight": 740,
+        "minWidth": 960,
+        "minHeight": 500,
         "resizable": true,
         "fullscreen": false,
-        "center": true
+        "center": true,
+        "scrollBarStyle": "fluentOverlay"
       }
     ],
     "security": {

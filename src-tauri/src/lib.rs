@@ -8,6 +8,7 @@ pub mod notes;
 pub mod progress;
 mod setup;
 mod telemetry;
+mod window_fit;
 
 use std::sync::Arc;
 
@@ -87,6 +88,10 @@ pub fn run() {
                     "Ella {} — Speak English every day",
                     app.package_info().version
                 ));
+                if let Err(error) = window_fit::fit_to_screen(&window) {
+                    eprintln!("[window] could not fit the window to the screen: {error}");
+                }
+                window_fit::zoom_to_window(&window);
             }
             let data_dir = app.path().app_data_dir()?;
             let packaged_engine_root = app
@@ -156,6 +161,7 @@ pub fn run() {
             ipc::complete_session,
             ipc::assess_session,
             ipc::levels,
+            ipc::fit_page_zoom,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Ella")
