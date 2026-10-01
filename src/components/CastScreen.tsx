@@ -7,7 +7,7 @@ import type { CastGoal, CastId, Learner } from "../types";
 /**
  * Talk partners: Ella as the learner's mentor, then the cast they practise
  * with. Every partner has a goal for the learner; pressing one starts that
- * conversation.
+ * conversation, with that partner in it.
  */
 export function CastScreen({
   learner,
@@ -16,7 +16,7 @@ export function CastScreen({
 }: {
   learner: Learner | null | undefined;
   busy: boolean;
-  onStartGoal: (goal: CastGoal) => void;
+  onStartGoal: (goal: CastGoal, partner: CastId) => void;
 }) {
   const cast = castFor(learner?.age);
 
@@ -66,7 +66,7 @@ export function CastScreen({
                     key={goal.id}
                     className="goal"
                     disabled={busy || soon}
-                    onClick={() => onStartGoal(goal)}
+                    onClick={() => onStartGoal(goal, member.id)}
                   >
                     <span className="goal__text">
                       <strong>{goal.title}</strong>

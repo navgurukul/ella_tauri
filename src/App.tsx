@@ -12,7 +12,7 @@ import { SummaryScreen } from "./components/SummaryScreen";
 import { TalkScreen } from "./components/TalkScreen";
 import { avatarColorFor, forgetLegacyAvatarColor, legacyAvatarColor } from "./lib/avatar";
 import { bridge } from "./lib/bridge";
-import { nextTopicLabel, recommendedTopicId, streak } from "./lib/presentation";
+import { chorePartner, nextTopicLabel, recommendedTopicId, streak } from "./lib/presentation";
 import { useSetup } from "./lib/setup";
 import {
   downloadUpdateInBackground,
@@ -26,6 +26,7 @@ import type {
   Assessment,
   BadgeStart,
   CastGoal,
+  CastId,
   LearnerProgress,
   Session,
   SessionSummary,
@@ -74,6 +75,12 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [screen, setScreen] = useState<Screen>("onboarding");
   const [session, setSession] = useState<Session | null>(null);
+  // The partner whose card started a topic, for the talk it started. Dr
+  // Wobble's goal opens the doctor's topic, which Home offers as Ella's own,
+  // so only where it was started from says the talk is his. It is kept while
+  // the app is open, so his talk picked up again after a restart is Ella's. A
+  // chore needs none of this: its id names its partner.
+  const [topicPartner, setTopicPartner] = useState<{ sessionId: string; partner: CastId } | null>(null);
   const [finished, setFinished] = useState<Finished | null>(null);
   const summary = finished?.result ?? null;
   // What the last finished talk did for the learner. Asked for here rather
@@ -231,29 +238,31 @@ export default function App() {
     void refreshSnapshot();
   }
 
-  async function handleStart(topic: Topic) {
+  /** A talk on a topic: Ella's, or `partner`'s when their card started it. */
+  async function handleStart(topic: Topic, partner: CastId | null = null) {
     await run(async () => {
       const created = await bridge.startSession(topic.id);
       setSession(created);
+      setTopicPartner(partner ? { sessionId: created.id, partner } : null);
       setFinished(null);
       setScreen("talk");
     });
   }
 
   /** Starts a topic by id; a null id means "whatever Ella recommends". */
-  async function handleStartTopic(topicId: string | null) {
+  async function handleStartTopic(topicId: string | null, partner: CastId | null = null) {
     if (!snapshot) return;
     const wanted = topicId ?? recommendedTopicId(snapshot);
     const topic = snapshot.topics.find((candidate) => candidate.id === wanted);
-    if (topic) await handleStart(topic);
+    if (topic) await handleStart(topic, partner);
   }
 
   /** A talk partner's goal: a chore the backend plays and scores, or the free
-   * topic that stands in for one. */
-  async function handleStartGoal(goal: CastGoal) {
+   * topic that stands in for one. Either way the partner is on the stage. */
+  async function handleStartGoal(goal: CastGoal, partner: CastId) {
     const { start } = goal;
     if (start.kind === "topic") {
-      await handleStartTopic(start.topicId);
+      await handleStartTopic(start.topicId, partner);
       return;
     }
     if (start.kind === "chore") await handleStartChore(start.choreId);
@@ -479,7 +488,7 @@ export default function App() {
           <CastScreen
             learner={snapshot.learner}
             busy={busy}
-            onStartGoal={(goal) => void handleStartGoal(goal)}
+            onStartGoal={(goal, partner) => void handleStartGoal(goal, partner)}
           />
         )}
         {screen === "profile" && (
@@ -524,6 +533,10 @@ export default function App() {
             session={session}
             // A placement chat left open and picked up again from Home.
             variant={session.topic_id === "placement" ? "placement" : "talk"}
+            partner={
+              chorePartner(session.topic_id) ??
+              (topicPartner?.sessionId === session.id ? topicPartner.partner : null)
+            }
             onSessionChange={setSession}
             onComplete={handleComplete}
           />

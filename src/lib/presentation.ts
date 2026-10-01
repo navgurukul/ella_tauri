@@ -117,7 +117,8 @@ export function topicMeta(topicId: string): string {
  * chore's `min_age`, which `catalog_for` filters on.
  *
  * PLACEHOLDER — the names, blurbs and minutes are the design's. The backend's
- * personas still call the stall owner Ramesh and the landlord Mr Khanna.
+ * personas go by the same names, so a partner never introduces themselves as
+ * somebody else.
  */
 export const CAST: CastMember[] = [
   {
@@ -202,6 +203,16 @@ export function castFor(age: number | null | undefined): CastMember[] {
     ...member,
     goals: member.goals.filter((goal) => age == null || goal.minAge <= age),
   })).filter((member) => member.goals.length > 0);
+}
+
+/** The partner who plays a chore: the one whose goal starts it. A chore's talk
+ * takes the chore's id for its topic, so a talk picked up again later still
+ * finds them. Null for any other talk. */
+export function chorePartner(topicId: string): CastId | null {
+  const member = CAST.find((candidate) =>
+    candidate.goals.some((goal) => goal.start.kind === "chore" && goal.start.choreId === topicId),
+  );
+  return member?.id ?? null;
 }
 
 const DAY_INITIALS = ["S", "M", "T", "W", "T", "F", "S"];

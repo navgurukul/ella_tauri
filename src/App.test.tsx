@@ -607,14 +607,63 @@ describe("Ella talk partners", () => {
     await screen.findByText("End talk");
     expect(document.querySelector(".talk-head .pill")).toHaveTextContent("Talk a stall price down");
     expect(promptText()).toMatch(/look at these shirts/i);
+    // Bippo plays it, so he stands on the stage in Ella's place, and the line
+    // under the mic names him.
+    expect(document.querySelector(".talk-partner .figure--stall-owner")).toBeInTheDocument();
+    expect(document.querySelector(".ella--conversation")).not.toBeInTheDocument();
+    // Once the opening has started.
+    await waitFor(() => expect(document.querySelector(".mic-hint")).toHaveTextContent("Bippo is speaking"));
+    expect(screen.getByRole("button", { name: "Interrupt Bippo and start speaking" })).toBeInTheDocument();
   });
 
-  it("opens the doctor's goal as the matching topic", async () => {
+  it("opens the doctor's goal as the matching topic, played by Dr Wobble", async () => {
     await openTalkPartners("Aarav", "14");
     fireEvent.click(screen.getByRole("button", { name: /explain what is wrong/i }));
     await screen.findByText("End talk");
     expect(document.querySelector(".talk-head .pill")).toHaveTextContent("At the doctor's clinic");
     expect(promptText()).toMatch(/I am the doctor here/i);
+    expect(document.querySelector(".talk-partner .figure--doctor")).toBeInTheDocument();
+    expect(document.querySelector(".ella--conversation")).not.toBeInTheDocument();
+    await waitFor(() => expect(document.querySelector(".mic-hint")).toHaveTextContent("Dr Wobble is speaking"));
+  });
+
+  it("leaves the same doctor's talk to Ella when Home starts it", async () => {
+    await onboard("Aarav");
+    fireEvent.click(screen.getByRole("button", { name: /at the doctor's clinic/i }));
+    await screen.findByText("End talk");
+    expect(promptText()).toMatch(/I am the doctor here/i);
+    expect(document.querySelector(".ella--conversation")).toBeInTheDocument();
+    expect(document.querySelector(".talk-partner")).not.toBeInTheDocument();
+    await waitFor(() => expect(document.querySelector(".mic-hint")).toHaveTextContent("Ella is speaking"));
+  });
+
+  it("keeps the partner on the stage of a chore picked up again from Home", async () => {
+    await bridge.saveLearner("Meera", 15);
+    const chore = await bridge.startChore("deposit-refund");
+    await bridge.sendTextTurn(chore.id, "I want my deposit back, please");
+
+    render(<App />);
+    await screen.findByText("Namaste, Meera!");
+    fireEvent.click(screen.getByRole("button", { name: /continue talking/i }));
+
+    await screen.findByText("End talk");
+    expect(document.querySelector(".talk-partner .figure--landlord")).toBeInTheDocument();
+    expect(document.querySelector(".ella--conversation")).not.toBeInTheDocument();
+  });
+
+  it("says whose line could not be played when a partner's voice fails", async () => {
+    const speak = vi
+      .spyOn(window.speechSynthesis, "speak")
+      .mockImplementation((utterance) => queueMicrotask(() => utterance.onerror?.({} as SpeechSynthesisErrorEvent)));
+    try {
+      await openTalkPartners("Aarav", "14");
+      fireEvent.click(screen.getByRole("button", { name: /get a deposit refunded/i }));
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "This could not be played aloud. You can still read what Grumble said.",
+      );
+    } finally {
+      speak.mockRestore();
+    }
   });
 
   it("leaves out the goals a younger learner is not ready for", async () => {
