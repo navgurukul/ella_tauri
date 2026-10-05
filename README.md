@@ -208,7 +208,12 @@ number on the ladder, 1 to 6.
   the learner's own words by rules (reasons given, the past told, questions
   asked, politeness, full sentences), so it holds with or without a model. The
   fix is the model's correction of the answers, compared word by word with what
-  was said, so the phrase quoted is always the learner's own. It is kept with
+  was said, so the phrase quoted is always the learner's own. A change that
+  only writes the same words another way is not a fix: "every day" for
+  "everyday", "favorite" for "favourite", "there" for "their", "two" for "to"
+  or "25", "I am" for "I'm". The answers were heard, not written, so their
+  spelling is the speech recognizer's, and such a fix showed the learner their
+  own words twice. It is kept with
   the assessment; a correction that cannot be read leaves the notes without a
   fix rather than failing the talk, and "Nothing to fix" is only said when a
   model looked. A ledger chore's recap is read off its ledger (`ChoreRecap`),
@@ -254,7 +259,12 @@ the model on sample transcripts, and the prompts' doc comments keep the numbers:
   "fixed" "600 is too much" into "600 is too high", and "yes" into "Did you eat
   anything today?". Asked to rewrite every answer changing as little as it can,
   it left fluent, casual and bargaining talks word for word, and found "it
-  have", "we plays", "is best player" and "I go to market". A JSON schema pins
+  have", "we plays", "is best player" and "I go to market". It still swaps a
+  right word for another now and then: "give it for 350" came back as "give it
+  to 350", "their house" as "the house", "one small stall" as "a small stall".
+  So a change is only shown when a grammar fix makes it: a word put in its
+  right form ("go" to "went", "me" to "I", "buyed" to "bought"), or small
+  words only added or only dropped (`notes::fixes_grammar`). A JSON schema pins
   the answer to one line per answer; without it the model sometimes wrote each
   answer twice, as given and corrected. Asked for praise, it described the
   topic instead ("went to market"), and picking from a numbered list it chose
