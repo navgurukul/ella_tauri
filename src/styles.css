@@ -1231,8 +1231,8 @@ button { font-family: inherit; }
 .figure--stall-owner { --bob: 4.6s; }
 .figure--stall-owner .figure__body { left: 20%; bottom: -12px; width: 100%; height: 162px; border-radius: 50% 50% 0 0 / 80% 80% 0 0; background: var(--orange); }
 /* His eyes and grin are borders with one side left open, and the browser
-   draws a hairline along that open edge, plain to see once he is scaled up
-   on the talk stage. Half a pixel off that edge takes it away. */
+   draws a hairline along that open edge. Half a pixel off that edge takes
+   it away. */
 .figure--stall-owner .figure__eye { bottom: 96px; width: 26px; height: 13px; border: 4px solid var(--ink); border-bottom: none; border-radius: 18px 18px 0 0; clip-path: inset(0 0 0.5px 0); }
 .figure--stall-owner .figure__eye--left { left: 50%; }
 .figure--stall-owner .figure__eye--right { left: 72%; }
@@ -1729,40 +1729,40 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 }
 .talk-entry { position: absolute; inset: 0; }
 
-/* A talk partner in Ella's place: their card's 240 by 190 drawing, scaled up
-   in the stage's bottom-right corner, where the stage's edges crop them as
-   their card's do. Their face sits beside the mic, not behind it. */
+/* Partners have a stage-sized vector drawing centered just like Ella. Its
+   face stays above the mic; no enlarged card or rasterized scale layer. */
 .talk-partner {
-  --partner-scale: 2.5;
   position: absolute;
-  right: 0;
-  bottom: 0;
-  width: calc(240px * var(--partner-scale));
-  height: calc(190px * var(--partner-scale));
+  left: 50%;
+  bottom: -100px;
+  width: min(660px, 100%);
+  aspect-ratio: 660 / 450;
+  transform: translateX(-50%);
   pointer-events: none;
 }
-.talk-partner__box {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 240px;
-  height: 190px;
-  transform: scale(var(--partner-scale));
-  transform-origin: 0 0;
+.figure--conversation {
+  animation: none;
+  pointer-events: none;
 }
-/* With no purple body behind them, the lines under the mic are ink on the
-   paper, and the typing field needs an edge to stand out from it. */
-.has-partner .mic-hint { color: var(--ink-70); text-shadow: none; }
+.figure__motion {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 160px;
+}
+.figure--conversation .figure__portrait { overflow: visible; }
+.figure--conversation .ella__speech { width: 100%; height: 100%; }
+.figure__line { stroke: var(--ink); stroke-width: 3.5; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+/* Dark labels stay readable on the cast's orange, blue, coral and green. */
+.has-partner .mic-hint,
+.has-partner .talk-controls .link-button {
+  color: var(--ink);
+  text-shadow: none;
+}
 .has-partner .mic-hint .key { border-color: var(--ink-40); }
-.has-partner .talk-controls .link-button { color: var(--ink); text-shadow: none; }
-.has-partner .talk-controls .link-button:hover { color: var(--ink-60); }
-.has-partner .composer input { box-shadow: inset 0 0 0 1.5px var(--ink-14); }
+.has-partner .talk-controls .link-button:hover { color: var(--ink-70); }
 .has-partner .mic:focus-visible,
 .has-partner .talk-controls .link-button:focus-visible,
-.has-partner .composer__send:focus-visible {
-  outline-color: var(--violet);
-  box-shadow: none;
-}
+.has-partner .composer__send:focus-visible { outline-color: var(--ink); }
 
 .talk-head {
   position: relative;
@@ -1788,6 +1788,7 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   overflow-y: auto;
   pointer-events: none;
 }
+.has-partner .talk-stage { padding-bottom: 360px; }
 
 .talk-copy {
   display: flex;
@@ -3788,7 +3789,8 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   .section-head { margin-top: 20px; }
   .talk-stage { padding-bottom: 290px; }
   .ella--stage-talk { bottom: -120px; --ella-scale: 0.9 !important; }
-  .talk-partner { --partner-scale: 2.2; }
+  .talk-partner { bottom: -90px; width: min(594px, 100%); }
+  .has-partner .talk-stage { padding-bottom: 320px; }
   .talk-controls { bottom: 28px; }
   .talk-copy { gap: 14px; }
   .talk-prompt { font-size: 24px; line-height: 1.38; }

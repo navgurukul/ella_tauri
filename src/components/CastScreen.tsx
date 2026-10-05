@@ -1,4 +1,6 @@
-import { EllaMascot } from "./EllaMascot";
+import { EllaMascot, type EllaState } from "./EllaMascot";
+import { PartnerConversation } from "./PartnerConversation";
+import type { SpeechMouth } from "../lib/speech";
 import { MicGlyph } from "./HomeScreen";
 import { castFor } from "../lib/presentation";
 import type { CastGoal, CastId, Learner } from "../types";
@@ -168,8 +170,19 @@ function FigureParts({ id }: { id: CastId }) {
   );
 }
 
-/** A talk partner, breathing where they stand on their card. */
-export function PartnerFigure({ id }: { id: CastId }) {
+/** Cards keep their small corner portrait; conversations have their own drawing. */
+export function PartnerFigure({
+  id,
+  variant = "card",
+  state = "resting",
+  speech,
+}: {
+  id: CastId;
+  variant?: "card" | "conversation";
+  state?: EllaState;
+  speech?: SpeechMouth;
+}) {
+  if (variant === "conversation") return <PartnerConversation id={id} state={state} speech={speech} />;
   return (
     <div className="partner__entry" aria-hidden="true">
       <div className={`figure figure--${id}`}>
