@@ -3127,7 +3127,7 @@ mod curriculum_flow_tests {
 
         let pitch = heard.lock().unwrap().pitches.last().unwrap().clone();
         assert_eq!(pitch.level, "A1");
-        let focus = pitch.focus.expect("the opening's prompt carries the aim");
+        let focus = pitch.focus.expect("the engine is handed the talk's aim");
         assert_eq!(focus.step_title, "Talking about the past");
         assert_eq!(focus.skill, curriculum::skill_at(&target).unwrap().2.text);
 

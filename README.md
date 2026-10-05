@@ -170,14 +170,19 @@ number on the ladder, 1 to 6.
   start, a placement only ever moves them up.
 - **Every talk quietly aims at one skill** of the learner's step, picked when it
   starts by the phone's priority (need, uncertainty, review due, curriculum
-  order, variety, and a cooldown for the latest aims), kept on the session, and
-  named in Ella's instructions as an aim, never a lesson. The prompts pitch
-  Ella's words at the learner's level instead of the old fixed A1, and a talk
-  keeps the level it began at, so its instructions stay in llama.cpp's cached
-  prefix even when another talk's assessment moves the learner on meanwhile.
-  The aim is the last thing in a free talk's instructions, so everything before
-  it is the same for every talk on the topic at that level and can be kept on
-  disk between talks: see [Latency on laptops](#latency-on-laptops).
+  order, variety, and a cooldown for the latest aims) and kept on the session.
+  Unlike on the phone, the aim is not named in Ella's instructions. Told it,
+  Ella's 3B model asked about the skill instead of the topic: aimed at
+  collocations ("make a decision, pay attention, take a risk"), the job
+  interviewer brought those words into 14 of 15 questions, and aimed at the
+  present perfect it said the skill's example, "I've lived here for 3 years",
+  as its own. Without the aim, none of the same 30 replies did (see
+  `ella_system_prompt`). The prompts pitch Ella's words at the learner's level
+  instead of the old fixed A1, and a talk keeps the level it began at, so its
+  instructions stay in llama.cpp's cached prefix even when another talk's
+  assessment moves the learner on meanwhile. A free talk's instructions are
+  the same for every talk on the topic at that level and can be kept on disk
+  between talks: see [Latency on laptops](#latency-on-laptops).
 - **Ending a talk scores it** (`assess_session`) on the skills of the step and
   the next. A demonstration the judge is at least 0.70 sure of raises that
   skill's mastery; a skill is owned at 0.75, shown in two talks on two topics.
@@ -460,15 +465,16 @@ evaluated once when the talk opens, and its first reply waits for them.
   daemon's Piper uses two threads that sleep between sentences: onnxruntime's
   default, a spinning thread per core, cost the model 12% of its decode speed
   while Piper worked beside it, for 30 ms less per sentence.
-- **A talk's instructions are kept on disk.** A talk's aim changes from one
-  talk to the next, so it comes last, and the topic's instructions before it are
-  the same for every talk on the topic at the learner's level. A chore's are the
+- **A talk's instructions are kept on disk.** A free talk's are the same for
+  every talk on the topic at the learner's level. A chore's are the
   same for every talk of it at that level, and the placement chat's for the
   learner, because everything that moves between turns is in the turn's note.
   The first talk of each evaluates them and has llama-server save the slot
   (`--slot-save-path`, in `models/llm-slots`, the six most recent at 23-45 MB
   each). Every later one, after a restart too, restores them in milliseconds and
-  evaluates only its aim and its opening. On the M1 Pro's CPU a talk on a topic
+  evaluates only its opening. (The timings below were measured when a free
+  talk's aim still came after its topic's words and was evaluated with the
+  opening.) On the M1 Pro's CPU a talk on a topic
   done before warmed up in 1.7 s instead of 10 s, and its first reply, answered
   at once, came in 1.3 s instead of 10.2 s. A talk's replies wait for its
   warm-up rather than slip in between its requests, so a slot is never saved with
