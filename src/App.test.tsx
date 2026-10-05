@@ -3,8 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { bridge } from "./lib/bridge";
 import { dayKey } from "./lib/days";
-import { mouthGeometry } from "./lib/mouth";
-import { SMILE } from "./lib/visemes";
 import type { Assessment, EllaBridge, PhonemeSpan, SpeechSegment, TurnResult } from "./types";
 
 /** Read the current conversation prompt without coupling tests to its markup. */
@@ -337,11 +335,11 @@ describe("Ella learner flow", () => {
   });
 
   /**
-   * Her mouth follows Piper's own timing of what she says: the opening streams
-   * with its sounds, the talk stage opens her mouth on the vowel, and it goes
-   * back to her smile once she has finished.
+   * She says the opening with the stylesheet's open mouth, whether or not
+   * Piper timed its sounds: nothing on the talk stage follows the audio
+   * frame by frame. Her smile comes back once she has finished.
    */
-  it("moves Ella's mouth with the sounds of what she says", async () => {
+  it("speaks with a still open mouth and smiles again when she is done", async () => {
     const started: { at: number }[] = [];
     let clock: { currentTime: number; drain(): void } | undefined;
     class FakeAudioContext {
@@ -375,7 +373,7 @@ describe("Ella learner flow", () => {
         for (const end of this.ended.splice(0)) end();
       }
     }
-    // Three seconds: a long "a" between the sentence's start and end.
+    // Timed sounds still arrive from Piper; they move nothing.
     const phonemes: PhonemeSpan[] = [
       { phoneme: "^", start_ms: 0, end_ms: 100 },
       { phoneme: "a", start_ms: 100, end_ms: 900 },
@@ -396,38 +394,25 @@ describe("Ella learner flow", () => {
       emit?.({ session_id: sessionId, turn: 0, index: 0, text: "Ah.", audio, ready_ms: 300, words: [], phonemes });
       return { audio, speech_words: [], speech_phonemes: phonemes, streamed_segments: 1 };
     };
-    const lips = () => document.querySelector(".ella--stage-talk .ella__lips")?.getAttribute("d") ?? "";
-    const depth = () => {
-      const ys = (lips().match(/-?\d+(\.\d+)?/g) ?? []).map(Number).filter((_, index) => index % 2 === 1);
-      return Math.max(...ys) - Math.min(...ys);
-    };
+    const ella = () => document.querySelector(".ella--stage-talk");
 
     try {
       await onboard("Aarav");
       fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
       await screen.findByText("End talk");
       await waitFor(() => expect(started).toHaveLength(1));
-      expect(document.querySelector(".ella--stage-talk")).toHaveClass("ella--lipsync");
-      expect(lips()).toBe(mouthGeometry(SMILE, 30, 3).path);
-
       clock!.currentTime = started[0].at + 0.5;
-      await waitFor(() => expect(depth()).toBeGreaterThan(10));
+      await waitFor(() => expect(ella()).toHaveClass("ella--speaking"));
+      expect(ella()).not.toHaveClass("ella--lipsync");
+      expect(document.querySelector(".ella--stage-talk .ella__lips")).toBeNull();
 
       clock!.drain();
-      await waitFor(() => expect(lips()).toBe(mouthGeometry(SMILE, 30, 3).path));
+      await waitFor(() => expect(ella()).toHaveClass("ella--resting"));
     } finally {
       delete (bridge as EllaBridge).onSpeechSegment;
       delete (bridge as EllaBridge).speakOpening;
       Reflect.deleteProperty(window, "AudioContext");
     }
-  });
-
-  /** The system voice reports no timings, so her mouth cannot follow it. */
-  it("keeps the static open mouth for a voice it cannot time", async () => {
-    await onboard("Aarav");
-    fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
-    await screen.findByText("End talk");
-    await waitFor(() => expect(document.querySelector(".ella--stage-talk")).toHaveClass("ella--speaking", "is-untimed"));
   });
 
   it("moves from home to a real conversation with typed fallback", async () => {

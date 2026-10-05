@@ -1,7 +1,5 @@
-import type { AudioPayload, PhonemeSpan, WordSpan } from "../types";
-import { cuesFromPhonemes } from "./alignment";
+import type { AudioPayload, WordSpan } from "../types";
 import { llog, llogAbsolute } from "./latency";
-import { VISEMES, VisemeTrack, type MouthShape, type VisemeCue } from "./visemes";
 
 interface SpeechRecognitionAlternativeLike {
   transcript: string;
@@ -278,35 +276,19 @@ const SCHEDULE_LEAD_SECONDS = 0.03;
 /** How long to wait for segments the turn said were sent but that have not
  * arrived. Beyond this the queue finishes with what it has rather than hang. */
 const MISSING_SEGMENT_GRACE_MS = 1500;
-/** How far ahead of the sound her mouth is sampled. A frame reaches the glass
- * a vsync or so after it is drawn, and a picture just ahead of its sound reads
- * as in sync where one behind does not. Ella Mobile's `visualLead`. */
-const MOUTH_LEAD_MS = 20;
-
-/** Ella's mouth for whatever a queue is playing. */
-export interface SpeechMouth {
-  /** Whether the audio carries Piper's timings: null until the first clip is
-   * scheduled, then whether any clip had them. */
-  readonly timed: boolean | null;
-  /** A timed clip has begun to sound and the queue has not ended. Holds
-   * through the gaps between sentences, so her mouth closes there rather than
-   * handing back to her smile halfway through a reply. */
-  readonly started: boolean;
-  /** Her mouth for the sound being heard now, a little ahead of it. */
-  shape(): MouthShape;
-}
+/** The longest the word highlight waits before it reads the clock again: when
+ * the last word queued has been said and the next sentence is still on its
+ * way, or the audio has stalled. */
+const LONGEST_WORD_WAIT_MS = 500;
 
 export interface SpeechQueue {
   /** Queue one sentence, with the timings that say when each of its words is
-   * spoken and, where Piper timed them, each of its sounds. Segments play in
-   * push order regardless of decode order. */
-  push(audio: AudioPayload, words?: WordSpan[], phonemes?: PhonemeSpan[]): void;
+   * spoken. Segments play in push order regardless of decode order. */
+  push(audio: AudioPayload, words?: WordSpan[]): void;
   /** How many segments have been queued so far. */
   readonly received: number;
   /** Every word queued so far, in speaking order. */
   readonly words: string[];
-  /** Ella's mouth for what this queue plays. */
-  readonly mouth: SpeechMouth;
   /** No more segments are coming beyond `expected` in total. */
   finish(expected: number): void;
   /** Stop immediately and drop anything still queued. */
@@ -339,51 +321,49 @@ export function createSpeechQueue(callbacks: SpeechQueueCallbacks = {}): SpeechQ
   const schedule: { start: number; end: number }[] = [];
   const words: string[] = [];
   let spoken = -1;
-  let frame: number | null = null;
-  // Every mouth cue queued so far, in milliseconds of AudioContext time, so a
-  // reply's sentences make one track and a gap between two of them closes her
-  // mouth like any other silence.
-  const cues: VisemeCue[] = [];
-  let lips: VisemeTrack | null = null;
-  let timed: boolean | null = null;
-  /** Where the first timed clip starts sounding, in ms of context time. */
-  let timedFrom: number | null = null;
+  let wordTimer: number | null = null;
 
-  const mouth: SpeechMouth = {
-    get timed() {
-      return timed;
-    },
-    get started() {
-      return !settled && context !== null && timedFrom !== null && audibleTime(context) * 1000 >= timedFrom;
-    },
-    shape() {
-      if (settled || !context || !lips) return VISEMES.rest;
-      const now = audibleTime(context) * 1000;
-      // Nothing to lead into before the sound starts.
-      return lips.sample(timedFrom !== null && now >= timedFrom ? now + MOUTH_LEAD_MS : now);
-    },
-  };
-
-  /** Follow the audio clock and report the word being spoken as it changes. */
+  /**
+   * Follow the audio clock and report the word being spoken as it changes.
+   * It wakes at the next word's start or end rather than on every frame: a
+   * few times a second instead of sixty, while Piper may still be reading the
+   * rest of the reply.
+   */
   const track = () => {
-    frame = null;
+    wordTimer = null;
     if (settled || !context) return;
     const now = context.currentTime;
     let index = -1;
+    let next = Infinity;
     for (let cursor = 0; cursor < schedule.length; cursor += 1) {
-      if (now >= schedule[cursor].start && now < schedule[cursor].end) {
-        index = cursor;
+      const { start, end } = schedule[cursor];
+      if (now < start) {
+        next = start;
         break;
       }
       // Past this word but before the next: hold the last one rather than
       // flickering to nothing between spans.
-      if (now >= schedule[cursor].end) index = cursor;
+      index = cursor;
+      if (now < end) {
+        next = end;
+        break;
+      }
     }
     if (index !== spoken) {
       spoken = index;
       callbacks.onSpokenWord?.(index);
     }
-    if (started) frame = requestAnimationFrame(track);
+    if (!started) return;
+    // A millisecond past the boundary, so the clock has reached it.
+    const wait = Number.isFinite(next) ? (next - now) * 1000 + 1 : LONGEST_WORD_WAIT_MS;
+    wordTimer = window.setTimeout(track, Math.min(LONGEST_WORD_WAIT_MS, Math.max(0, wait)));
+  };
+
+  /** Read the clock now: a sentence just scheduled may start sooner than the
+   * wait in hand ends. */
+  const retrack = () => {
+    if (wordTimer !== null) window.clearTimeout(wordTimer);
+    track();
   };
 
   const settle = (fail?: unknown) => {
@@ -391,8 +371,8 @@ export function createSpeechQueue(callbacks: SpeechQueueCallbacks = {}): SpeechQ
     settled = true;
     if (graceTimer !== null) window.clearTimeout(graceTimer);
     graceTimer = null;
-    if (frame !== null) cancelAnimationFrame(frame);
-    frame = null;
+    if (wordTimer !== null) window.clearTimeout(wordTimer);
+    wordTimer = null;
     if (spoken !== -1) {
       spoken = -1;
       callbacks.onSpokenWord?.(-1);
@@ -410,7 +390,7 @@ export function createSpeechQueue(callbacks: SpeechQueueCallbacks = {}): SpeechQ
     if (expected !== null && played >= Math.min(expected, received)) settle();
   };
 
-  const push = (audio: AudioPayload, wordSpans: WordSpan[] = [], phonemes: PhonemeSpan[] = []) => {
+  const push = (audio: AudioPayload, wordSpans: WordSpan[] = []) => {
     if (settled) return;
     const index = received;
     received += 1;
@@ -418,7 +398,6 @@ export function createSpeechQueue(callbacks: SpeechQueueCallbacks = {}): SpeechQ
       words.push(...wordSpans.map((span) => span.text));
       callbacks.onWords?.([...words]);
     }
-    const clip = clipCues(phonemes, index);
     if (graceTimer !== null) {
       window.clearTimeout(graceTimer);
       graceTimer = null;
@@ -449,30 +428,16 @@ export function createSpeechQueue(callbacks: SpeechQueueCallbacks = {}): SpeechQ
         for (const span of wordSpans) {
           schedule.push({ start: at + span.start_ms / 1000, end: at + span.end_ms / 1000 });
         }
-        // So are the mouth's. A clip scheduled right after the last one can
-        // start a hair before its final token's rounded end; the earlier cue
-        // keeps that hair.
-        timed = Boolean(timed) || clip.length > 0;
-        if (clip.length) {
-          const offset = at * 1000;
-          timedFrom ??= offset;
-          for (const cue of clip) {
-            const start = Math.max(cue.start + offset, cues.length ? cues[cues.length - 1].end : -Infinity);
-            const end = cue.end + offset;
-            if (end > start) cues.push({ ...cue, start, end });
-          }
-          lips = new VisemeTrack(cues);
-        }
         cursor = at + buffer.duration;
         if (!started) {
           started = true;
-          if (frame === null) frame = requestAnimationFrame(track);
           llog(
             "stream-playback:first-sentence",
             `first sentence audible ${(performance.now() - openedAt).toFixed(1)}ms after the turn opened`,
           );
           callbacks.onStart?.();
         }
+        retrack();
       })
       .catch((reason: unknown) => {
         // One unreadable sentence should not silence the rest of the reply.
@@ -497,7 +462,6 @@ export function createSpeechQueue(callbacks: SpeechQueueCallbacks = {}): SpeechQ
     get words() {
       return [...words];
     },
-    mouth,
     finish(total: number) {
       expected = total;
       if (received >= total) {
@@ -518,8 +482,8 @@ export function createSpeechQueue(callbacks: SpeechQueueCallbacks = {}): SpeechQ
       settled = true;
       if (graceTimer !== null) window.clearTimeout(graceTimer);
       graceTimer = null;
-      if (frame !== null) cancelAnimationFrame(frame);
-      frame = null;
+      if (wordTimer !== null) window.clearTimeout(wordTimer);
+      wordTimer = null;
       for (const source of sources) {
         try {
           source.stop();
@@ -532,34 +496,6 @@ export function createSpeechQueue(callbacks: SpeechQueueCallbacks = {}): SpeechQ
       context = null;
     },
   };
-}
-
-/** A clip's mouth cues, or none when it has no timings the mouth can trust. */
-function clipCues(phonemes: PhonemeSpan[], index: number): VisemeCue[] {
-  if (!phonemes.length) return [];
-  try {
-    return cuesFromPhonemes(phonemes);
-  } catch (reason) {
-    llog("stream-playback:untimed", `sentence ${index}: ${reason instanceof Error ? reason.message : "bad timings"}`);
-    return [];
-  }
-}
-
-/**
- * The moment of the audio now leaving the speakers, on the context's clock.
- * `currentTime` runs ahead of it by the output's latency, which headphones over
- * Bluetooth stretch to a fifth of a second: enough to put her mouth visibly
- * ahead of her voice. A stamp that disagrees with the clock by more than that
- * is not believed.
- */
-function audibleTime(context: AudioContext): number {
-  const now = context.currentTime;
-  const stamp = typeof context.getOutputTimestamp === "function" ? context.getOutputTimestamp() : null;
-  if (stamp?.contextTime && stamp.performanceTime) {
-    const heard = stamp.contextTime + (performance.now() - stamp.performanceTime) / 1000;
-    if (heard <= now + 0.005 && heard >= now - 0.3) return heard;
-  }
-  return now;
 }
 
 function base64ToArrayBuffer(base64: string): ArrayBuffer {

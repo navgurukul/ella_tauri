@@ -121,7 +121,7 @@ struct DaemonSpeech {
 enum Resident {
     /// Ella's own daemon script, on the Python Piper was installed into: the
     /// macOS bundle, a development venv. One JSON header line and the raw PCM
-    /// per request, with how long every sound lasted, for lip sync.
+    /// per request, with how long every sound lasted.
     Script { python: PathBuf },
     /// The standalone binary: the Windows bundle's `piper.exe`. Started with
     /// `--json-input`, it keeps the voice loaded and reads one JSON line per
@@ -289,7 +289,7 @@ impl PiperDaemon {
                 }
             });
             eprintln!(
-                "[LATENCY]     tts> resident Piper binary started in {:.0}ms (the voice loads with the first request; no sound timings, so no lip sync)",
+                "[LATENCY]     tts> resident Piper binary started in {:.0}ms (the voice loads with the first request; no sound timings)",
                 started.elapsed().as_secs_f64() * 1_000.0,
             );
             *guard = Some(PiperDaemonProcess {
@@ -325,12 +325,12 @@ impl PiperDaemon {
                 )));
             }
             // The daemon says why when it cannot time its sounds.
-            let lip_sync = match header["untimed"].as_str() {
-                Some(reason) => format!("no sound timings for lip sync: {reason}"),
-                None => "timing every sound for lip sync".into(),
+            let timings = match header["untimed"].as_str() {
+                Some(reason) => format!("no sound timings: {reason}"),
+                None => "timing every sound".into(),
             };
             eprintln!(
-                "[LATENCY]     tts> resident Piper ready in {:.0}ms (voice load {} ms, {lip_sync})",
+                "[LATENCY]     tts> resident Piper ready in {:.0}ms (voice load {} ms, {timings})",
                 started.elapsed().as_secs_f64() * 1_000.0,
                 header["ready_ms"],
             );

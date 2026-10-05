@@ -20,6 +20,17 @@
 # thing standing between a bad build and every installed copy.
 name: Release
 
+# The llama.cpp build every installer ships. A talk's instructions are kept on
+# disk once evaluated (`SlotStore` in engines.rs), under a name that carries
+# the server's build, because a slot is only safe to restore into the build
+# that saved it. Left to float, every release shipped a newer build than the
+# last, so each update threw away every kept talk and the first reply of each
+# topic waited for its whole instructions again: 21-26 s on a classroom laptop
+# against 1 s. Bump this on purpose, when a llama.cpp change is worth one cold
+# start per topic.
+env:
+  ELLA_LLAMA_TAG: b11405
+
 on:
   push:
     tags: ["v*"]

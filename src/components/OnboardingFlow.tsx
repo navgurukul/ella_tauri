@@ -184,7 +184,6 @@ function CornerElla({ greeting = null }: { greeting?: string | null }) {
       <EllaMascot
         variant="corner"
         className={`ella--corner-ob ${greeting ? "is-peeking" : ""}`.trim()}
-        pokeable
         decorative
       />
     </>
@@ -195,7 +194,7 @@ function Welcome({ onStart, onLogIn }: { onStart: () => void; onLogIn: () => voi
   return (
     <div className="ob-welcome" data-screen="onboarding-welcome">
       <h1 className="display ob-welcome__title">Hi buddy!</h1>
-      <EllaMascot className="ella--ob-welcome" variant="welcome" pokeable />
+      <EllaMascot className="ella--ob-welcome" variant="welcome" />
       <div className="ob-welcome__foot">
         <button className="btn btn--light ob-welcome__cta" onClick={onStart}>
           Let&rsquo;s start
@@ -309,11 +308,10 @@ function AgeStep({
   const ready = value !== "" && parsed >= 3 && parsed <= 120 && !busy;
   return (
     <>
-      {/* She springs up from the corner as soon as there is an age to react to. */}
+      {/* She stands up from the corner as soon as there is an age to react to. */}
       <EllaMascot
         variant="age"
         className={`ella--ob-age ${value ? "is-up" : ""}`.trim()}
-        pokeable
         decorative
       />
       <form
@@ -444,12 +442,6 @@ function MicCheckStep({
         </p>
 
         <div className={`ob-mic-wrap is-${mic}`} data-mic-state={mic}>
-          {mic === "listening" && (
-            <>
-              <span className="ob-mic-pulse" />
-              <span className="ob-mic-pulse ob-mic-pulse--delayed" />
-            </>
-          )}
           <button
             className={`ob-mic is-${mic}`}
             onClick={() => void tap()}

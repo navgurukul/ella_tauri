@@ -74,7 +74,6 @@ export function HomeScreen({
                 variant="home"
                 className="ella--home-peek"
                 expression={mood === "happy" ? "homeHappy" : "homeEager"}
-                pokeable
                 decorative
               />
               <div className="today__card">

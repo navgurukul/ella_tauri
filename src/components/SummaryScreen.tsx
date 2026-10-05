@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { PartnerFigure } from "./CastScreen";
-import { EllaMascot, prefersReducedMotion } from "./EllaMascot";
+import { EllaMascot } from "./EllaMascot";
 import { FlameGlyph } from "./Sidebar";
 import { bridge } from "../lib/bridge";
 import { levelTone } from "../lib/curriculum";
@@ -34,10 +34,13 @@ import type {
  * streak, and what is next.
  *
  * It opens at once, while the backend works out what the talk did; the notes
- * tiles wait with blinking dots and fill in when it answers. The app owns that
+ * tiles wait with three dots and fill in when it answers. The app owns that
  * question, so leaving before the answer comes loses nothing. A talk too short
  * for notes says so straight away, and a talk that could not be read offers to
  * try again — the streak counts either way.
+ *
+ * Nothing on it moves: the scoring that fills it in, and the getting ready of
+ * the next talk, run on the same CPU as this window.
  */
 export function SummaryScreen({
   summary,
@@ -81,26 +84,14 @@ export function SummaryScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assessment?.session_id, assessment?.advanced]);
 
-  // Everything enters on one clock from when the recap opened. What arrives
-  // after the board has settled — notes the model took a while over, or the
-  // tiles after a retry — comes in on its own short clock instead.
-  const [openedAt] = useState(() => performance.now());
   const [streakRun] = useState(() => streakRecap(before, summary.turns > 0));
-  const [confetti] = useState(() =>
-    prefersReducedMotion() ? [] : confettiPieces(summary.chore ? 1.0 : 0.3, summary.chore ? 7 : 5),
-  );
 
   const chore = summary.chore ?? null;
   const notes = assessment?.notes ?? null;
   const standing = assessment?.standing ?? standingBefore;
   const tiles = tilesFor(summary, assessment, assessError);
-  // The slots the board opened with, which set when each tile comes in.
-  const [slots] = useState(() => [...tiles, "streak"]);
   const noticeSpan = Math.max(1, 4 - tiles.length);
   const columns = tiles.reduce((sum, tile) => sum + (isNotice(tile) ? noticeSpan : 1), 1);
-  const slotOf = (tile: TileKey) => (slots.includes(tile) ? slots.indexOf(tile) : tiles.indexOf(tile));
-  const streakDelay = 0.45 + (slots.length - 1) * 0.35;
-  const celebrate = chore ? chore.met : !summary.short;
 
   return (
     <div className="screen screen--recap" data-screen="summary">
@@ -118,46 +109,32 @@ export function SummaryScreen({
 
         <div className="recap__tiles" style={{ "--columns": columns } as CSSProperties}>
           {tiles.map((tile) => (
-            <Tile
-              key={tile}
-              kind={tile}
-              openedAt={openedAt}
-              slot={slotOf(tile)}
-              span={isNotice(tile) ? noticeSpan : 1}
-            >
-              {(delay) =>
-                tile === "well" ? (
-                  <WentWell notes={notes} ready={assessment !== null} openedAt={openedAt} delay={delay} />
-                ) : tile === "fix" ? (
-                  <OneFix
-                    fix={notes?.fix ?? null}
-                    ready={assessment !== null}
-                    sessionId={summary.session_id}
-                    openedAt={openedAt}
-                    delay={delay}
-                  />
-                ) : tile === "skills" ? (
-                  <SkillsGrew skills={assessment?.skills ?? null} openedAt={openedAt} delay={delay} />
-                ) : tile === "failed" ? (
-                  <Failed message={assessError ?? ""} onRetry={onRetry} />
-                ) : (
-                  <Notice
-                    line={
-                      summary.turns === 0
-                        ? "Say a few words next time and it counts."
-                        : summary.short
-                          ? "Talk a little longer to get Ella’s notes."
-                          : "No notes for this talk."
-                    }
-                  />
-                )
-              }
+            <Tile key={tile} kind={tile} span={isNotice(tile) ? noticeSpan : 1}>
+              {tile === "well" ? (
+                <WentWell notes={notes} ready={assessment !== null} />
+              ) : tile === "fix" ? (
+                <OneFix fix={notes?.fix ?? null} ready={assessment !== null} sessionId={summary.session_id} />
+              ) : tile === "skills" ? (
+                <SkillsGrew skills={assessment?.skills ?? null} />
+              ) : tile === "failed" ? (
+                <Failed message={assessError ?? ""} onRetry={onRetry} />
+              ) : (
+                <Notice
+                  line={
+                    summary.turns === 0
+                      ? "Say a few words next time and it counts."
+                      : summary.short
+                        ? "Talk a little longer to get Ella’s notes."
+                        : "No notes for this talk."
+                  }
+                />
+              )}
             </Tile>
           ))}
-          <StreakTile run={streakRun} delay={streakDelay} />
+          <StreakTile run={streakRun} />
         </div>
 
-        <footer className="recap__foot" style={enter("recapRise", streakDelay + 0.4)}>
+        <footer className="recap__foot">
           {standing && <LevelPill standing={standing} onLevels={onLevels} />}
           <div className="recap-next">
             <span className="recap-next__label">Tomorrow</span>
@@ -179,14 +156,6 @@ export function SummaryScreen({
           </button>
         </footer>
       </div>
-
-      {celebrate && confetti.length > 0 && (
-        <div className="recap__confetti" aria-hidden="true">
-          {confetti.map((piece, index) => (
-            <i key={index} style={piece} />
-          ))}
-        </div>
-      )}
     </div>
   );
 }
@@ -212,27 +181,20 @@ function TalkBand({
         : `Nice talking, ${first}!`;
   const cheer = !summary.short;
   return (
-    <section className="recap-band recap-band--talk" style={enter("recapRise", 0.05)}>
+    <section className="recap-band recap-band--talk">
       <div className="recap-band__text">
         <p className="recap-band__eyebrow">{summary.topic_label}</p>
         <h1 className={`display recap-band__hero recap-band__hero--${heroSize(hero)}`}>{hero}</h1>
         <MovedOn assessment={assessment} onLevels={onLevels} />
       </div>
       <div className="recap-band__ella">
-        <div className="recap-band__ella-rise">
-          <div className={`recap-band__ella-hop ${cheer ? "is-cheering" : ""}`.trim()}>
-            {/* The band rises and hops her, so she has no motion of her own,
-                as Ella Mobile's recap draws her. */}
-            <EllaMascot
-              variant="conversation"
-              mood={cheer ? "cheer" : "calm"}
-              scale={0.62}
-              animate={false}
-              className="ella--recap"
-              decorative
-            />
-          </div>
-        </div>
+        <EllaMascot
+          variant="conversation"
+          mood={cheer ? "cheer" : "calm"}
+          scale={0.62}
+          className="ella--recap"
+          decorative
+        />
       </div>
     </section>
   );
@@ -251,21 +213,15 @@ function RoleBand({
   const badge = sceneBadge(chore.chore_id);
   const name = castName(chore.character_id);
   return (
-    <section
-      className="recap-band recap-band--role"
-      data-character={chore.character_id}
-      style={enter("recapRise", 0.05)}
-    >
+    <section className="recap-band recap-band--role" data-character={chore.character_id}>
       <div className="recap-band__text">
         <p className="recap-band__eyebrow">
           {name} · {told.track}
         </p>
         <h1 className="display recap-band__title">{chore.met ? "Goal met!" : "So close!"}</h1>
         <ul className="recap-goals" aria-label="Your goal">
-          <GoalChip done={reachedGoal(chore)} delay={0.5}>
-            {goalFigure(chore)}
-          </GoalChip>
-          <GoalChip done={chore.agreed} delay={0.7}>
+          <GoalChip done={reachedGoal(chore)}>{goalFigure(chore)}</GoalChip>
+          <GoalChip done={chore.agreed}>
             {told.agrees}
           </GoalChip>
         </ul>
@@ -278,7 +234,7 @@ function RoleBand({
         </div>
       </div>
       {chore.last_line && (
-        <p className="recap-band__bubble" style={enter("recapPop", 1.3)}>
+        <p className="recap-band__bubble">
           <span className="sr-only">{name} said: </span>
           {chore.last_line}
         </p>
@@ -287,12 +243,12 @@ function RoleBand({
   );
 }
 
-function GoalChip({ done, delay, children }: { done: boolean; delay: number; children: ReactNode }) {
+function GoalChip({ done, children }: { done: boolean; children: ReactNode }) {
   return (
     <li className={`recap-goal ${done ? "is-done" : ""}`.trim()}>
       <span className="recap-goal__tick" aria-hidden="true">
         {done && (
-          <span className="recap-goal__fill" style={enter("recapPop", delay, "0.4s ease-out")}>
+          <span className="recap-goal__fill">
             <Check size={13} />
           </span>
         )}
@@ -309,10 +265,10 @@ function RecapBadge({ name, chore }: { name: string; chore: ChoreRecap }) {
   if (!chore.met) {
     return (
       <div className="recap-badge recap-badge--locked">
-        <span className="recap-badge__lock" style={enter("recapPop", 0.8)} aria-hidden="true">
+        <span className="recap-badge__lock" aria-hidden="true">
           <LockGlyph />
         </span>
-        <div className="recap-badge__text" style={enter("recapRise", 1, "0.4s ease-out")}>
+        <div className="recap-badge__text">
           <strong className="display">{name}</strong>
           <p>
             Get it to {goalFigure(chore)} to earn {chore.times_met > 0 ? "it again" : "this badge"}.
@@ -328,11 +284,10 @@ function RecapBadge({ name, chore }: { name: string; chore: ChoreRecap }) {
         {!again && <span className="recap-badge__rays" />}
         <span className="recap-badge__disc">
           <SpeechGlyph />
-          <span className="recap-badge__shine" />
         </span>
         {again && <span className="display recap-badge__count">×{chore.times_met}</span>}
       </span>
-      <div className="recap-badge__text" style={enter("recapRise", 1.1, "0.4s ease-out")}>
+      <div className="recap-badge__text">
         <span className="recap-badge__label">{again ? "Earned again" : "New badge"}</span>
         <strong className="display">{name}</strong>
       </div>
@@ -347,11 +302,7 @@ function MovedOn({ assessment, onLevels }: { assessment: Assessment | null; onLe
   const { standing } = assessment;
   const level = assessment.advanced === "level";
   return (
-    <button
-      className={`recap-moved ladder-${levelTone(standing.level_number)}`}
-      onClick={onLevels}
-      style={enter("recapPop", 0.05)}
-    >
+    <button className={`recap-moved ladder-${levelTone(standing.level_number)}`} onClick={onLevels}>
       <span className="recap-moved__badge" aria-hidden="true">
         {level ? standing.level_number : <Check size={18} />}
       </span>
@@ -395,42 +346,16 @@ const TILE_LABEL: Record<TileKey, string> = {
   failed: "Ella’s notes",
 };
 
-/** A tile, entering in its slot on the board's clock, or on its own short
- * clock when it arrives after the board has settled. */
-function Tile({
-  kind,
-  openedAt,
-  slot,
-  span,
-  children,
-}: {
-  kind: TileKey;
-  openedAt: number;
-  slot: number;
-  span: number;
-  children: (delay: number) => ReactNode;
-}) {
-  const delay = useEntryDelay(openedAt, 0.45 + slot * 0.35, 0.05 + slot * 0.12);
+function Tile({ kind, span, children }: { kind: TileKey; span: number; children: ReactNode }) {
   return (
     <section
       className={`recap-tile recap-tile--${kind}`}
       aria-label={TILE_LABEL[kind]}
-      style={{ ...enter("recapRise", delay), gridColumn: span > 1 ? `span ${span}` : undefined }}
+      style={span > 1 ? { gridColumn: `span ${span}` } : undefined}
     >
-      {children(delay)}
+      {children}
     </section>
   );
-}
-
-/** When the board's own entrances are over. */
-const SETTLED_MS = 1200;
-
-/** How long to wait before entering: `onBoard` while the recap is still coming
- * in, else `late`. Fixed when the element first appears, so a later render
- * never moves an entrance already under way. */
-function useEntryDelay(openedAt: number, onBoard: number, late: number): number {
-  const [delay] = useState(() => (performance.now() - openedAt > SETTLED_MS ? late : onBoard));
-  return delay;
 }
 
 function Waiting() {
@@ -443,51 +368,29 @@ function Waiting() {
   );
 }
 
-function WentWell({
-  notes,
-  ready,
-  openedAt,
-  delay,
-}: {
-  notes: TalkNotes | null;
-  ready: boolean;
-  openedAt: number;
-  delay: number;
-}) {
+function WentWell({ notes, ready }: { notes: TalkNotes | null; ready: boolean }) {
   return (
     <>
       {ready ? (
-        <WellCheck openedAt={openedAt} delay={delay} />
+        <span className="recap-well__check" aria-hidden="true">
+          <Check size={32} />
+        </span>
       ) : (
         <span className="recap-well__ring" aria-hidden="true" />
       )}
       <h2 className="display recap-tile__title">Went well</h2>
-      {ready && notes ? <WellItems notes={notes} openedAt={openedAt} delay={delay} /> : <Waiting />}
+      {ready && notes ? <WellItems notes={notes} /> : <Waiting />}
     </>
   );
 }
 
-function WellCheck({ openedAt, delay }: { openedAt: number; delay: number }) {
-  const base = useEntryDelay(openedAt, delay, 0.05);
-  return (
-    <span className="recap-well__check" style={enter("recapPop", base + 0.25)} aria-hidden="true">
-      <Check size={32} />
-    </span>
-  );
-}
-
-function WellItems({ notes, openedAt, delay }: { notes: TalkNotes; openedAt: number; delay: number }) {
-  const base = useEntryDelay(openedAt, delay, 0.05);
+function WellItems({ notes }: { notes: TalkNotes }) {
   // "Nothing to fix" is only said when a model looked.
   const items = notes.checked && !notes.fix ? [...notes.went_well, "Nothing to fix"] : notes.went_well;
   return (
     <ul className="recap-well__list">
-      {items.map((item, index) => (
-        <li
-          key={item}
-          className={`display recap-well__item ${item.length > 22 ? "is-long" : ""}`.trim()}
-          style={enter("recapRise", base + 0.4 + index * 0.15, "0.4s ease-out")}
-        >
+      {items.map((item) => (
+        <li key={item} className={`display recap-well__item ${item.length > 22 ? "is-long" : ""}`.trim()}>
           <span className="recap-well__tick" aria-hidden="true">
             <Check size={15} />
           </span>
@@ -498,43 +401,16 @@ function WellItems({ notes, openedAt, delay }: { notes: TalkNotes; openedAt: num
   );
 }
 
-function OneFix({
-  fix,
-  ready,
-  sessionId,
-  openedAt,
-  delay,
-}: {
-  fix: Fix | null;
-  ready: boolean;
-  sessionId: string;
-  openedAt: number;
-  delay: number;
-}) {
+function OneFix({ fix, ready, sessionId }: { fix: Fix | null; ready: boolean; sessionId: string }) {
   return (
     <>
       <h2 className="display recap-tile__title">One fix</h2>
-      {ready && fix ? (
-        <FixLines fix={fix} sessionId={sessionId} openedAt={openedAt} delay={delay} />
-      ) : (
-        <Waiting />
-      )}
+      {ready && fix ? <FixLines fix={fix} sessionId={sessionId} /> : <Waiting />}
     </>
   );
 }
 
-function FixLines({
-  fix,
-  sessionId,
-  openedAt,
-  delay,
-}: {
-  fix: Fix;
-  sessionId: string;
-  openedAt: number;
-  delay: number;
-}) {
-  const base = useEntryDelay(openedAt, delay, 0.2);
+function FixLines({ fix, sessionId }: { fix: Fix; sessionId: string }) {
   const [hearing, setHearing] = useState(false);
   const stop = useRef<(() => void) | null>(null);
   const live = useRef(true);
@@ -566,23 +442,17 @@ function FixLines({
 
   return (
     <>
-      <p
-        className={`display recap-fix__said ${fix.said.length > 20 ? "is-long" : ""}`.trim()}
-        style={enter("recapRise", base + 0.2, "0.4s ease-out")}
-      >
+      <p className={`display recap-fix__said ${fix.said.length > 20 ? "is-long" : ""}`.trim()}>
         <span className="sr-only">You said: </span>
         {fix.said}
       </p>
-      <span className="recap-fix__arrow" style={enter("recapRise", base + 0.3, "0.4s ease-out")} aria-hidden="true">
+      <span className="recap-fix__arrow" aria-hidden="true">
         <svg viewBox="0 0 24 24" width="26" height="26">
           <path d="M12 5v13" />
           <path d="M6 12.5l6 6 6-6" />
         </svg>
       </span>
-      <p
-        className={`display recap-fix__better recap-fix__better--${fixSize(fix.better)}`}
-        style={enter("recapPop", base + 0.4)}
-      >
+      <p className={`display recap-fix__better recap-fix__better--${fixSize(fix.better)}`}>
         <span className="sr-only">Better: </span>
         {fix.better}
       </p>
@@ -590,7 +460,6 @@ function FixLines({
         className={`recap-fix__hear ${hearing ? "is-hearing" : ""}`.trim()}
         onClick={() => void hear()}
         aria-label="Hear it"
-        style={enter("recapPop", base + 0.55)}
       >
         {hearing ? (
           <span className="recap-fix__wave" aria-hidden="true">
@@ -610,31 +479,22 @@ function FixLines({
 /** The most blocks a skill's bar stacks. */
 const MAX_BLOCKS = 5;
 
-function SkillsGrew({
-  skills,
-  openedAt,
-  delay,
-}: {
-  skills: SkillGrowth[] | null;
-  openedAt: number;
-  delay: number;
-}) {
+function SkillsGrew({ skills }: { skills: SkillGrowth[] | null }) {
   return (
     <>
       <h2 className="display recap-tile__title">Skills grew</h2>
-      {skills ? <SkillBars skills={skills} openedAt={openedAt} delay={delay} /> : <Waiting />}
+      {skills ? <SkillBars skills={skills} /> : <Waiting />}
     </>
   );
 }
 
 /** Each skill a stack of blocks, one per talk that has shown it: today's on
  * top in green, the earlier ones under it in violet. */
-function SkillBars({ skills, openedAt, delay }: { skills: SkillGrowth[]; openedAt: number; delay: number }) {
-  const base = useEntryDelay(openedAt, delay, 0.35);
+function SkillBars({ skills }: { skills: SkillGrowth[] }) {
   return (
     <>
       <ul className="recap-skills">
-        {skills.map((skill, index) => {
+        {skills.map((skill) => {
           const blocks = Math.max(1, Math.min(MAX_BLOCKS, skill.count));
           return (
             <li
@@ -642,15 +502,8 @@ function SkillBars({ skills, openedAt, delay }: { skills: SkillGrowth[]; openedA
               className="recap-skill"
               aria-label={`${skill.label}: ${skill.count === 1 ? "first time" : `${skill.count} talks`}`}
             >
-              <span
-                className="recap-skill__bar"
-                style={enter("recapGrow", base + 0.2 + index * 0.1, "0.6s cubic-bezier(0.3, 1.2, 0.5, 1)")}
-                aria-hidden="true"
-              >
-                <span
-                  className={`recap-skill__today ${blocks > 1 ? "has-rest" : ""}`.trim()}
-                  style={enter("recapPop", base + 0.75 + index * 0.1)}
-                />
+              <span className="recap-skill__bar" aria-hidden="true">
+                <span className={`recap-skill__today ${blocks > 1 ? "has-rest" : ""}`.trim()} />
                 {blocks > 1 && (
                   <span className="recap-skill__rest" style={{ "--blocks": blocks - 1 } as CSSProperties} />
                 )}
@@ -699,32 +552,24 @@ function Failed({ message, onRetry }: { message: string; onRetry: () => void }) 
   );
 }
 
-function StreakTile({ run, delay }: { run: StreakRecap; delay: number }) {
-  const flip = run.from !== run.to;
-  const at = delay + 0.75;
+/** The streak as it stands now, today's day already counted. */
+function StreakTile({ run }: { run: StreakRecap }) {
   return (
-    <section className="recap-tile recap-tile--streak" aria-label="Streak" style={enter("recapRise", delay)}>
-      <span className="recap-streak__flame" style={flip ? enter("recapFlame", at, "0.6s ease-out") : undefined}>
+    <section className="recap-tile recap-tile--streak" aria-label="Streak">
+      <span className="recap-streak__flame">
         <FlameGlyph className="flame--recap" />
       </span>
       <p className="sr-only">
         {run.to} day streak{run.chip ? `. ${run.chip}` : ""}
       </p>
       <div className="display recap-streak__count" aria-hidden="true">
-        {flip ? (
-          <span className="recap-streak__reel" style={enter("recapSlot", at, "0.55s cubic-bezier(0.3, 1.45, 0.5, 1)")}>
-            <span>{run.from}</span>
-            <span>{run.to}</span>
-          </span>
-        ) : (
-          <span>{run.to}</span>
-        )}
+        <span>{run.to}</span>
       </div>
       <p className="display recap-streak__label" aria-hidden="true">
         day streak
       </p>
       {run.chip && (
-        <span className="display recap-streak__chip" style={enter("recapPop", delay + 0.6)} aria-hidden="true">
+        <span className="display recap-streak__chip" aria-hidden="true">
           {run.chip}
         </span>
       )}
@@ -734,7 +579,7 @@ function StreakTile({ run, delay }: { run: StreakRecap; delay: number }) {
             <span className="recap-week__dot">
               {day.state === "done" && <Check size={14} />}
               {day.state === "new" && (
-                <span className="recap-week__fill" style={enter("recapPop", delay + 0.9)}>
+                <span className="recap-week__fill">
                   <Check size={14} />
                 </span>
               )}
@@ -782,36 +627,6 @@ function heroSize(line: string): "lg" | "md" | "sm" {
 
 function fixSize(line: string): "lg" | "md" | "sm" {
   return line.length <= 16 ? "lg" : line.length <= 30 ? "md" : "sm";
-}
-
-/** An entrance: one of the recap's keyframes after `delay` seconds, holding
- * its first frame until then and its last after. */
-function enter(name: string, delay: number, timing = "0.45s ease-out"): CSSProperties {
-  return { animation: `${name} ${timing} ${delay.toFixed(2)}s both` };
-}
-
-/** The design's confetti: pieces in the five brand colours, spread across the
- * width and falling on one of three paths. Seeded, so it falls the same way
- * every time. */
-function confettiPieces(start: number, seed: number): CSSProperties[] {
-  const colours = ["#9347DD", "#FF3181", "#FF7A00", "#68B506", "#5B7DEF"];
-  let state = seed;
-  const random = () => {
-    state = (state * 9301 + 49297) % 233280;
-    return state / 233280;
-  };
-  const count = 56;
-  return Array.from({ length: count }, (_, index) => {
-    const round = random() < 0.3;
-    return {
-      left: `${(((index + random()) * 100) / count).toFixed(2)}%`,
-      width: `${round ? 11 : 8 + Math.round(random() * 4)}px`,
-      height: `${round ? 11 : 14 + Math.round(random() * 6)}px`,
-      borderRadius: round ? "50%" : "3px",
-      background: colours[index % colours.length],
-      animation: `recapConfetti${"ABC"[Math.floor(random() * 3)]} ${(2.3 + random() * 1.2).toFixed(2)}s cubic-bezier(0.3, 0.5, 0.5, 1) ${(start + random() * 0.6).toFixed(2)}s both`,
-    };
-  });
 }
 
 function Check({ size }: { size: number }) {

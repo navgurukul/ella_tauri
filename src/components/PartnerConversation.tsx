@@ -1,15 +1,13 @@
-import { useId, useRef, useState } from "react";
-import { SpeechMouthDrawing, type EllaState } from "./EllaMascot";
-import { usePartnerMotion } from "../lib/partnerMotion";
+import { useId } from "react";
+import { MouthDrawing, type EllaState } from "./EllaMascot";
 import { castName } from "../lib/presentation";
-import type { SpeechMouth } from "../lib/speech";
 import { SMILE, VISEMES, type MouthShape } from "../lib/visemes";
 import type { CastId } from "../types";
 
 const STAGE = { width: 660, height: 450 };
 const MOUTH = { x: 307, y: 103, width: 46, height: 18, line: 3.5 };
-const QUIET: SpeechMouth = { timed: false, started: false, shape: () => VISEMES.rest };
-const UNTIMED_MOUTH = { ...VISEMES.ah, height: 0.32, smile: 0.2, tongue: 0 };
+/** The plain open mouth a partner talks with. */
+const TALKING_MOUTH = { ...VISEMES.ah, height: 0.32, smile: 0.2, tongue: 0 };
 
 /** Complete, rounded silhouettes. Each body continues below the stage while
  * its face is composed around the microphone's central axis. */
@@ -45,7 +43,29 @@ const BROWS: Record<CastId, readonly [string, string]> = {
   debater: ["M-16 -23 L16 -29", "M-17 -27 Q0 -38 17 -27"],
 };
 
-/** Listening and blinking move the same eyes instead of replacing the face. */
+/** How a partner holds their face in each state: listening, they lift and
+ * lean in with their eyes open wide; thinking, they glance up and away with
+ * their brows knitted. Each is a held pose, changed only with the state. */
+interface Pose {
+  y: number;
+  turn: number;
+  gazeX: number;
+  gazeY: number;
+  openness: number;
+  browLift: number;
+  browTilt: number;
+  browAsymmetry: number;
+}
+
+const AT_REST: Pose = { y: 0, turn: 0, gazeX: 0, gazeY: 0, openness: 1, browLift: 0, browTilt: 0, browAsymmetry: 0 };
+const POSES: Record<EllaState, Pose> = {
+  resting: AT_REST,
+  speaking: AT_REST,
+  listening: { y: -3, turn: 0.55, gazeX: 0, gazeY: 0, openness: 1.09, browLift: -2.5, browTilt: -2, browAsymmetry: 0 },
+  thinking: { y: -1, turn: -0.7, gazeX: -2.6, gazeY: -3.2, openness: 0.88, browLift: -1, browTilt: 5, browAsymmetry: 2 },
+};
+
+/** Listening and thinking move the same eyes instead of replacing the face. */
 function eyeOutline(id: CastId, right: boolean): string {
   if (id === "landlord") {
     return right
@@ -57,41 +77,31 @@ function eyeOutline(id: CastId, right: boolean): string {
   return "M-17 0 C-17 -21 17 -21 17 0 C17 21 -17 21 -17 0 Z";
 }
 
-export function PartnerConversation({ id, state, speech }: {
-  id: CastId;
-  state: EllaState;
-  speech?: SpeechMouth;
-}) {
+export function PartnerConversation({ id, state }: { id: CastId; state: EllaState }) {
   const uid = useId().replace(/[^\w-]/g, "");
-  const root = useRef<HTMLDivElement>(null);
-  const body = useRef<HTMLDivElement>(null);
-  const leftEye = useRef<SVGGElement>(null);
-  const rightEye = useRef<SVGGElement>(null);
-  const leftPupil = useRef<SVGGElement>(null);
-  const rightPupil = useRef<SVGGElement>(null);
-  const leftBrow = useRef<SVGGElement>(null);
-  const rightBrow = useRef<SVGGElement>(null);
-  const [untimed, setUntimed] = useState(false);
-
-  usePartnerMotion({ id, state, root, body, leftEye, rightEye, leftPupil, rightPupil, leftBrow, rightBrow });
+  const pose = POSES[state];
+  const speaking = state === "speaking";
 
   function eye(right: boolean) {
     const x = right ? 374 : 286;
     const clip = `${uid}-eye-${right ? "right" : "left"}`;
     const outline = eyeOutline(id, right);
+    const brow = right
+      ? `translate(0 ${pose.browLift - pose.browAsymmetry}) rotate(${-pose.browTilt})`
+      : `translate(0 ${pose.browLift}) rotate(${pose.browTilt})`;
     return (
       <g transform={`translate(${x} 70)`}>
-        <g ref={right ? rightEye : leftEye} className="figure__eye-aperture">
+        <g className="figure__eye-aperture" transform={`scale(1 ${pose.openness})`}>
           <defs><clipPath id={clip}><path d={outline} /></clipPath></defs>
           <path d={outline} fill="#fffdf8" />
           <g clipPath={`url(#${clip})`}>
-            <g ref={right ? rightPupil : leftPupil} className="figure__pupil">
+            <g className="figure__pupil" transform={`translate(${pose.gazeX} ${pose.gazeY})`}>
               <ellipse cy="3" rx="9" ry="11" fill="var(--ink)" />
               <circle cx="-3" cy="-1" r="2.6" fill="#fffdf8" />
             </g>
           </g>
         </g>
-        <g ref={right ? rightBrow : leftBrow} className="figure__brow figure__line">
+        <g className="figure__brow figure__line" transform={brow}>
           <path d={BROWS[id][right ? 1 : 0]} />
         </g>
       </g>
@@ -99,10 +109,10 @@ export function PartnerConversation({ id, state, speech }: {
   }
 
   return (
-    <div ref={root} className={`figure figure--${id} figure--conversation figure--${state}${untimed ? " is-untimed" : ""}`}
+    <div className={`figure figure--${id} figure--conversation figure--${state}`}
       data-character={id} data-state={state} role="img"
       aria-label={`${castName(id)} is ${state === "resting" ? "ready" : state}`}>
-      <div ref={body} className="figure__motion">
+      <div className="figure__motion" style={{ transform: `translateY(${pose.y}px) rotate(${pose.turn}deg)` }}>
         <svg className="figure__portrait" viewBox="0 0 660 450" fill="none" aria-hidden="true" focusable="false">
           <defs>
             <linearGradient id={`${uid}-light`} x1="180" y1="0" x2="410" y2="350" gradientUnits="userSpaceOnUse">
@@ -121,8 +131,7 @@ export function PartnerConversation({ id, state, speech }: {
           {eye(false)}
           {eye(true)}
         </svg>
-        <SpeechMouthDrawing speech={speech ?? QUIET} box={MOUTH} stage={STAGE} state={state}
-          restingShape={SMILES[id]} untimedShape={UNTIMED_MOUTH} onUntimed={setUntimed} />
+        <MouthDrawing shape={speaking ? TALKING_MOUTH : SMILES[id]} open={speaking} box={MOUTH} stage={STAGE} />
       </div>
     </div>
   );

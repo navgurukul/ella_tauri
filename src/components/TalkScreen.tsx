@@ -1,4 +1,4 @@
-import { FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, Fragment, useEffect, useRef, useState } from "react";
 import { LoaderCircle, Send } from "lucide-react";
 import {
   EllaMascot,
@@ -14,16 +14,13 @@ import {
   createSpeechQueue,
   createVoiceCapture,
   speakText,
-  type SpeechMouth,
   type SpeechQueue,
   type SpeechQueueCallbacks,
 } from "../lib/speech";
 import { llog, logServerTimings, markTurnStart, turnElapsed } from "../lib/latency";
-import { VISEMES } from "../lib/visemes";
 import type {
   AudioPayload,
   CastId,
-  PhonemeSpan,
   Session,
   SessionSummary,
   SpokenLine,
@@ -32,7 +29,7 @@ import type {
 } from "../types";
 
 /** Anything that can be played with its timings: a turn, or the opening. */
-type Playback = { audio?: AudioPayload | null; speech_words: WordSpan[]; speech_phonemes?: PhonemeSpan[] };
+type Playback = { audio?: AudioPayload | null; speech_words: WordSpan[] };
 
 /** How the last turn went, for the screen reader's status line. */
 type Reaction = "success" | "error" | null;
@@ -47,10 +44,10 @@ const MIC_HINT: Record<EllaState, (speaker: string) => string> = {
   speaking: (speaker) => `${speaker} is speaking`,
 };
 
-// Below this, `voiceLevel` (0-1, from the same RMS meter that drives the mic's
-// pulse animation) reads as room noise rather than someone talking. A starting
-// point, not a measured threshold - worth tuning against real recordings if
-// the badge fires during normal speech or never fires during real silence.
+// Below this, the microphone's level (0-1, an RMS meter over each block of
+// audio) reads as room noise rather than someone talking. A starting point,
+// not a measured threshold - worth tuning against real recordings if the
+// badge fires during normal speech or never fires during real silence.
 const SPEAK_UP_LEVEL_THRESHOLD = 0.05;
 // How long the level can stay under that before the nudge appears. Long
 // enough that an ordinary pause-before-speaking never triggers it; short
@@ -84,7 +81,6 @@ export function TalkScreen({
   const [input, setInput] = useState("");
   const [typing, setTyping] = useState(false);
   const [liveTranscript, setLiveTranscript] = useState("");
-  const [voiceLevel, setVoiceLevel] = useState(0);
   // Shown while listening if the mic has picked up nothing but quiet for a
   // while - a nudge before the recording ever reaches the "no words" path.
   const [showSpeakUpHint, setShowSpeakUpHint] = useState(false);
@@ -142,20 +138,6 @@ export function TalkScreen({
   /** What Space does right now; refreshed every render so the one key listener
    * never acts on a stale state. */
   const spaceAction = useRef<() => void>(() => undefined);
-  // Her mouth follows whichever queue is playing. With none — the system voice
-  // — there is nothing timed to follow, and the design's static "o" stands in.
-  const speechMouth = useMemo<SpeechMouth>(
-    () => ({
-      get timed() {
-        return speechQueue.current ? speechQueue.current.queue.mouth.timed : false;
-      },
-      get started() {
-        return speechQueue.current?.queue.mouth.started ?? false;
-      },
-      shape: () => speechQueue.current?.queue.mouth.shape() ?? VISEMES.rest,
-    }),
-    [],
-  );
 
   const latestElla = [...session.messages].reverse().find((message) => message.speaker === "ella");
   // Who the learner is talking with, for every line that names them.
@@ -205,7 +187,7 @@ export function TalkScreen({
         // repeat, and queueing it would say the sentence twice.
         if (segment.index < armed.queue.received) return;
         if (segment.index === 0 && segment.reply) setIncomingReply(segment.reply);
-        armed.queue.push(segment.audio, segment.words, segment.phonemes);
+        armed.queue.push(segment.audio, segment.words);
       })
       .then((stop) => {
         if (dropped) stop();
@@ -242,8 +224,9 @@ export function TalkScreen({
 
   // Arms a "speak up" nudge for the whole time the mic is open, and disarms it
   // the moment listening ends - by finishing, cancelling, or unmounting.
-  // `lastSoundAt` is updated from `handleLevel` on every frame that clears the
-  // threshold, so this timer only has to check whether it has gone stale.
+  // `lastSoundAt` is updated from `handleLevel` on every block of audio that
+  // clears the threshold, so this timer only has to check whether it has gone
+  // stale.
   useEffect(() => {
     if (state !== "listening") {
       setShowSpeakUpHint(false);
@@ -255,8 +238,11 @@ export function TalkScreen({
     return () => window.clearInterval(id);
   }, [state]);
 
+  // Called for every block of audio, about 23 times a second, while Canary
+  // transcribes the answer beside it. Nothing on screen shows the level, so it
+  // touches no state: a render per block would cost the CPU the model and the
+  // speech recognizer are both waiting on.
   function handleLevel(level: number) {
-    setVoiceLevel(level);
     if (level >= SPEAK_UP_LEVEL_THRESHOLD) lastSoundAt.current = performance.now();
   }
 
@@ -426,7 +412,7 @@ export function TalkScreen({
     if (result?.audio) {
       const queue = createSpeechQueue(queueCallbacks(generation, "playback:replay"));
       speechQueue.current = { generation, queue, turn: -1 };
-      queue.push(result.audio, result.speech_words, result.speech_phonemes);
+      queue.push(result.audio, result.speech_words);
       queue.finish(1);
       return;
     }
@@ -480,7 +466,6 @@ export function TalkScreen({
     setState("resting");
     try {
       setLiveTranscript("");
-      setVoiceLevel(0);
       lastSoundAt.current = performance.now();
       voicePushQueue.current = Promise.resolve();
       voicePushFailed.current = false;
@@ -618,7 +603,6 @@ export function TalkScreen({
         setTyping(true);
       }
     } finally {
-      setVoiceLevel(0);
       setSending(false);
     }
   }
@@ -708,7 +692,6 @@ export function TalkScreen({
     micOperation.current += 1;
     setMicStarting(false);
     stopPlayback();
-    setVoiceLevel(0);
     setLiveTranscript("");
     setState("resting");
     setTyping(true);
@@ -731,7 +714,6 @@ export function TalkScreen({
     setMicStarting(false);
     stopPlayback();
     setState("resting");
-    setVoiceLevel(0);
     setLiveTranscript("");
     await cancelVoiceStream();
     captureActive.current = false;
@@ -785,11 +767,11 @@ export function TalkScreen({
       {partner ? (
         // Partners share Ella's centered stage and follow the live conversation.
         <div className="talk-partner" data-character={partner} aria-hidden="true">
-          <PartnerFigure id={partner} variant="conversation" state={state} speech={speechMouth} />
+          <PartnerFigure id={partner} variant="conversation" state={state} />
         </div>
       ) : (
         // Ella stands behind the whole stage rather than in a dock. As on Ella
-        // Mobile she holds her place there when the mic opens, leaning in to
+        // Mobile she holds her place there when the mic opens, her ears up to
         // listen; in the first talk her face keeps its smile and her ears stay
         // down.
         <div className="talk-entry-frame" aria-hidden="true">
@@ -800,8 +782,6 @@ export function TalkScreen({
               state={state}
               ears={state === "listening" && variant !== "placement" ? "listen" : "rest"}
               faceFollowsState={variant !== "placement"}
-              speech={speechMouth}
-              pokeable
               decorative
             />
           </div>
@@ -932,12 +912,6 @@ export function TalkScreen({
               </span>
             )}
             <div className="mic-wrap">
-              {state === "listening" && (
-                <>
-                  <span className="mic-pulse" />
-                  <span className="mic-pulse mic-pulse--delayed" />
-                </>
-              )}
               <button
                 ref={micButton}
                 className="mic"
