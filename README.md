@@ -452,6 +452,17 @@ evaluated once when the talk opens, and its first reply waits for them.
   of microphone audio, about 23 times a second, to keep a level nothing on
   screen showed; it now keeps the level only for the "speak up" nudge, without
   a render. The word highlight wakes at word boundaries instead of every frame.
+- **The llama.cpp build is pinned** (`ELLA_LLAMA_TAG` in
+  [`release.yml`](.github/workflows/release.yml)). Every release used to ship
+  whatever llama.cpp was newest that day: b11317 in 0.1.9, b11321 in 0.1.11,
+  b11403 in 0.1.12, b11405 in 0.1.13. A kept talk's file name carries the
+  server's build (below), so every update threw away every kept talk, and the
+  first reply of each topic waited for its whole instructions again. On the
+  Windows test laptop the first reply took 0.9 s on 0.1.11 and 21-26 s on
+  0.1.12. The three builds ran the same on the CPU, with Ella's flags and four
+  threads on an M4: 125-131 prompt tokens a second over a talk's instructions,
+  134-137 on `llama-bench`'s pp256 and 35 written. Bump the pin on purpose, and
+  expect one slow first reply per topic after that update.
 - **Ella starts talking once the reply is written and saved**, not once its
   last sentence is synthesized (see above). On the M1 Pro that is 5 ms after
   the model's last token instead of 95-130 ms; on a laptop, with a slower Piper,
