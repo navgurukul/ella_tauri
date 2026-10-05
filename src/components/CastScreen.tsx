@@ -1,6 +1,5 @@
 import { EllaMascot, type EllaState } from "./EllaMascot";
 import { PartnerConversation } from "./PartnerConversation";
-import type { SpeechMouth } from "../lib/speech";
 import { MicGlyph } from "./HomeScreen";
 import { castFor } from "../lib/presentation";
 import type { CastGoal, CastId, Learner } from "../types";
@@ -41,7 +40,7 @@ export function CastScreen({
             Nothing to fix yet. When Ella spots a pattern, she pops up on Home with a short lesson.
           </p>
         </div>
-        <EllaMascot variant="mentor" className="ella--mentor" pokeable decorative />
+        <EllaMascot variant="mentor" className="ella--mentor" decorative />
       </section>
 
       <div className="section-head">
@@ -175,14 +174,12 @@ export function PartnerFigure({
   id,
   variant = "card",
   state = "resting",
-  speech,
 }: {
   id: CastId;
   variant?: "card" | "conversation";
   state?: EllaState;
-  speech?: SpeechMouth;
 }) {
-  if (variant === "conversation") return <PartnerConversation id={id} state={state} speech={speech} />;
+  if (variant === "conversation") return <PartnerConversation id={id} state={state} />;
   return (
     <div className="partner__entry" aria-hidden="true">
       <div className={`figure figure--${id}`}>

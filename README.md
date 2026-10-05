@@ -54,24 +54,19 @@ The UI implements the **Ella Desktop** design (Claude Design project
 `d4c02bb0-7d53-42ff-8c5b-ea4750e899ee`, file `Ella Desktop.dc.html`). The
 design's window chrome — title bar and traffic lights — is left to the OS.
 
-- Tokens, type, geometry and motion live in [`src/styles.css`](src/styles.css).
+- Tokens, type and geometry live in [`src/styles.css`](src/styles.css).
   Fonts are bundled under `public/assets/fonts` because the Tauri CSP is
   `font-src 'self'` — nothing is fetched from Google Fonts at runtime.
 - Ella herself is drawn in CSS, not illustrated: see
   [`src/components/EllaMascot.tsx`](src/components/EllaMascot.tsx). The design
   draws her afresh for each placement, so each placement is a variant whose face
-  is a block of custom properties on `.ella--{variant}`. She moves as Ella
-  Mobile moves her ([`src/lib/motion.ts`](src/lib/motion.ts)). Her eyes follow
-  the cursor, every Ella on screen blinks and grins together, and she squishes
-  when poked. She floats gently where she stands; on Home she sways, eager, or
-  happy once a talk is done; the learner's own Ella on the profile only moves
-  her eyes. On the talk stage she bounces as she speaks and sways while she
-  thinks, and when the mic opens she leans in a little and nods now and then,
-  her ears lifting and twitching. Each loop eases into the next. Like Ella
-  Mobile, she leaves out the design's walk-ons and its dive on every listening
-  turn: she and the talk partners are already in place when a screen opens.
-  Her mouth on the talk stage follows the sounds she is making: see
-  [Lip sync](#lip-sync).
+  is a block of custom properties on `.ella--{variant}`. She holds still, and
+  so do the talk partners and every screen: each pose is a class the
+  stylesheet draws, changed only when what she is doing changes. On the talk
+  stage her ears lift while she listens, her eyes close into lines while she
+  thinks, and her mouth opens into the design's "o" while she talks; a
+  partner glances up to think and opens their mouth to talk. Nothing runs on
+  a clock: see [Latency on laptops](#latency-on-laptops).
 - Onboarding is the five-step flow — welcome, name, age, mic check, placement
   chat — in
   [`src/components/OnboardingFlow.tsx`](src/components/OnboardingFlow.tsx). The
@@ -195,7 +190,7 @@ number on the ladder, 1 to 6.
   whole window: Ella cheering, or for a chore the talk partner with whether the
   goal was met, its badge and their last line; then Ella's notes — what went
   well, one fix the learner can hear said right, and the skills that grew — the
-  streak rolling up a day, and tomorrow's topic. "Step complete!" or "Level
+  streak with today counted, and tomorrow's topic. "Step complete!" or "Level
   up!" shows under the headline when a talk moved them on. It opens at once and
   the notes fill in when the model has read the talk. The app owns that
   question, so leaving early loses nothing: Home catches up, and a step or
@@ -360,50 +355,33 @@ from syllables, characters and punctuation, anchored to the sentence's exact
 duration and to the leading and trailing silence measured off the PCM. Fitted
 and measured against real Piper phoneme alignments: onset error mean ~70 ms, p90
 ~160 ms, roughly three quarters of words inside 100 ms. The words stay an
-estimate even though Piper's own sound timings now reach the window (below):
-the standalone binary reports none, and espeak merges words ("in the" becomes one
+estimate even though Piper's own sound timings reach the window (below): the
+standalone binary reports none, and espeak merges words ("in the" becomes one
 phoneme group) in about 8% of sentences, which leaves no safe positional mapping
-back to the text.
+back to the text. The highlight reads the audio clock at each word's start and
+end, a few times a second, rather than on every frame.
 
-### Lip sync
+### Piper's own timings
 
-On the talk stage Ella's mouth takes the shape of each sound she makes, as it
-does on Ella Mobile, and from the same inference as her voice: Piper's duration
-predictor is random, so timings from a second pass would not line up.
+The resident daemon
+([`piper_daemon.py`](src-tauri/src/infrastructure/piper_daemon.py)) loads the
+voice with its sampled token durations marked as a second graph output — the
+one change `piper.patch_voice_with_alignment` makes, done to the model's bytes
+in memory, so it needs neither the 68 MB `onnx` package nor a patched copy of
+the voice, and works for any Piper voice. The NavGurukul voice's session loads
+in the same ~0.7 s as before, plus ~35 ms to read and patch the model; a voice
+the patch cannot read loads as it always did, without timings. Every response
+then carries each token's `[symbol, samples]` — sounds, stress marks, word
+spaces, Piper's blanks and the sentence's `^`/`$` — and only if they add up to
+every sample of the audio. `phoneme_spans` in `speech_timing.rs` turns them into
+`PhonemeSpan`s, on every streamed sentence (`phonemes`) and on the whole reply
+for replay (`speech_phonemes`).
 
-- **The timings.** The resident daemon
-  ([`piper_daemon.py`](src-tauri/src/infrastructure/piper_daemon.py)) loads the
-  voice with its sampled token durations marked as a second graph output — the
-  one change `piper.patch_voice_with_alignment` makes, done to the model's bytes
-  in memory, so it needs neither the 68 MB `onnx` package nor a patched copy of
-  the voice, and works for any Piper voice. The NavGurukul voice's session loads
-  in the same ~0.7 s as before, plus ~35 ms to read and patch the model; a
-  voice the patch cannot read loads as it always did, without timings. Every
-  response then
-  carries each token's `[symbol, samples]` — sounds, stress marks, word spaces,
-  Piper's blanks and the sentence's `^`/`$` — and only if they add up to every
-  sample of the audio. `phoneme_spans` in `speech_timing.rs` turns them into
-  `PhonemeSpan`s, on every streamed sentence (`phonemes`) and on the whole reply
-  for replay (`speech_phonemes`).
-- **The mouth.** The window ports Ella Mobile's lip sync:
-  [`alignment.ts`](src/lib/alignment.ts) makes timed cues of the tokens (blanks
-  and stress lead into the next sound, a p shuts on the silent end of the vowel
-  before it, diphthongs keep their glide), [`visemes.ts`](src/lib/visemes.ts) is
-  the palette of 21 speaking poses and silence and the sampler that blends each
-  sound with its neighbours, and [`mouth.ts`](src/lib/mouth.ts) is the one path,
-  with teeth and tongue inside it, that every pose shares. The speech queue
-  keeps one track per reply on the AudioContext clock, so a gap between
-  sentences closes her mouth like any pause, and samples it 20 ms ahead of the
-  sound actually leaving the speakers (`getOutputTimestamp`, which headphones
-  over Bluetooth push a fifth of a second behind `currentTime`).
-- **Her smile.** With lip sync on, the talk stage draws her U smile in the same
-  path, so speech grows out of it in 60 ms and hands back to it over the face's
-  160 ms fade. It fills the stylesheet smile's box (29.4 by 13.5 px against its
-  30 by 13) with Ella Mobile's curve and round line ends.
-- **Where it cannot follow.** The Windows build's `piper.exe`, which stays
-  running like the daemon but times nothing, and the system voice report no
-  timings, so there her mouth opens into the design's static "o" while she
-  talks, as it always did.
+The window used to move Ella's mouth with them, sound by sound, as Ella Mobile
+does. It no longer does: a mouth redrawn every frame while she talked ran on
+the same CPU as Piper reading the rest of the reply, and on a talk's first line
+as the model evaluating its instructions. Her mouth opens into the design's "o"
+while she talks, as it always did for a voice with no timings.
 
 Running a live check needs piper-tts and a voice:
 
@@ -464,6 +442,16 @@ evaluated once when the talk opens, and its first reply waits for them.
   0.12 s. A Piper that cannot run resident, or leaves a line unanswered for
   20 s, is set aside for the session, and every line starts Piper afresh, as
   before.
+- **Nothing on screen moves.** Ella, the talk partners and every screen hold
+  still: no keyframes or transitions in the stylesheet, no Web Animations, no
+  animation frames. Before, the window ran Ella's body loops, her blinking,
+  grinning and eyes that followed the pointer, a lip-synced mouth redrawn every
+  frame while she talked, a partner's face redrawn every frame for as long as
+  their talk was open, and confetti on the recap, all on the CPU the model,
+  Canary and Piper were using. The talk screen also re-rendered for every block
+  of microphone audio, about 23 times a second, to keep a level nothing on
+  screen showed; it now keeps the level only for the "speak up" nudge, without
+  a render. The word highlight wakes at word boundaries instead of every frame.
 - **Ella starts talking once the reply is written and saved**, not once its
   last sentence is synthesized (see above). On the M1 Pro that is 5 ms after
   the model's last token instead of 95-130 ms; on a laptop, with a slower Piper,

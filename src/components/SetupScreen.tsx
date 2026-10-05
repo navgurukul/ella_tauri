@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Hourglass, LoaderCircle, RotateCcw, WifiOff } from "lucide-react";
-import { EllaGlyph, EllaMascot, prefersReducedMotion } from "./EllaMascot";
+import { EllaGlyph, EllaMascot } from "./EllaMascot";
 import { formatBytes, type SetupState } from "../lib/setup";
 
 /**
@@ -53,7 +53,8 @@ export function SetupScreen({
       open.current();
       return;
     }
-    const timer = window.setTimeout(() => open.current(), prefersReducedMotion() ? 900 : 1400);
+    // Long enough to read "ready" before the app takes over.
+    const timer = window.setTimeout(() => open.current(), 900);
     return () => window.clearTimeout(timer);
   }, [booted, ready, bootError]);
 
