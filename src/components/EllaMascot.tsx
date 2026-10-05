@@ -407,12 +407,14 @@ export function EllaMascot({
  * read off the audio clock every frame. Speech grows out of the smile and
  * hands back to it, so the two never cut.
  */
-function SpeechMouthDrawing({
+export function SpeechMouthDrawing({
   speech,
   box,
   stage,
   state,
   onUntimed,
+  restingShape = SMILE,
+  untimedShape,
 }: {
   speech: SpeechMouth;
   box: Box & { line: number };
@@ -420,6 +422,10 @@ function SpeechMouthDrawing({
   stage: { width: number; height: number };
   state: EllaState;
   onUntimed: (untimed: boolean) => void;
+  /** Partners keep their own smile through the handoff to and from speech. */
+  restingShape?: MouthShape;
+  /** An untimed voice can use the same mouth, instead of a separate CSS one. */
+  untimedShape?: MouthShape;
 }) {
   const clip = useId().replace(/[^\w-]/g, "");
   const group = useRef<SVGGElement>(null);
@@ -477,7 +483,8 @@ function SpeechMouthDrawing({
       const elapsed = last ? now - last : 0;
       last = now;
       const talking = speaking.current;
-      const speaks = talking && speech.started;
+      const fallback = talking && speech.timed === false ? untimedShape : undefined;
+      const speaks = talking && (speech.started || Boolean(fallback));
       const target = speaks ? 1 : 0;
       if (reduce) {
         progress = target;
@@ -489,14 +496,15 @@ function SpeechMouthDrawing({
             : Math.max(0, progress - elapsed / HANDOFF_OUT_MS);
       }
       const weight = rising ? easeOut(progress) : easeInOut(progress);
-      if (speech.started) held = speech.shape();
+      if (fallback) held = fallback;
+      else if (speech.started) held = speech.shape();
       if (weight > 0 || speaks) {
         // Back into her smile as the weight falls, so a line cut off mid-vowel
         // closes rather than ghosting over it.
-        draw(lerpMouth(SMILE, held ?? VISEMES.rest, weight), weight);
+        draw(lerpMouth(restingShape, held ?? VISEMES.rest, weight), weight);
       } else {
         held = null;
-        draw(SMILE, 0);
+        draw(restingShape, 0);
       }
       const nowUntimed = talking && speech.timed === false;
       if (nowUntimed !== untimed) {
@@ -510,13 +518,13 @@ function SpeechMouthDrawing({
     wake.current = () => {
       if (!frame) frame = requestAnimationFrame(tick);
     };
-    draw(SMILE, 0);
+    draw(restingShape, 0);
     wake.current();
     return () => {
       cancelAnimationFrame(frame);
       wake.current = () => undefined;
     };
-  }, [speech, box, onUntimed]);
+  }, [speech, box, onUntimed, restingShape, untimedShape]);
 
   // Talking starts the frames; they stop by themselves once she is back to
   // her smile.

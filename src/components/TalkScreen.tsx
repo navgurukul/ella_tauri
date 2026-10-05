@@ -783,13 +783,9 @@ export function TalkScreen({
   return (
     <div className={`screen screen--talk${partner ? " has-partner" : ""}`} data-screen="talk">
       {partner ? (
-        // A partner stands where their card puts them, in the bottom-right
-        // corner with the stage's edges cropping them, and holds their place
-        // while the mic is open, as on Ella Mobile.
+        // Partners share Ella's centered stage and follow the live conversation.
         <div className="talk-partner" data-character={partner} aria-hidden="true">
-          <div className="talk-partner__box">
-            <PartnerFigure id={partner} />
-          </div>
+          <PartnerFigure id={partner} variant="conversation" state={state} speech={speechMouth} />
         </div>
       ) : (
         // Ella stands behind the whole stage rather than in a dock. As on Ella
