@@ -32,8 +32,10 @@ MANIFEST = HERE / "models.json"
 HF_BASE = "https://huggingface.co"
 
 
-def hf_url(repo: str, filename: str) -> str:
-    return f"{HF_BASE}/{repo}/resolve/main/{filename}"
+def hf_url(repo: str, filename: str, revision: str | None = None) -> str:
+    # A pinned revision keeps a checksummed file from changing under its
+    # sha256 when the repo's main branch is re-uploaded.
+    return f"{HF_BASE}/{repo}/resolve/{revision or 'main'}/{filename}"
 
 
 def human(mb: float) -> str:
@@ -258,7 +260,7 @@ def main() -> int:
                 ok = False
         else:
             ok = download(
-                hf_url(variant["repo"], variant["file"]),
+                hf_url(variant["repo"], variant["file"], variant.get("revision")),
                 dest,
                 variant.get("size_mb"),
                 variant.get("sha256"),
@@ -267,7 +269,7 @@ def main() -> int:
             if ok and sidecar:
                 side_name = Path(variant["file"]).with_suffix("").name
                 ok = download(
-                    hf_url(variant["repo"], sidecar.lstrip(".")),
+                    hf_url(variant["repo"], sidecar.lstrip("."), variant.get("revision")),
                     Path(str(dest) + sidecar),
                     None,
                 ) or ok

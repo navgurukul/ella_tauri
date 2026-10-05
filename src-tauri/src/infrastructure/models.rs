@@ -218,19 +218,24 @@ pub fn required_models() -> EllaResult<Vec<ModelSpec>> {
 }
 
 /// An explicit `url` wins; otherwise a Hugging Face repo and file name are
-/// enough to build one. Anything else — `source: local` — is bundled, not
-/// fetched.
+/// enough to build one, at the variant's `revision` if it names one. A file
+/// with a checksum has to be fetched from a revision that keeps it: a repo's
+/// main branch can be re-uploaded under it, as Canary's was. Anything else —
+/// `source: local` — is bundled, not fetched.
 fn variant_url(variant: &Value) -> Option<String> {
     if let Some(url) = variant.get("url").and_then(Value::as_str) {
         return Some(url.to_string());
     }
     let repo = variant.get("repo").and_then(Value::as_str)?;
     let file = variant.get("file").and_then(Value::as_str)?;
-    Some(format!("https://huggingface.co/{repo}/resolve/main/{file}"))
+    let revision = variant.get("revision").and_then(Value::as_str).unwrap_or("main");
+    Some(format!("https://huggingface.co/{repo}/resolve/{revision}/{file}"))
 }
 
 /// What this launch has to download: anything absent, and anything whose
-/// recorded origin no longer matches the manifest.
+/// recorded origin no longer matches the manifest. A file checked against the
+/// checksum the manifest pins is the file it asks for, wherever it came from,
+/// so pinning a URL to a revision fetches nothing that is already here.
 pub fn outstanding(models_root: &Path) -> EllaResult<Vec<ModelSpec>> {
     let state = read_state(models_root);
     Ok(required_models()?
@@ -240,7 +245,8 @@ pub fn outstanding(models_root: &Path) -> EllaResult<Vec<ModelSpec>> {
             let present = models_root.join(&spec.target).exists();
             let recorded = state.files.get(&key);
             let unchanged = recorded.is_some_and(|file| {
-                file.variant == spec.variant && file.url == spec.url
+                file.variant == spec.variant
+                    && (file.url == spec.url || (spec.sha256.is_some() && file.sha256 == spec.sha256))
             });
             !(present && unchanged)
         })
@@ -641,13 +647,46 @@ mod tests {
             .any(|outstanding| outstanding.key == "stt"));
 
         // A release that repoints the manifest is exactly this: same path,
-        // different origin. The file on disk is stale and must be refetched.
+        // different origin, different file. The file on disk is stale and
+        // must be refetched.
         let moved = ModelSpec {
             url: "https://example.invalid/canary-v2.gguf".into(),
+            sha256: Some("0".repeat(64)),
             ..spec
         };
         record(root.path(), &moved).unwrap();
         assert!(outstanding(root.path())
+            .unwrap()
+            .iter()
+            .any(|outstanding| outstanding.key == "stt"));
+    }
+
+    #[test]
+    fn canary_is_fetched_from_the_revision_that_keeps_its_checksum() {
+        let spec = required_models()
+            .unwrap()
+            .into_iter()
+            .find(|spec| spec.key == "stt")
+            .unwrap();
+        // The repo's main branch was re-uploaded on 2026-10-03 and fails it.
+        assert_eq!(
+            spec.url,
+            "https://huggingface.co/handy-computer/canary-180m-flash-gguf/resolve/\
+             456e6049062ecf06f1a0f4607f2ee3dc80ebbf8a/canary-180m-flash-Q8_0.gguf"
+        );
+
+        // A laptop that fetched it from main before then has the same file,
+        // checked against the same checksum, and fetches nothing again.
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("stt")).unwrap();
+        fs::write(root.path().join(&spec.target), b"weights").unwrap();
+        let from_main = ModelSpec {
+            url: "https://huggingface.co/handy-computer/canary-180m-flash-gguf/resolve/main/canary-180m-flash-Q8_0.gguf"
+                .into(),
+            ..spec
+        };
+        record(root.path(), &from_main).unwrap();
+        assert!(!outstanding(root.path())
             .unwrap()
             .iter()
             .any(|outstanding| outstanding.key == "stt"));

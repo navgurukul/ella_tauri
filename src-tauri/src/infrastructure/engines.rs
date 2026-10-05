@@ -21,9 +21,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     domain::{
-        AudioPayload, ChoreContext, Confidence, Direction, EngineComponent, EngineStatus, Focus,
-        LedgerSpec, Message, PhonemeSpan, Pitch, PlacementReading, Readiness, Scorable, Speaker,
-        Topic, TurnSignal, TutorRequest, WordSpan,
+        AudioPayload, ChoreContext, Confidence, Direction, EngineComponent, EngineStatus, LedgerSpec,
+        Message, PhonemeSpan, Pitch, PlacementReading, Readiness, Scorable, Speaker, Topic, TurnSignal,
+        TutorRequest, WordSpan,
     },
     error::{EllaError, EllaResult},
     infrastructure::{
@@ -1326,32 +1326,12 @@ fn scene_clause(prompt: &str) -> &str {
         .unwrap_or(prompt)
 }
 
-/// The skill a talk quietly aims at, from the step the learner is on, as Ella
-/// Mobile words it. Empty without one, so such a prompt reads exactly as it
-/// did before the curriculum.
-fn focus_brief(learner_name: &str, focus: Option<&Focus>) -> String {
-    let Some(focus) = focus else {
-        return String::new();
-    };
-    format!(
-        "\n\n{learner_name} is on the step \"{title}\": {step_focus} This conversation \
-         quietly aims at one skill from it: {skill} Where it fits the scene, ask questions \
-         that give them a reason to use it. Never name the skill, teach it or quiz them on \
-         it: the conversation comes first.",
-        title = focus.step_title,
-        step_focus = focus.step_focus,
-        skill = focus.skill,
-    )
-}
-
-/// A free conversation's instructions for its topic: everything but the
-/// skill the talk aims at. The aim changes from one talk to the next, so it
-/// comes last, after this: then every talk on the topic, at the learner's
-/// level, starts with these same words, which llama.cpp keeps on disk between
-/// talks and between launches, and a talk on a topic done before only has to
-/// evaluate its aim when it opens. See `LocalEngine::warm_prompt_cache`.
+/// A free conversation's instructions for its topic, the same for every talk
+/// on the topic at the learner's level, which llama.cpp keeps on disk between
+/// talks and between launches: a talk on a topic done before only evaluates
+/// its opening. See `LocalEngine::warm_prompt_cache`.
 ///
-/// Everything else is in the order it has always been, and was measured in:
+/// Everything is in the order it has always been, and was measured in:
 /// the guardrail stays after the scene. Moving the rules and the guardrail
 /// ahead of the scene, so that every topic could share them, had Ella accept
 /// a hug in four of twelve replies where she had accepted none.
@@ -1422,12 +1402,21 @@ fn ella_topic_prompt(learner_name: &str, topic_id: &str, topic_label: &str, leve
     )
 }
 
+/// A free conversation's instructions: its topic's, at the level the talk is
+/// pitched at. The skill the talk aims at (`Pitch::focus`) is kept on the
+/// session for scoring but not told to the model. Told it, as Ella Mobile
+/// tells its much larger model ("this conversation quietly aims at one skill
+/// ... never name the skill, teach it or quiz them on it"), Ella's 3B model
+/// asked about the skill instead of the topic. Measured on two topics, three
+/// seeds and five aims of the first steps, the same six answers each time:
+/// aimed at collocations ("make a decision, pay attention, take a risk"), the
+/// job interviewer brought the skill's own words into 14 of 15 questions ("a
+/// risk you took on a recent project"); aimed at the present perfect, it said
+/// the skill's example as its own, "I've lived here for 3 years", and asked
+/// how their "work experience connected your past and present work" in 9 of
+/// 15. Without the aim, none of the 30 replies did.
 fn ella_system_prompt(learner_name: &str, topic_id: &str, topic_label: &str, pitch: &Pitch) -> String {
-    format!(
-        "{}{}",
-        ella_topic_prompt(learner_name, topic_id, topic_label, &pitch.level),
-        focus_brief(learner_name, pitch.focus.as_ref()),
-    )
+    ella_topic_prompt(learner_name, topic_id, topic_label, &pitch.level)
 }
 
 /// A character with a setting, a goal the learner can see, and a brief the
@@ -4557,6 +4546,7 @@ fn opening_for(topic_id: &str, learner_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::Focus;
 
     #[test]
     fn llama_gets_a_thread_per_performance_core() {
@@ -4570,11 +4560,11 @@ mod tests {
         assert!(default_llama_threads() >= 1);
     }
 
-    /// What a talk's warm-up restores has to be the start of what its turns
-    /// send, token for token: every talk on the topic at that level shares it,
-    /// and only the aim comes after it.
+    /// What a talk's warm-up restores has to be what its turns send, token
+    /// for token: every talk on the topic at that level shares all of it,
+    /// whatever skill the talk aims at.
     #[test]
-    fn a_free_talk_prompt_ends_on_its_aim_after_what_the_topic_shares() {
+    fn a_free_talk_prompt_is_its_topics_whatever_its_aim() {
         let focus = Focus {
             step_title: "Talking about the past".into(),
             step_focus: "Starting to use past tense to share what happened.".into(),
@@ -4590,8 +4580,7 @@ mod tests {
             );
             let plain = ella_system_prompt("Asha", &topic.id, &topic.label, &Pitch::at("B1"));
             assert_eq!(plain, own, "{}: without an aim the prompt is the topic's", topic.id);
-            let aim = aimed.strip_prefix(&own).expect("the topic's words come first");
-            assert!(aim.starts_with("\n\nAsha is on the step"), "{}: {aim}", topic.id);
+            assert_eq!(aimed, own, "{}: and with one", topic.id);
             assert!(own.ends_with("what they are asking for or saying to you is."), "the guardrail stays last");
         }
     }
@@ -6088,6 +6077,7 @@ mod speech_stream_tests {
 #[cfg(test)]
 mod curriculum_prompt_tests {
     use super::*;
+    use crate::domain::Focus;
 
     fn skills() -> Vec<Scorable> {
         ["A1:U1-VOC-01", "A1:U1-GRA-01", "A1:U1-FLU-01"]
@@ -6100,10 +6090,9 @@ mod curriculum_prompt_tests {
     }
 
     #[test]
-    fn a_talk_is_pitched_at_the_learners_level_and_names_its_aim_only_to_the_model() {
+    fn a_talk_is_pitched_at_the_learners_level_and_keeps_its_aim_from_the_model() {
         let plain = ella_system_prompt("Asha", "street-food", "Street food stories", &Pitch::at("B1"));
         assert!(plain.contains("practising English at about B1 level"));
-        assert!(!plain.contains("quietly aims"), "no aim, no brief");
 
         let aimed = ella_system_prompt(
             "Asha",
@@ -6118,11 +6107,11 @@ mod curriculum_prompt_tests {
                 }),
             },
         );
-        assert!(aimed.contains("Asha is on the step \"Talking about the past\""));
-        assert!(aimed.contains("quietly aims at one skill from it: I can use past simple"));
-        assert!(aimed.contains("Never name the skill, teach it or quiz them on it"));
-        // The rest of the scene is untouched, so the cached prefix stays one
-        // scene's for the whole session.
+        assert!(aimed.contains("practising English at about A1 level"));
+        // A 3B model told the skill asks about it instead of the topic.
+        for told in ["Talking about the past", "past simple", "I walked", "quietly aims"] {
+            assert!(!aimed.contains(told), "the prompt names {told:?}");
+        }
         assert!(aimed.contains("In this conversation you are also yourself, sitting with them over a cup of chai"));
     }
 

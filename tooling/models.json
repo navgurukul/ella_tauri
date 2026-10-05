@@ -35,10 +35,11 @@
       "variants": {
         "canary-180m-flash-q8_0": {
           "repo": "handy-computer/canary-180m-flash-gguf",
+          "revision": "456e6049062ecf06f1a0f4607f2ee3dc80ebbf8a",
           "file": "canary-180m-flash-Q8_0.gguf",
           "size_mb": 208,
           "sha256": "e13c7f5d0952b056a027cfffec13e3a3a134d1608babed24f983568f141e297c",
-          "note": "Primary stop-to-final STT model. Native transcribe.cpp batch inference; not a streaming model."
+          "note": "Primary stop-to-final STT model. Native transcribe.cpp batch inference; not a streaming model. Pinned to the revision whose file has this sha256: the repo re-uploaded every GGUF on 2026-10-03 (metadata only), and its main branch now serves a file that fails this checksum."
         }
       }
     },
