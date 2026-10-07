@@ -815,7 +815,11 @@ pub struct Chore {
     pub level: u8,
     pub min_age: u8,
     pub interests: Vec<String>,
-    /// Shown to the learner: where you are and who you are talking to.
+    /// Where the scene is and who is in it. The character's instructions
+    /// carry it as their setting, so it is written about both sides rather
+    /// than to the learner: a "you" in it reads to the model as itself. The
+    /// deposit chore's "You moved out last week and he still has your Rs 5000
+    /// deposit" had the landlord tell the tenant "You are holding my deposit".
     pub setting: String,
     /// Shown to the learner: what counts as walking away happy.
     pub learner_goal: String,
@@ -943,18 +947,20 @@ pub fn chores() -> Vec<Chore> {
             level: 1,
             min_age: 14,
             interests: vec!["work".into()],
-            setting: "Grumble's doorway. You moved out last week and he still has \
-                      your Rs 5000 deposit. He has offered you Rs 500 back."
+            setting: "Grumble's doorway. His tenant moved out last week, and he \
+                      still has the tenant's Rs 5000 deposit. He has offered Rs 500 of \
+                      it back."
                 .into(),
             learner_goal: "Get him to agree to return at least Rs 3500 of the deposit."
                 .into(),
-            character_brief: "You are holding Rs 5000 of this tenant's deposit and you \
-                              would rather keep as much of it as you can. You claim there \
-                              is cleaning and repainting to pay for. Always name a rupee \
-                              figure you are willing to return, starting low, and always \
-                              give the reason you are keeping the rest. You will go no \
-                              higher than Rs 4200. Raise your figure only when the tenant \
-                              makes a specific, reasonable point."
+            character_brief: "The tenant paid you a deposit of Rs 5000, all of it still \
+                              with you, and you would rather give back as little of it as \
+                              you can. You claim there is cleaning and repainting to pay \
+                              for. Always name the rupee figure you will give back, \
+                              starting low, and say that the rest goes on the cleaning \
+                              and repainting. You will give back no more than Rs 4200. \
+                              Raise your figure only when the tenant makes a specific, \
+                              reasonable point."
                 .into(),
             win: WinCondition::Ledger(LedgerSpec {
                 unit: "Rs".into(),
@@ -977,7 +983,9 @@ pub fn chores() -> Vec<Chore> {
             level: 2,
             min_age: 14,
             interests: vec!["work".into(), "school".into()],
-            setting: "A practice interview. You have thirty seconds and one pen.".into(),
+            setting: "A practice interview. The candidate has thirty seconds and one \
+                      pen to sell."
+                .into(),
             learner_goal: "Sell the pen: find out what they need, say why this pen \
                            helps, answer their objection, and ask for the sale."
                 .into(),

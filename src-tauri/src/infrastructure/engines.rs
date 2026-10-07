@@ -1554,8 +1554,10 @@ fn ledger_state_message(spec: &LedgerSpec, current: i32) -> String {
             "The figure on the table right now is {} {current}.",
             spec.unit
         ),
+        // "Offered" alone left the landlord saying "I am keeping Rs 500 of
+        // your deposit" about the Rs 500 he was offering to give back.
         Direction::Up => format!(
-            "The figure you have offered so far is {} {current}.",
+            "So far you have offered to give back {} {current}.",
             spec.unit
         ),
     }
@@ -1574,7 +1576,7 @@ const LEDGER_REPLY_SHAPE: &str = "Begin your reply by answering what they just s
 /// All of it goes in one trailing system message rather than the leading
 /// prompt, because llama.cpp's prompt cache is a prefix match and a figure in
 /// the prefix re-evaluates the whole conversation every turn.
-fn chore_turn_message(context: &ChoreContext, turn: u32) -> Option<String> {
+fn chore_turn_message(context: &ChoreContext, turn: u32, answer: &str) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(ledger) = &context.ledger {
         parts.push(ledger_state_message(&ledger.spec, ledger.current));
@@ -1584,6 +1586,16 @@ fn chore_turn_message(context: &ChoreContext, turn: u32) -> Option<String> {
                  a new one; finish the conversation politely."
                     .into(),
             );
+        } else if takes_the_offer(answer, ledger.current) {
+            // Ahead of the push below, which told the landlord on the Windows
+            // test laptop to "give some ground this turn" just as the tenant
+            // said yes to Rs 500, and he answered "Understood. I will return
+            // Rs 1000 now. I had a bit more time to think."
+            parts.push(format!(
+                "They have just said yes to your figure of {} {}. Agree to it in one \
+                 short sentence, name no other figure, and write [DEAL] at the very end.",
+                ledger.spec.unit, ledger.current
+            ));
         } else if turn >= 2 && ledger.current == ledger.spec.opening {
             // Three "hold your ground" sentences reach the model (the brief,
             // the rules fragment, and the haggling line) and only one says
@@ -2072,10 +2084,10 @@ pub(crate) fn trailing_question(reply: &str) -> Option<&str> {
     Some(reply[start..=end].trim())
 }
 
-/// Content words of a question, deduplicated, for comparing two questions by
+/// Content words of a sentence, deduplicated, for comparing two sentences by
 /// what they are about rather than by their wording.
-fn question_words(question: &str) -> BTreeSet<String> {
-    question
+fn content_words(sentence: &str) -> BTreeSet<String> {
+    sentence
         .to_lowercase()
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| !word.is_empty() && !QUESTION_FILLER.contains(word))
@@ -2129,13 +2141,13 @@ fn asked_questions(messages: &[Message]) -> Vec<String> {
 /// not strings, because the repeat comes back reworded — "How long will the
 /// trip take?" then "How long will the trip to the airport take?"
 fn asked_before<'a>(question: &str, earlier: &'a [String]) -> Option<&'a String> {
-    let asking = question_words(question);
+    let asking = content_words(question);
     // One content word is too little to call: "Really?" is not a repeat.
     if asking.len() < 2 {
         return None;
     }
     earlier.iter().find(|previous| {
-        let before = question_words(previous);
+        let before = content_words(previous);
         if before.len() < 2 {
             return false;
         }
@@ -2182,6 +2194,103 @@ fn without_repeated_questions(reply: &str, earlier: &[String]) -> Option<String>
         .filter(|sentence| !(sentence.ends_with('?') && asked_before(sentence, earlier).is_some()))
         .collect();
     (kept.len() < all.len()).then(|| kept.join(" "))
+}
+
+/// Every sentence a talk partner has said so far.
+fn said_sentences(messages: &[Message]) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|message| message.speaker == Speaker::Ella)
+        .flat_map(|message| sentences(&message.content))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether this statement was said already, in the same words or others:
+/// everything in it was in one sentence said before, or three quarters of
+/// the two are the same words. Only that way round, because a sentence that
+/// adds to an old one says something new.
+fn stated_before(sentence: &str, stated: &[String]) -> bool {
+    let saying = content_words(sentence);
+    // As with questions, one content word is too little to call.
+    if saying.len() < 2 {
+        return false;
+    }
+    stated.iter().any(|previous| {
+        let before = content_words(previous);
+        let shared = saying.intersection(&before).count();
+        let union = saying.len() + before.len() - shared;
+        shared == saying.len() || (union > 0 && shared * 4 >= union * 3)
+    })
+}
+
+/// A talk partner's reply without the sentences in it they have already
+/// said, bar `keep`; questions are held to earlier questions the way Ella's
+/// are. `None` when nothing repeats, and an empty string when everything
+/// does.
+///
+/// The landlord on the Windows test laptop said "I will only return what I
+/// owe" in seven of his twelve replies and "I can only offer Rs 500 now" in
+/// four, and the prompt's "do not reuse a sentence you have already said"
+/// did nothing about it.
+fn without_said_sentences(reply: &str, said: &[String], keep: Option<&str>) -> Option<String> {
+    let (asked, stated): (Vec<String>, Vec<String>) =
+        said.iter().cloned().partition(|sentence| sentence.ends_with('?'));
+    let all = sentences(reply);
+    let kept: Vec<&str> = all
+        .iter()
+        .copied()
+        .filter(|sentence| {
+            if keep == Some(*sentence) {
+                true
+            } else if sentence.ends_with('?') {
+                asked_before(sentence, &asked).is_none()
+            } else {
+                !stated_before(sentence, &stated)
+            }
+        })
+        .collect();
+    (kept.len() < all.len()).then(|| kept.join(" "))
+}
+
+/// Whether a reply has anything to say for itself: a sentence of more than
+/// one content word, which "I see." and "That is a lot." are not.
+fn says_something(reply: &str) -> bool {
+    sentences(reply).iter().any(|sentence| content_words(sentence).len() >= 2)
+}
+
+/// A ledger character's reply with what it has already said taken out.
+///
+/// The figure on the table stays, said again or not, when no other sentence
+/// in the reply names a figure: the talk screen does not show the figure, so
+/// the character saying it is how the learner hears where things stand, and
+/// "Would you consider this?" after it would otherwise point at nothing.
+/// What is left, if it has nothing to say for itself ("I see."), is followed
+/// by the figure as it stands, in a sentence not said before.
+fn partner_reply(reply: String, said: &[String], spec: &LedgerSpec, current: i32) -> String {
+    let all = sentences(&reply);
+    let naming: Vec<&str> = all
+        .iter()
+        .copied()
+        .filter(|sentence| extract_figure(sentence, spec).is_some())
+        .collect();
+    let anchor = match naming.as_slice() {
+        [only] if extract_figure(only, spec) == Some(current) => Some(*only),
+        _ => None,
+    };
+    let Some(kept) = without_said_sentences(&reply, said, anchor) else {
+        return reply;
+    };
+    eprintln!("[LATENCY]     llm> dropped sentences already said in this talk");
+    if says_something(&kept) {
+        return kept;
+    }
+    let holding = holding_line(spec, current, said);
+    if kept.is_empty() {
+        holding
+    } else {
+        format!("{kept} {holding}")
+    }
 }
 
 /// Case-insensitive search for an ASCII needle, returning a byte offset into
@@ -2392,6 +2501,11 @@ fn spelled_figure(text: &str, spec: &LedgerSpec) -> Option<i32> {
     if !mentions_alias(&lower, &spec.unit_aliases) {
         return None;
     }
+    spelled_number(&lower)
+}
+
+/// The last number written out in words in `lower`, unit or no unit.
+fn spelled_number(lower: &str) -> Option<i32> {
     let mut runs: Vec<i64> = Vec::new();
     let mut total = 0i64;
     let mut part = 0i64;
@@ -2434,6 +2548,89 @@ fn spelled_figure(text: &str, spec: &LedgerSpec) -> Option<i32> {
     // The last figure wins, the same way it does among digits: a learner who
     // recites the old price before naming theirs names theirs last.
     runs.into_iter().last().and_then(|value| i32::try_from(value).ok())
+}
+
+/// The figure a learner's answer names, in digits or in words, with or
+/// without a unit: speech recognition wrote "return the RuPaid is five
+/// hundred to me". Below 50 is not a figure — "give me one minute" — since
+/// these chores haggle in hundreds.
+fn answer_figure(answer: &str) -> Option<i32> {
+    let lower = answer.to_lowercase();
+    lower
+        .split(|c: char| !(c.is_ascii_digit() || c == ','))
+        .filter_map(|run| run.replace(',', "").parse::<i32>().ok())
+        .last()
+        .or_else(|| spelled_number(&lower))
+        .filter(|value| *value >= 50)
+}
+
+/// Taking an offer, said in so many words.
+const SETTLING: &[&str] = &[
+    "deal", "agreed", "i agree", "i accept", "accepted", "so be it", "that works",
+    "works for me", "sounds good", "fair enough", "i will take it", "i'll take it",
+    "fine by me", "that is fine", "that's fine", "that is all right", "that's all right",
+    "that is okay", "that's okay", "that is ok",
+];
+
+/// A nod, which takes the offer only alongside a hand-over or the figure
+/// itself: "Okay." on its own may only mean "I heard you".
+const NODS: &[&str] = &["okay", "ok", "yes", "yeah", "sure", "fine", "alright", "all right"];
+
+/// Asking for the money or the goods to change hands.
+const HAND_OVER: &[&str] = &["return", "give", "pay", "hand", "send", "transfer"];
+
+/// Pushing back, which no "okay" in front of it turns into a yes.
+const PUSHING_BACK: &[&str] = &[
+    "no", "not", "don't", "dont", "can't", "cant", "cannot", "won't", "wont", "never", "but",
+    "however", "more", "at least", "require", "need", "want", "whole", "full", "entire", "too",
+];
+
+/// Whether the learner just took the figure on the table.
+///
+/// The landlord on the Windows test laptop was told "Okay, so be it, return
+/// the RuPaid is five hundred to me", and "Okay, return one thousand" after
+/// that, and the model wrote [DEAL] for neither. Read here instead of asking
+/// the model: a yes with no figure, or with this figure, and nothing pushing
+/// back. A question is not a yes, and neither is a figure of their own.
+fn takes_the_offer(answer: &str, current: i32) -> bool {
+    if answer.contains('?') {
+        return false;
+    }
+    let words = answer
+        .to_lowercase()
+        .split(|c: char| !(c.is_alphanumeric() || c == '\''))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let words = format!(" {words} ");
+    let says = |phrases: &[&str]| phrases.iter().any(|phrase| words.contains(&format!(" {phrase} ")));
+    if says(PUSHING_BACK) {
+        return false;
+    }
+    let figure = answer_figure(answer);
+    if figure.is_some_and(|value| value != current) {
+        return false;
+    }
+    let names_it = figure == Some(current);
+    says(SETTLING) || (says(NODS) && (says(HAND_OVER) || names_it)) || (says(HAND_OVER) && names_it)
+}
+
+/// What a character says when the model would not keep to the ledger: the
+/// line authored with the chore the first time, and the figure as it stands
+/// after that, so the same sentence is not said twice. The deposit bench run
+/// answered "How do you owe five hundred?" and "Okay, so be it" both with
+/// "That is too much. I have costs of my own to cover.", after opening on it.
+fn holding_line(spec: &LedgerSpec, current: i32, said: &[String]) -> String {
+    let lines = [
+        spec.refusal.clone(),
+        format!("I am staying at {} {current}.", spec.unit),
+        format!("My answer is still {} {current}.", spec.unit),
+    ];
+    let unsaid = lines.iter().find(|line| {
+        let saying = sentences(line);
+        !saying.iter().all(|sentence| said.iter().any(|earlier| same_words(earlier, sentence)))
+    });
+    unsaid.unwrap_or(&lines[0]).clone()
 }
 
 enum NumberWord {
@@ -3573,7 +3770,7 @@ impl TutorEngine for LocalEngine {
         // stays byte-identical from the first turn to the last.
         let turn_note = match (&request.placement, &request.chore) {
             (Some(brief), _) => brief.closing.then(|| PLACEMENT_CLOSING_NOTE.to_owned()),
-            (None, Some(context)) => chore_turn_message(context, request.turn),
+            (None, Some(context)) => chore_turn_message(context, request.turn, &request.learner_text),
             (None, None) => free_closing_note(request.turn),
         };
         if let Some(note) = turn_note {
@@ -3673,6 +3870,36 @@ impl TutorEngine for LocalEngine {
             });
         };
 
+        let said = said_sentences(&request.messages);
+        // A yes to the figure on the table is the deal, whether or not the
+        // model wrote [DEAL]; on the Windows test laptop it wrote it for
+        // neither of the tenant's. A new figure in answer to a yes is the
+        // character bargaining against itself, so the line authored for
+        // agreeing is said instead.
+        if !ledger.agreed && takes_the_offer(&request.learner_text, ledger.current) {
+            let named = extract_figure(&text, &ledger.spec);
+            // Agreeing is the one time saying the figure again is the point,
+            // so nothing is dropped from it as said before.
+            let agreeing = if text.is_empty() || named.is_some_and(|value| value != ledger.current) {
+                ledger.spec.acceptance.clone()
+            } else {
+                text
+            };
+            eprintln!(
+                "[LATENCY]     llm> they took {} {} - that is the deal",
+                ledger.spec.unit, ledger.current
+            );
+            return Ok(GeneratedReply {
+                pending: PendingSpeech::matching(pipeline, &agreeing),
+                text: agreeing,
+                named_figure: None,
+                signal: Some(TurnSignal::Deal),
+                regenerated: false,
+                ttft_ms: first.ttft_ms,
+                completion_ms: first.completion_ms,
+            });
+        }
+
         let figure = settled_figure(
             &text,
             &request.learner_text,
@@ -3682,7 +3909,9 @@ impl TutorEngine for LocalEngine {
         );
         let legal = figure.map_or(true, |value| ledger.spec.accepts(ledger.current, value));
         if legal {
-            let final_text = voiced(text, signal, &ledger.spec);
+            // What it has already said goes; the audio made ahead then no
+            // longer matches and is made again.
+            let final_text = partner_reply(voiced(text, signal, &ledger.spec), &said, &ledger.spec, ledger.current);
             // The figure held, so the audio synthesized ahead is the audio for
             // the reply being returned — unless `voiced` substituted the
             // authored line for a wordless turn, which `matching` catches.
@@ -3731,8 +3960,14 @@ impl TutorEngine for LocalEngine {
         );
         let retry_legal = retry_figure.map_or(true, |value| ledger.spec.accepts(ledger.current, value));
         if retry_legal {
+            let retry_text = partner_reply(
+                voiced(retry_text, retry_signal, &ledger.spec),
+                &said,
+                &ledger.spec,
+                ledger.current,
+            );
             return Ok(GeneratedReply {
-                text: voiced(retry_text, retry_signal, &ledger.spec),
+                text: retry_text,
                 named_figure: retry_figure,
                 signal: retry_signal,
                 regenerated: true,
@@ -3744,10 +3979,11 @@ impl TutorEngine for LocalEngine {
 
         // Broke it twice. Use the line authored with the chore, which is what
         // guarantees a chore stays unwinnable by cheese even when the model
-        // digs in. The figure does not move.
+        // digs in — or, once that has been said, the figure as it stands. The
+        // figure does not move.
         eprintln!("[LATENCY]     llm> ledger break twice - falling back to the authored refusal");
         Ok(GeneratedReply {
-            text: ledger.spec.refusal.clone(),
+            text: holding_line(&ledger.spec, ledger.current, &said),
             named_figure: None,
             signal: None,
             regenerated: true,
@@ -5041,11 +5277,11 @@ mod ledger_tests {
     fn a_chore_that_has_conceded_far_enough_is_told_to_close() {
         // The deposit bench run walked the figure all the way to its ceiling
         // and still never signed off, so the chore could not be won.
-        let at_target = chore_turn_message(&chore_context("deposit-refund", 3500, false), 4).unwrap();
+        let at_target = chore_turn_message(&chore_context("deposit-refund", 3500, false), 4, "").unwrap();
         assert!(at_target.contains("3500"), "the live figure belongs in the turn message");
         assert!(at_target.contains("[DEAL]"), "at the target, closing is the honest move");
 
-        let mid = chore_turn_message(&chore_context("deposit-refund", 1500, false), 4).unwrap();
+        let mid = chore_turn_message(&chore_context("deposit-refund", 1500, false), 4, "").unwrap();
         assert!(mid.contains("1500"));
         assert!(!mid.contains("[DEAL]"), "there is still ground to give at Rs 1500");
     }
@@ -5334,6 +5570,127 @@ mod ledger_tests {
     }
 
     #[test]
+    fn a_yes_to_the_figure_on_the_table_is_read_from_the_learner_not_the_model() {
+        // The tenant's lines on the Windows test laptop, with the figure that
+        // was on the table when each was said.
+        assert!(takes_the_offer("Okay, so be it, return the RuPaid is five hundred to me.", 500));
+        assert!(takes_the_offer("Okay, return one thousand.", 1000));
+        assert!(takes_the_offer("Okay, give it back.", 1000));
+        assert!(takes_the_offer("Yes, that is all right. Return one thousand.", 1000));
+        assert!(takes_the_offer("Fine, I'll take it.", 1000));
+        assert!(takes_the_offer("Yes, three thousand five hundred is fine. Thank you, sir.", 3500));
+        for (answer, current, why) in [
+            ("I just wanted the refund.", 500, "a demand is not a yes"),
+            ("No, I would require at least three thousand five hundred.", 500, "a counter-offer"),
+            ("How do you owe five hundred?", 500, "a question"),
+            ("Thank you.", 1000, "thanks alone takes nothing"),
+            ("Okay.", 1000, "a nod alone may only mean they heard"),
+            ("Okay, return one thousand.", 500, "a figure of their own"),
+            ("Okay, but give me more.", 1000, "pushing back"),
+            ("Give my deposit back.", 1000, "a hand-over with no yes"),
+            ("I would like the full five thousand.", 1000, "the whole of it"),
+            ("Okay, give it back in one minute.", 1000, "a small number is not a figure, so this still counts"),
+        ] {
+            let expected = why.ends_with("still counts");
+            assert_eq!(takes_the_offer(answer, current), expected, "{answer:?}: {why}");
+        }
+    }
+
+    #[test]
+    fn a_yes_stops_the_push_to_give_ground_and_asks_for_the_deal() {
+        let context = chore_context("deposit-refund", 500, false);
+        let pushed = chore_turn_message(&context, 5, "How do you owe five hundred?").unwrap();
+        assert!(pushed.contains("Give some ground"), "{pushed}");
+        let agreed = chore_turn_message(&context, 5, "Okay, so be it, return the RuPaid is five hundred to me.").unwrap();
+        assert!(!agreed.contains("Give some ground"), "{agreed}");
+        assert!(agreed.contains("just said yes to your figure of Rs 500"), "{agreed}");
+        assert!(agreed.contains("[DEAL]"), "{agreed}");
+    }
+
+    #[test]
+    fn a_talk_partner_sentence_said_before_is_dropped() {
+        let said: Vec<String> = [
+            "Oh, it is you.",
+            "I am rather busy this morning.",
+            "What did you want to talk about?",
+            "I will only return what I owe.",
+            "I have had to spend some on cleaning and painting.",
+            "I can only offer Rs 500 now",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        assert_eq!(
+            without_said_sentences("That is a lot. I will only return what I owe. I can only offer Rs 500 now.", &said, None)
+                .as_deref(),
+            Some("That is a lot.")
+        );
+        assert_eq!(
+            without_said_sentences("I am rather busy, but I will only return what I owe. I can only offer Rs 500 now.", &said, None)
+                .as_deref(),
+            Some("I am rather busy, but I will only return what I owe."),
+            "a sentence that adds to an old one says something new"
+        );
+        assert_eq!(
+            without_said_sentences("Understood. I will return Rs 1000 now.", &said, None),
+            None,
+            "a new figure is a new sentence"
+        );
+    }
+
+    #[test]
+    fn the_figure_on_the_table_stays_and_a_reply_left_with_nothing_gets_it_back() {
+        let spec = refund_spec();
+        let said: Vec<String> = [
+            "I will only return what I owe.",
+            "I have offered Rs 500 so far.",
+            "I can only offer Rs 500 now",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        assert_eq!(
+            partner_reply("That is a lot. I will only return what I owe. I can only offer Rs 500 now.".into(), &said, &spec, 500),
+            "That is a lot. I can only offer Rs 500 now.",
+            "the only figure in the reply is how the learner hears the offer"
+        );
+        assert_eq!(
+            partner_reply("I understand. I have offered Rs 500 so far. Would you consider this?".into(), &said, &spec, 500),
+            "I understand. I have offered Rs 500 so far. Would you consider this?",
+            "and keeping it keeps \"this\" pointing at something"
+        );
+        assert_eq!(
+            partner_reply("I see. I will only return what I owe.".into(), &said, &spec, 500),
+            "I see. That is too much. I have costs of my own to cover.",
+            "\"I see.\" alone says nothing"
+        );
+        assert_eq!(
+            partner_reply("I can give you Rs 1000. I will only return what I owe.".into(), &said, &spec, 500),
+            "I can give you Rs 1000.",
+            "a new figure is never a repeat"
+        );
+    }
+
+    #[test]
+    fn the_authored_refusal_is_said_once_and_the_figure_after_that() {
+        let spec = refund_spec();
+        assert_eq!(holding_line(&spec, 2000, &[]), spec.refusal);
+        let said: Vec<String> = sentences(&spec.refusal).into_iter().map(str::to_owned).collect();
+        assert_eq!(holding_line(&spec, 2000, &said), "I am staying at Rs 2000.");
+        let said = [said, vec!["I am staying at Rs 2000.".to_owned()]].concat();
+        assert_eq!(holding_line(&spec, 2000, &said), "My answer is still Rs 2000.");
+    }
+
+    #[test]
+    fn no_chore_sets_its_scene_by_talking_to_the_learner() {
+        for chore in crate::domain::chores() {
+            let lower = chore.setting.to_lowercase();
+            let speaks_to = lower
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|word| matches!(word, "you" | "your" | "yours"));
+            assert!(!speaks_to, "{}: the character reads \"you\" as itself: {}", chore.id, chore.setting);
+        }
+    }
+
+    #[test]
     fn a_question_asked_again_is_dropped_wherever_it_falls() {
         let asked = vec!["Where did you find it?".to_owned()];
         // The street-food rewrite on the Windows laptop, after the learner had
@@ -5374,7 +5731,7 @@ mod ledger_tests {
             [(600, false, 1), (525, false, 4), (400, true, 6), (525, false, 12)]
         {
             let message =
-                chore_turn_message(&chore_context("market-cloth-price", current, agreed), turn)
+                chore_turn_message(&chore_context("market-cloth-price", current, agreed), turn, "")
                     .unwrap();
             assert!(
                 message.ends_with("inside a sentence."),
@@ -5392,7 +5749,7 @@ mod ledger_tests {
     #[test]
     fn a_rubric_chore_gets_no_reply_shape_because_it_has_no_figure() {
         let context = chore_context("sell-me-a-pen", 0, false);
-        let last = chore_turn_message(&context, context.max_turns).unwrap();
+        let last = chore_turn_message(&context, context.max_turns, "").unwrap();
         assert!(
             !last.contains("Any figure comes after"),
             "there is no ledger here, so nothing to place a figure against"
@@ -5401,7 +5758,7 @@ mod ledger_tests {
 
     #[test]
     fn an_agreed_chore_is_told_not_to_reopen_the_figure() {
-        let note = chore_turn_message(&chore_context("market-cloth-price", 400, true), 6).unwrap();
+        let note = chore_turn_message(&chore_context("market-cloth-price", 400, true), 6, "").unwrap();
         assert!(note.contains("already agreed"));
         assert!(!note.contains("[DEAL]"), "the deal is done; nothing left to close");
     }
@@ -5409,9 +5766,9 @@ mod ledger_tests {
     #[test]
     fn the_last_turn_of_a_chore_asks_for_a_decision() {
         let context = chore_context("market-cloth-price", 525, false);
-        let last = chore_turn_message(&context, context.max_turns).unwrap();
+        let last = chore_turn_message(&context, context.max_turns, "").unwrap();
         assert!(last.contains("[DEAL]") && last.contains("[WALK]"));
-        let early = chore_turn_message(&context, 1).unwrap();
+        let early = chore_turn_message(&context, 1, "").unwrap();
         assert!(
             !early.contains("[WALK]"),
             "turn 1 of a twelve-turn chore is not the time to walk away"
@@ -5423,8 +5780,8 @@ mod ledger_tests {
         // No figure to report, so the only turn message is the closing one.
         let context = chore_context("sell-me-a-pen", 0, false);
         assert!(context.ledger.is_none());
-        assert!(chore_turn_message(&context, 1).is_none());
-        assert!(chore_turn_message(&context, context.max_turns).is_some());
+        assert!(chore_turn_message(&context, 1, "").is_none());
+        assert!(chore_turn_message(&context, context.max_turns, "").is_some());
     }
 
     #[test]
@@ -6847,6 +7204,97 @@ mod errand_tests {
             pitch: Pitch::at("B2"),
             placement: None,
         }
+    }
+
+    /// The deposit talk on the Windows test laptop, with the landlord's figure
+    /// at `current` and his lines so far.
+    fn deposit_turn(current: i32, said: &[&str], answer: &str) -> TutorRequest {
+        let chore = find_chore("deposit-refund").unwrap();
+        let mut messages = vec![said_line(
+            "Oh, it is you. I am rather busy this morning. What did you want to talk about?",
+            0,
+        )];
+        for (index, line) in said.iter().enumerate() {
+            messages.push(said_line(line, index as u32 + 1));
+        }
+        TutorRequest {
+            learner_name: "Souvik".into(),
+            topic_id: chore.id.clone(),
+            topic_label: chore.title.clone(),
+            messages,
+            learner_text: answer.into(),
+            turn: said.len() as u32 + 1,
+            chore: Some(ChoreContext {
+                chore_id: chore.id.clone(),
+                level: "B2".into(),
+                character: find_character(&chore.character_id).unwrap(),
+                setting: chore.setting.clone(),
+                learner_goal: chore.learner_goal.clone(),
+                character_brief: chore.character_brief.clone(),
+                max_turns: chore.max_turns,
+                ledger: match &chore.win {
+                    WinCondition::Ledger(spec) => Some(LedgerTurn { spec: spec.clone(), current, agreed: false }),
+                    WinCondition::Rubric { .. } => None,
+                },
+            }),
+            pitch: Pitch::at("B2"),
+            placement: None,
+        }
+    }
+
+    fn said_line(content: &str, turn: u32) -> Message {
+        said(Speaker::Ella, content, turn)
+    }
+
+    #[test]
+    fn a_yes_to_the_landlords_figure_is_the_deal_even_when_he_names_another() {
+        let fake = FakeLlama::scripted(
+            pace(5, 5, 4),
+            &["Understood. I will return Rs 1000 now. I had a bit more time to think."],
+        );
+        let engine = fake.engine(Duration::from_secs(60));
+        let reply = engine
+            .reply(&deposit_turn(
+                500,
+                &["That is a lot. I will only return what I owe. I can only offer Rs 500 now."],
+                "Okay, so be it, return the RuPaid is five hundred to me.",
+            ))
+            .unwrap();
+        assert_eq!(reply.signal, Some(TurnSignal::Deal));
+        assert_eq!(reply.named_figure, None, "the figure stays at the Rs 500 they said yes to");
+        assert_eq!(reply.text, "Fine. I will return that much to you this week.");
+    }
+
+    #[test]
+    fn a_yes_he_agrees_to_in_words_is_the_deal_without_the_token() {
+        let fake = FakeLlama::scripted(pace(5, 5, 4), &["Understood. I will return Rs 1000 now."]);
+        let engine = fake.engine(Duration::from_secs(60));
+        let reply = engine
+            .reply(&deposit_turn(1000, &["Understood. I will return Rs 1000 now. I had a bit more time to think."], "Okay, return one thousand."))
+            .unwrap();
+        assert_eq!(reply.signal, Some(TurnSignal::Deal));
+        assert_eq!(
+            reply.text, "Understood. I will return Rs 1000 now.",
+            "agreeing may say the figure again"
+        );
+    }
+
+    #[test]
+    fn what_the_landlord_already_said_is_dropped_from_his_reply_bar_his_figure() {
+        let fake = FakeLlama::scripted(
+            pace(5, 5, 4),
+            &["That is a lot. I will only return what I owe. I can only offer Rs 500 now."],
+        );
+        let engine = fake.engine(Duration::from_secs(60));
+        let reply = engine
+            .reply(&deposit_turn(
+                500,
+                &["I will only return what I owe. I have had to spend some on cleaning and painting. I can only offer Rs 500 now."],
+                "No, I would require at least three thousand five hundred.",
+            ))
+            .unwrap();
+        assert_eq!(reply.text, "That is a lot. I can only offer Rs 500 now.");
+        assert_eq!(reply.signal, None);
     }
 
     #[test]
