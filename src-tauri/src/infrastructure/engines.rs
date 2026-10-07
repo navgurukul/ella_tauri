@@ -37,7 +37,8 @@ use crate::{
             CANARY_FILE_NAME,
         },
     },
-    telemetry::{record_judge, JudgeTiming},
+    machine,
+    telemetry::{self, record_judge, EngineDetails, JudgeTiming, LlmRun, WarmUpReport},
 };
 
 #[derive(Debug)]
@@ -266,6 +267,8 @@ impl PiperDaemon {
                 program.display()
             ))
         })?;
+        // Its CPU time is Ella's, not something else's slowing her down.
+        machine::watch(child.id());
         let stdin = child
             .stdin
             .take()
@@ -1134,6 +1137,7 @@ impl PendingSpeech {
         eprintln!(
             "[LATENCY]     tts> audio synthesized ahead dropped: the reply changed after it was written"
         );
+        telemetry::note("audio_ahead_dropped");
         None
     }
 
@@ -2326,6 +2330,7 @@ fn partner_reply(reply: String, said: &[String], spec: &LedgerSpec, current: i32
         return reply;
     };
     eprintln!("[LATENCY]     llm> dropped sentences already said in this talk");
+    telemetry::note("said_before_dropped");
     if says_something(&kept) {
         return kept;
     }
@@ -3218,13 +3223,14 @@ impl SlotStore {
     /// before a talk's warm-up evaluates the rest of its prompt: the longest
     /// one already saved is restored, and each longer one is evaluated from
     /// there and saved for next time.
-    fn prime(&self, client: &Client, root: &str, slot: i32, prefixes: &[(&str, String)]) {
+    fn prime(&self, client: &Client, root: &str, slot: i32, prefixes: &[(&str, String)]) -> Primed {
+        let mut primed = Primed::default();
         if prefixes.is_empty() || self.refused.load(Ordering::Relaxed) {
-            return;
+            return primed;
         }
         let Some(identity) = self.identity(client, root) else {
             eprintln!("[LATENCY]     llm> no saved slots: the server did not say which model it runs");
-            return;
+            return primed;
         };
         let names: Vec<String> = prefixes
             .iter()
@@ -3245,6 +3251,7 @@ impl SlotStore {
                         body["n_restored"],
                         started.elapsed().as_secs_f64() * 1_000.0
                     );
+                    primed.restored = body["n_restored"].as_u64();
                     touch(&path);
                     from = index + 1;
                     break;
@@ -3276,9 +3283,10 @@ impl SlotStore {
                 Ok(body) => body["timings"]["prompt_n"].clone(),
                 Err(error) => {
                     eprintln!("[LATENCY]     llm> could not evaluate the start of the prompt: {error}");
-                    return;
+                    return primed;
                 }
             };
+            primed.evaluated += evaluated.as_u64().unwrap_or(0);
             match slot_action(client, root, slot, "save", &names[index]) {
                 Ok(body) => eprintln!(
                     "[LATENCY]     llm> evaluated {evaluated} tokens and saved {} ({} tokens) in {:.0}ms",
@@ -3291,11 +3299,12 @@ impl SlotStore {
                         "[LATENCY]     llm> the server saves no slots, so every talk evaluates its whole prompt: {error}"
                     );
                     self.refused.store(true, Ordering::Relaxed);
-                    return;
+                    return primed;
                 }
             }
         }
         self.prune(&names);
+        primed
     }
 
     /// Keeps the files just used, and the most recently used of the others
@@ -3389,12 +3398,40 @@ impl SlotStore {
 struct WarmUps {
     running: Mutex<usize>,
     finished: Condvar,
+    /// How the last warm-up went, until a reply takes it to report.
+    report: Mutex<Option<WarmUpDone>>,
+}
+
+/// A finished warm-up, for the reply after it to report.
+struct WarmUpDone {
+    began: Instant,
+    ms: u64,
+    restored_tokens: Option<u64>,
+    evaluated_tokens: u64,
+    errand: Option<Errand>,
 }
 
 impl WarmUps {
     fn begin(self: &Arc<Self>) -> WarmUpRunning {
         *self.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
         WarmUpRunning(Arc::clone(self))
+    }
+
+    /// Kept for the next reply. Called before the warm-up's `WarmUpRunning`
+    /// is dropped, so a reply waiting on it finds it.
+    fn finished_with(&self, done: WarmUpDone) {
+        *self.report.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(done);
+    }
+
+    fn take_report(&self) -> Option<WarmUpReport> {
+        let done = self.report.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()?;
+        Some(WarmUpReport {
+            began_ms_before: (done.began.elapsed().as_secs_f64() * 1_000.0).round() as u64,
+            ms: done.ms,
+            restored_tokens: done.restored_tokens,
+            evaluated_tokens: done.evaluated_tokens,
+            errand: done.errand.map(Errand::name),
+        })
     }
 
     fn wait(&self) {
@@ -3417,6 +3454,41 @@ impl Drop for WarmUpRunning {
         *running = running.saturating_sub(1);
         self.0.finished.notify_all();
     }
+}
+
+/// llama-server's own account of a streamed request, from the `timings` on
+/// its closing chunk: its time evaluating the prompt, and the tokens it wrote
+/// and its time writing them.
+#[derive(Default)]
+struct ServerTimings {
+    prompt_ms: Option<u64>,
+    predicted_n: Option<u64>,
+    predicted_ms: Option<u64>,
+}
+
+impl ServerTimings {
+    /// Takes whatever `timings` holds. A later chunk's counts replace an
+    /// earlier one's.
+    fn read(&mut self, timings: &Value) {
+        let ms = |key: &str| timings[key].as_f64().map(|ms| ms.max(0.0).round() as u64);
+        if let Some(prompt_ms) = ms("prompt_ms") {
+            self.prompt_ms = Some(prompt_ms);
+        }
+        if let Some(predicted_ms) = ms("predicted_ms") {
+            self.predicted_ms = Some(predicted_ms);
+        }
+        if let Some(predicted) = timings["predicted_n"].as_u64() {
+            self.predicted_n = Some(predicted);
+        }
+    }
+}
+
+/// What `SlotStore::prime` did: the tokens it restored from a kept slot, and
+/// the tokens it evaluated.
+#[derive(Default)]
+struct Primed {
+    restored: Option<u64>,
+    evaluated: u64,
 }
 
 /// `POST /slots/{slot}?action=save|restore` for one file in the server's
@@ -3733,12 +3805,12 @@ impl LocalEngine {
         // An explicit URL means someone is running their own server — the
         // development scripts, the benchmarks — and Ella must not start a
         // second one against the same model.
+        let llama_threads = env_i32("ELLA_LLAMA_THREADS", default_llama_threads());
         let (llama, llm_base_url, llama_error) = match env::var("ELLA_LLM_BASE_URL") {
             Ok(configured) => (None, configured, None),
             Err(_) => match LlamaServer::start(&engine_root, &models_root, {
-                let threads = env_i32("ELLA_LLAMA_THREADS", default_llama_threads());
-                eprintln!("[engines] llama-server gets {threads} threads");
-                threads
+                eprintln!("[engines] llama-server gets {llama_threads} threads");
+                llama_threads
             }) {
                 Ok(server) => {
                     let url = server.base_url().to_string();
@@ -3762,7 +3834,31 @@ impl LocalEngine {
             .and_then(|server| server.slot_dir().map(Path::to_path_buf))
             .or_else(|| env::var_os("ELLA_LLM_SLOT_DIR").map(PathBuf::from));
 
-        Self {
+        let llm_server = match (&llama, &llama_error) {
+            (Some(_), _) => "started",
+            (None, Some(_)) => "failed",
+            (None, None) => "external",
+        };
+        let (primary_stt, fallback_stt) = stt.status();
+        let details = EngineDetails {
+            llm_server,
+            llama_threads: (llm_server == "started").then_some(llama_threads),
+            llama_build: None,
+            llm_ctx: None,
+            llm_model_mb: fs::metadata(models_root.join("llm").join("model.gguf"))
+                .ok()
+                .map(|model| model.len() >> 20),
+            stt: std::iter::once(primary_stt)
+                .chain(fallback_stt)
+                .map(|engine| format!("{}{}", engine.name, if engine.ready { "" } else { " (not ready)" }))
+                .collect::<Vec<_>>()
+                .join(" > "),
+            stt_threads: canary_threads,
+            piper: if piper_daemon.is_some() { "resident" } else { "one-shot" },
+            error: llama_error.clone(),
+        };
+
+        let engine = Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(120))
                 .build()
@@ -3778,7 +3874,29 @@ impl LocalEngine {
             slots: slot_dir.map(|dir| Arc::new(SlotStore::new(dir))),
             warm_ups: Arc::default(),
             queue: Arc::default(),
+        };
+        engine.report_ready(details);
+        engine
+    }
+
+    /// Writes the launch's `ella_engine` event, with what the server says it
+    /// is when there is one to ask.
+    fn report_ready(&self, mut details: EngineDetails) {
+        if details.llm_server != "failed" {
+            let root = self.llm_base_url.trim_end_matches('/').trim_end_matches("/v1");
+            let props = self
+                .client
+                .get(format!("{root}/props"))
+                .timeout(Duration::from_secs(2))
+                .send()
+                .and_then(|response| response.error_for_status())
+                .and_then(|response| response.json::<Value>());
+            if let Ok(props) = props {
+                details.llama_build = props["build_info"].as_str().map(str::to_owned);
+                details.llm_ctx = props["default_generation_settings"]["n_ctx"].as_u64();
+            }
         }
+        telemetry::engine_ready(&details);
     }
 
     fn probe(&self, base_url: &str) -> bool {
@@ -4081,6 +4199,9 @@ impl TutorEngine for LocalEngine {
             .as_ref()
             .filter(|daemon| daemon.usable())
             .map(|daemon| SpeechPipeline::start(Arc::clone(daemon), None, generation_started));
+        if pipeline.is_none() {
+            telemetry::note("no_audio_ahead");
+        }
 
         let first = self.stream_once(&system, &history, None, pipeline.as_mut())?;
         // Only the first generation feeds the speaker; a regenerated reply is
@@ -4102,6 +4223,7 @@ impl TutorEngine for LocalEngine {
             let asked = asked_questions(&request.messages);
             if let Some(already) = repeated_question(&text, &asked) {
                 eprintln!("[LATENCY]     llm> repeated question: {already:?} - regenerating once");
+                telemetry::note("repeated_question");
                 let corrective = format!(
                     "You have already asked them this earlier in the conversation: \"{already}\" \
                      They have answered it, or told you they cannot. Do not ask it again in any \
@@ -4120,6 +4242,7 @@ impl TutorEngine for LocalEngine {
                 let retry_text = match without_repeated_questions(&retry_text, &asked) {
                     Some(kept) => {
                         eprintln!("[LATENCY]     llm> the rewrite asked again too - dropped from it");
+                        telemetry::note("rewrite_repeat_dropped");
                         kept
                     }
                     None => retry_text,
@@ -4135,6 +4258,7 @@ impl TutorEngine for LocalEngine {
                         pending: None,
                     });
                 }
+                telemetry::note("rewrite_empty");
             }
             // A question asked again ahead of a new one is dropped without
             // writing the reply again: what is left still ends on something
@@ -4142,6 +4266,7 @@ impl TutorEngine for LocalEngine {
             // repeats; it is said as it is.
             if let Some(kept) = without_repeated_questions(&text, &asked).filter(|kept| !kept.is_empty()) {
                 eprintln!("[LATENCY]     llm> dropped a question asked earlier in the talk");
+                telemetry::note("repeat_dropped");
                 text = kept;
             }
             return Ok(GeneratedReply {
@@ -4174,6 +4299,7 @@ impl TutorEngine for LocalEngine {
                 "[LATENCY]     llm> they took {} {} - that is the deal",
                 ledger.spec.unit, ledger.current
             );
+            telemetry::note("took_offer");
             return Ok(GeneratedReply {
                 pending: PendingSpeech::matching(pipeline, &agreeing),
                 text: agreeing,
@@ -4222,6 +4348,7 @@ impl TutorEngine for LocalEngine {
             "[LATENCY]     llm> ledger break: named {} {broken}, current {} (limit {}, max step {}) - regenerating once",
             ledger.spec.unit, ledger.current, ledger.spec.limit, ledger.spec.max_step
         );
+        telemetry::note("ledger_break");
         let corrective = format!(
             "That reply broke your own position: you named {} {broken}. The figure must \
              stay on your side of {} {} and move by at most {} {} from {} {}. Write the \
@@ -4267,6 +4394,7 @@ impl TutorEngine for LocalEngine {
         // digs in — or, once that has been said, the figure as it stands. The
         // figure does not move.
         eprintln!("[LATENCY]     llm> ledger break twice - falling back to the authored refusal");
+        telemetry::note("ledger_break_twice");
         Ok(GeneratedReply {
             text: holding_line(&ledger.spec, ledger.current, &said),
             named_figure: None,
@@ -4394,14 +4522,18 @@ impl LocalEngine {
         // give way finds the talk open.
         let running = self.warm_ups.begin();
         let talking = self.queue.talking();
+        let warm_ups = Arc::clone(&self.warm_ups);
+        let errand = self.queue.running();
         thread::spawn(move || {
             let _running = running;
             let _talking = talking;
             let started = Instant::now();
+            let mut primed = Primed::default();
             if let Some(slots) = &slots {
                 slots.wait_for_saves();
-                slots.prime(&client, &root, slot, &prefixes);
+                primed = slots.prime(&client, &root, slot, &prefixes);
             }
+            let mut evaluated = 0;
             // This request, not the first turn, is the one that swaps the slot
             // from the previous session's prompt to this one's. Whatever it
             // reuses is what survived the switch, so its counts are the ones
@@ -4430,6 +4562,7 @@ impl LocalEngine {
                          (status {status}) fp={fingerprint} slot={slot}"
                     );
                     let body = response.json::<Value>().unwrap_or(Value::Null);
+                    evaluated = body["timings"]["prompt_n"].as_u64().unwrap_or(0);
                     match (
                         body["timings"]["prompt_n"].as_i64(),
                         body["usage"]["prompt_tokens"].as_i64(),
@@ -4451,6 +4584,13 @@ impl LocalEngine {
                     eprintln!("[LATENCY]     llm> session prompt-cache warmup failed: {error}")
                 }
             }
+            warm_ups.finished_with(WarmUpDone {
+                began: started,
+                ms: (started.elapsed().as_secs_f64() * 1_000.0).round() as u64,
+                restored_tokens: primed.restored,
+                evaluated_tokens: primed.evaluated + evaluated,
+                errand,
+            });
         });
     }
 
@@ -4780,6 +4920,12 @@ impl LocalEngine {
         if waited_ms >= 1.0 {
             eprintln!("[LATENCY]     llm> waited {waited_ms:.0}ms for the talk's warm-up");
         }
+        // The first reply after a talk's warm-up says how the warm-up went:
+        // most of a cold first turn's wait is there.
+        if let Some(warm_up) = self.warm_ups.take_report() {
+            telemetry::record_warm_up(warm_up);
+        }
+        let errand = self.queue.running();
         let response = self
             .client
             .post(format!(
@@ -4817,6 +4963,7 @@ impl LocalEngine {
         let mut chunk_count: u32 = 0;
         let mut prompt_evaluated: Option<i64> = None;
         let mut prompt_total: Option<i64> = None;
+        let mut server = ServerTimings::default();
         for line in BufReader::new(response).lines() {
             let line = line?;
             let Some(data) = line.strip_prefix("data:") else {
@@ -4838,6 +4985,7 @@ impl LocalEngine {
             if let Some(total) = chunk["usage"]["prompt_tokens"].as_i64() {
                 prompt_total = Some(total);
             }
+            server.read(&chunk["timings"]);
             if let Some(delta) = chunk["choices"][0]["delta"]["content"].as_str() {
                 if !delta.is_empty() {
                     chunk_count += 1;
@@ -4877,6 +5025,18 @@ impl LocalEngine {
                 "[LATENCY]     llm> prompt cache: this server reported no token counts on the stream"
             ),
         }
+        telemetry::record_llm_run(LlmRun {
+            why: if corrective.is_some() { "rewrite" } else { "reply" },
+            wait_ms: waited_ms.round() as u64,
+            errand: errand.map(Errand::name),
+            ttft_ms: ttft_ms.unwrap_or(completion_ms).round() as u64,
+            ms: completion_ms.round() as u64,
+            prompt_tokens: prompt_total.and_then(|total| u64::try_from(total).ok()),
+            prompt_evaluated: prompt_evaluated.and_then(|evaluated| u64::try_from(evaluated).ok()),
+            prompt_ms: server.prompt_ms,
+            gen_tokens: server.predicted_n,
+            gen_ms: server.predicted_ms,
+        });
         let text = text.trim().to_owned();
         if text.is_empty() {
             return Err(EllaError::Engine(
@@ -7525,7 +7685,11 @@ mod errand_tests {
         write!(
             stream,
             "data: {}\n\ndata: [DONE]\n\n",
-            json!({"choices": [{"delta": {}}], "timings": {"prompt_n": 7}, "usage": {"prompt_tokens": 100}})
+            json!({
+                "choices": [{"delta": {}}],
+                "timings": {"prompt_n": 7, "prompt_ms": 70.4, "predicted_n": 12, "predicted_ms": 240.6},
+                "usage": {"prompt_tokens": 100}
+            })
         )?;
         stream.flush()
     }
@@ -7762,6 +7926,68 @@ mod errand_tests {
         assert_eq!(reply.text, "Crispy corn sounds great! What made it so special?");
         assert!(!reply.regenerated);
         assert_eq!(talk_turns(&fake), 1);
+    }
+
+    /// The turn event written for `reply`, asked inside a turn's trace as the
+    /// app asks it.
+    fn traced(reply: impl FnOnce()) -> Value {
+        let trace = crate::telemetry::LatencyTrace::new("text");
+        reply();
+        trace.finish("ok", None);
+        crate::telemetry::written().pop().expect("the turn's event")
+    }
+
+    #[test]
+    fn a_reply_says_what_the_server_read_and_wrote_and_how_its_talk_was_warmed_up() {
+        let fake = FakeLlama::start(pace(5, 5, 4));
+        let engine = fake.engine(Duration::from_secs(60));
+        let topic = crate::domain::topics()[0].clone();
+        engine.opening(&topic, "Asha", &Pitch::at("A2")).unwrap();
+
+        let first = traced(|| {
+            engine.reply(&first_answer(&topic)).unwrap();
+        });
+        let run = &first["llm_runs"][0];
+        assert_eq!(run["why"], "reply");
+        assert_eq!((&run["prompt_tokens"], &run["prompt_evaluated"]), (&100.into(), &7.into()));
+        assert_eq!((&run["prompt_ms"], &run["gen_tokens"], &run["gen_ms"]), (&70.into(), &12.into(), &241.into()));
+        assert!(run.get("errand").is_none(), "nothing else had the model");
+        let warm_up = &first["warm_up"];
+        assert!(warm_up["evaluated_tokens"].as_u64().unwrap() > 0, "{warm_up}");
+        assert!(warm_up.get("restored_tokens").is_none(), "a first open has nothing kept to restore");
+        assert!(warm_up["began_ms_before"].as_u64().unwrap() >= warm_up["ms"].as_u64().unwrap());
+        assert_eq!(first["notes"], json!(["no_audio_ahead"]), "this stand-in has no resident Piper");
+
+        let second = traced(|| {
+            engine.reply(&first_answer(&topic)).unwrap();
+        });
+        assert!(second.get("warm_up").is_none(), "only the first reply after it reports the warm-up");
+    }
+
+    #[test]
+    fn a_rewrite_is_a_second_run_and_the_notes_say_why() {
+        let fake = FakeLlama::scripted(
+            pace(5, 5, 4),
+            &[
+                "Oh, yummy! Where did you find it?",
+                "Oh, yummy! I bet it was crispy and tasty. Where did you find it? What kind of food does this place serve?",
+            ],
+        );
+        let engine = fake.engine(Duration::from_secs(60));
+        let event = traced(|| {
+            engine.reply(&after_where("I had the crispy corn in Barbecue Nation.")).unwrap();
+        });
+        let whys: Vec<&str> = event["llm_runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|run| run["why"].as_str().unwrap())
+            .collect();
+        assert_eq!(whys, ["reply", "rewrite"]);
+        assert_eq!(
+            event["notes"],
+            json!(["no_audio_ahead", "repeated_question", "rewrite_repeat_dropped"])
+        );
     }
 
     #[test]

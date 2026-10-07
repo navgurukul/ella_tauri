@@ -97,6 +97,8 @@ impl SpeechToTextEngine for WindowsStt {
             mel_ms: None,
             encode_ms: None,
             decode_ms: None,
+            queued_ms: None,
+            attempts: 1,
         })
     }
 

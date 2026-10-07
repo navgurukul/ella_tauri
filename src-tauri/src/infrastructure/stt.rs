@@ -40,6 +40,11 @@ pub struct Transcription {
     pub mel_ms: Option<f64>,
     pub encode_ms: Option<f64>,
     pub decode_ms: Option<f64>,
+    /// Of `elapsed_ms`, how long it waited for the engine to finish another
+    /// piece first. `None` from an engine that takes every piece at once.
+    pub queued_ms: Option<f64>,
+    /// How many times the engine was run on the audio.
+    pub attempts: u32,
 }
 
 pub trait SpeechToTextEngine: Send + Sync {
@@ -244,6 +249,11 @@ impl SpeechToTextEngine for CanaryStt {
             .session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Canary takes one piece at a time, and the pieces of one answer are
+        // sent as the learner speaks, so a piece can wait here for the one
+        // before it.
+        let queued_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        let mut attempts = 1;
         let mut run = |audio: &[f32], pnc: Pnc| {
             let options = RunOptions {
                 language: Some("en".into()),
@@ -272,6 +282,7 @@ impl SpeechToTextEngine for CanaryStt {
         // gave its words only unpadded.
         if text.is_empty() {
             for (audio, padding) in [(&pcm, "padded"), (&unpadded, "unpadded")] {
+                attempts += 1;
                 let retry = run(audio, Pnc::Off)?;
                 let heard = retry.text.trim();
                 if !heard.is_empty() {
@@ -314,6 +325,8 @@ impl SpeechToTextEngine for CanaryStt {
             mel_ms: nonzero(result.timings.mel_ms),
             encode_ms: nonzero(result.timings.encode_ms),
             decode_ms: nonzero(result.timings.decode_ms),
+            queued_ms: Some(queued_ms),
+            attempts,
         })
     }
 }
@@ -415,6 +428,8 @@ impl SpeechToTextEngine for WhisperHttpStt {
             mel_ms: None,
             encode_ms: None,
             decode_ms: None,
+            queued_ms: None,
+            attempts: 1,
         })
     }
 }
@@ -601,6 +616,8 @@ mod tests {
                 mel_ms: None,
                 encode_ms: None,
                 decode_ms: None,
+                queued_ms: None,
+                attempts: 1,
             })
         }
     }

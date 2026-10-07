@@ -46,6 +46,17 @@ pub enum Errand {
 
 const KINDS: usize = 3;
 
+impl Errand {
+    /// How telemetry names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Errand::Assess => "assess",
+            Errand::Prepare => "prepare",
+            Errand::PrepareRecap => "prepare_recap",
+        }
+    }
+}
+
 /// Why an errand should stop and let something else have the model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GiveWay {
@@ -126,6 +137,12 @@ impl ModelQueue {
         state.talking += 1;
         state.talk = Some(Instant::now());
         Talking(Arc::clone(self))
+    }
+
+    /// The errand that has the model now, if one does. A talk's request sent
+    /// now waits at the server for the piece that errand is on.
+    pub fn running(&self) -> Option<Errand> {
+        self.lock().running
     }
 
     /// The talk the learner was in is over, so errands held back for it can go.

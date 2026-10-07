@@ -419,21 +419,59 @@ sentence handed to the window, or the total for a reply the window plays whole),
 total latency, and success/error status. The WebView also logs
 `ella_voice_playback_ready` after audio reaches the browser playback path.
 
+A turn's line with `schema_version` 2 also says enough to tell a slow computer
+from slow code:
+
+- the talk: `session_id`, `talk` (`free`, `chore` or `placement`), `topic`,
+  `level`, `turn` and `talk_over`, and the answer's and reply's length in words
+  (never the words themselves)
+- `stt_pieces`: each piece of the answer, sent while the learner spoke
+  (`background`) or after (`tail`), with its audio, the engine that heard it,
+  its time, how long it queued behind another piece for Canary, Canary's
+  attempts, and when it was done on the turn's clock (`done_ms`, below zero
+  while they were still speaking)
+- `llm_runs`: each generation (`reply`, or a `rewrite`), with the prompt tokens
+  and how many the server evaluated rather than took from its cache, its own
+  time for them, the tokens written and the time for those, how long the
+  request waited for the talk's warm-up, and any errand that had the model
+- `warm_up`, on the first reply after a talk opened: how long getting its
+  instructions into the slot took, what was restored from a kept slot and what
+  was evaluated
+- `notes`, what happened to the reply on the way (`flagged`,
+  `repeated_question`, `repeat_dropped`, `ledger_break`, `audio_ahead_dropped`
+  and the like), and `tts_path`: `overlapped`, `on_clock` or `failed`
+- `machine`, on Windows: on AC or battery, battery saver, the power mode, the
+  CPU's clock and the limit it is held to, how busy the CPU was and how much of
+  that was Ella (this process, llama-server, Piper), and the memory free
+- `failed_at`, for a turn that failed: the last stage it reached
+
 Every assessment worked out writes one line with `event: "ella_assessment"`:
 how long after the talk closed it was asked for (`since_close_ms`), when what
 the talk counted was kept and on its way to the recap (`scored_ms`), when all
 of it was (`total_ms`), and for each judge (`score`, `correct`, `place`) how
 long it waited for the model and then had it, how often it gave way to a talk,
 the tokens of its instructions restored and the prompt tokens it read, the
-tokens it wrote, and whether its answer was stopped early.
+tokens it wrote, and whether its answer was stopped early, and the `machine`
+as for a turn.
+
+Every line names the build that wrote it (`app_version`) and the launch
+(`launch_id`). Each launch writes an `ella_launch` line, with the operating
+system, CPU, cores and memory, and an `ella_engine` line once the model is up,
+with llama.cpp's build and threads, the model's size, the speech-to-text
+engines and how long the launch took to get there.
 
 The lines are kept in `telemetry/latency.jsonl` in the app's data folder, on
 every laptop. `npm run telemetry:report -- <path>` prints each day's medians and
 95th percentiles, including when Ella started speaking ("speaks"); a log from
-before `speech_ms` counts its total there. A talk's first turn is the one that
-waits for the talk's instructions to be evaluated, and shows it in its
-`llm_ttft_ms`. The recaps follow, by day: when the skills were on screen
-("scored") and when all of it was.
+before `speech_ms` counts its total there. A day that ran two builds is split
+by build, and builds that say why get a summary of it: how fast the model read
+and wrote, how often replies were rewritten or said on the clock, how many
+first replies were cold, how Canary kept up, and how the computer was powered
+and how busy it was with other things. `--turns` also prints every turn, talk
+by talk. A talk's first turn is the one that waits for the talk's instructions
+to be evaluated, and shows it in its `llm_ttft_ms`. The recaps follow, by day:
+when the skills were on screen ("scored") and when all of it was. The report
+reads a file saved through PowerShell's `>`, which is UTF-16.
 
 ## Latency on laptops
 

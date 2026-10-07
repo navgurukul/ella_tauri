@@ -30,7 +30,7 @@ use crate::{
     },
     notes,
     progress::{self, ProgressMap, SkillProgress},
-    telemetry::{AssessmentTrace, LatencyTrace},
+    telemetry::{AssessmentTrace, LatencyTrace, SttPiece},
 };
 
 /// The placement chat is a session like any other, marked with this kind. Its
@@ -103,6 +103,34 @@ struct StreamChunkOutcome {
     /// Why this chunk produced nothing. Kept so a turn where every chunk failed
     /// can report the real cause instead of guessing at the microphone.
     error: Option<String>,
+    /// The chunk as it was cut, and the speech left in it after trimming.
+    audio_ms: f64,
+    speech_ms: f64,
+    /// How long speech-to-text took over it, waiting for an earlier chunk
+    /// included, and of that the waiting.
+    ms: f64,
+    queued_ms: Option<f64>,
+    attempts: Option<u32>,
+    done: Instant,
+    /// What was left when the learner stopped, rather than a chunk sent
+    /// while they spoke.
+    tail: bool,
+}
+
+impl StreamChunkOutcome {
+    fn piece(&self, trace: &LatencyTrace) -> SttPiece {
+        SttPiece {
+            part: if self.tail { "tail" } else { "background" },
+            audio_ms: self.audio_ms.round() as u64,
+            speech_ms: Some(self.speech_ms.round() as u64),
+            engine: self.engine.clone(),
+            words: self.text.split_whitespace().count(),
+            ms: self.ms.round() as u64,
+            queued_ms: self.queued_ms.map(|ms| ms.round() as u64),
+            attempts: self.attempts,
+            done_ms: trace.offset_ms(self.done),
+        }
+    }
 }
 
 struct VoiceStream {
@@ -681,6 +709,18 @@ impl AppService {
                 }
                 trace.stage("stt:start", "sending trimmed audio to speech-to-text engine");
                 let transcription = self.engine.transcribe(&vad.samples, sample_rate)?;
+                let piece = SttPiece {
+                    part: "whole",
+                    audio_ms: vad.input_ms.round() as u64,
+                    speech_ms: Some(vad.speech_ms.round() as u64),
+                    engine: transcription.engine.clone(),
+                    words: transcription.text.split_whitespace().count(),
+                    ms: transcription.elapsed_ms.round() as u64,
+                    queued_ms: transcription.queued_ms.map(|ms| ms.round() as u64),
+                    attempts: Some(transcription.attempts),
+                    done_ms: trace.offset_ms(Instant::now()),
+                };
+                trace.record_pieces(vec![piece]);
                 trace.stage(
                     "stt:done",
                     &format!(
@@ -866,12 +906,15 @@ impl AppService {
                 let stt_started = Instant::now();
                 let tail_outcome = if stream.pending.len() >= sample_rate as usize / 4 {
                     let index = stream.chunks.len();
-                    Some(transcribe_stream_chunk(
-                        &self.engine,
-                        index,
-                        std::mem::take(&mut stream.pending),
-                        sample_rate,
-                    ))
+                    Some(StreamChunkOutcome {
+                        tail: true,
+                        ..transcribe_stream_chunk(
+                            &self.engine,
+                            index,
+                            std::mem::take(&mut stream.pending),
+                            sample_rate,
+                        )
+                    })
                 } else {
                     None
                 };
@@ -914,6 +957,8 @@ impl AppService {
                     None,
                     None,
                 );
+                let pieces = outcomes.iter().map(|outcome| outcome.piece(&trace)).collect();
+                trace.record_pieces(pieces);
                 if joined.is_empty() {
                     // Every chunk came back empty. The real cause (an engine
                     // failure vs. a quiet learner) is worth knowing when we're
@@ -1019,6 +1064,12 @@ impl AppService {
                 closing: !flagged && self.placement_closes(session_id, turn),
             }
         });
+        let (talk, topic) = match (&brief, &chore_context) {
+            (Some(_), _) => ("placement", session.topic_id.as_str()),
+            (None, Some(context)) => ("chore", context.chore_id.as_str()),
+            (None, None) => ("free", session.topic_id.as_str()),
+        };
+        trace.record_talk(session_id, talk, topic, &level, turn);
         let pitch = Pitch {
             level,
             focus: curriculum_meta.target_skill.as_deref().and_then(focus_for),
@@ -1048,12 +1099,14 @@ impl AppService {
                 .find(|message| message.speaker == Speaker::Ella)
                 .and_then(|message| trailing_question(&message.content));
             trace.stage("llm:skipped", "learner turn flagged by the content filter");
+            trace.note("flagged");
             GeneratedReply::plain(safety::redirect_reply(question), 0.0, 0.0)
         } else {
             trace.stage(
                 "llm:start",
                 &format!("requesting tutor reply for turn {turn} ({} history messages)", request.messages.len()),
             );
+            trace.record_llm_start();
             self.engine.reply(&request)?
         };
         trace.record_llm(generated.ttft_ms, generated.completion_ms);
@@ -1071,6 +1124,7 @@ impl AppService {
         if reply.is_empty() {
             return Err(EllaError::Engine("Ella returned an empty reply.".into()));
         }
+        trace.record_words(clean, &reply);
         let created_at = now();
         // A no-op on ordinary text; redacts anything rustrict recognizes as
         // profane, offensive, or sexual before it is written to the
@@ -1121,6 +1175,7 @@ impl AppService {
                     match pending.finish() {
                         Some(synthesized) => {
                             trace.record_tts(synthesized.first_audio_ms, synthesized.completion_ms);
+                            trace.record_tts_path("overlapped");
                             trace.stage(
                                 "tts:overlapped",
                                 &format!(
@@ -1146,11 +1201,15 @@ impl AppService {
                         // Piper broke off partway. The window is told nothing
                         // was played, and gets the whole recording instead of
                         // a reply that stops mid-thought.
-                        None => self.speak_on_clock(&reply, None, trace),
+                        None => {
+                            trace.note("piper_broke");
+                            self.speak_on_clock(&reply, None, trace)
+                        }
                     }
                 }
                 None => self.speak_on_clock(&reply, sink, trace),
             };
+        trace.record_tts_sentences(streamed_segments);
         if streamed_segments > 0 {
             if let Some(sent) = speech.as_ref().and_then(|speech| speech.first_sent()) {
                 trace.record_speech(sent);
@@ -1223,6 +1282,7 @@ impl AppService {
             }
             (None, None) => turn >= FREE_TOPIC_TURNS,
         };
+        trace.record_talk_over(conversation_over);
         // `persist_turn` above already wrote this turn, so the summary counts it.
         let session_summary = if conversation_over {
             Some(self.complete_session(session_id)?)
@@ -1266,6 +1326,7 @@ impl AppService {
         match self.engine.speak(reply, speech) {
             Ok(synthesized) => {
                 trace.record_tts(synthesized.first_audio_ms, synthesized.completion_ms);
+                trace.record_tts_path("on_clock");
                 trace.stage(
                     "tts:done",
                     &format!(
@@ -1302,6 +1363,7 @@ impl AppService {
                     })
                 );
                 trace.record_tts(None, None);
+                trace.record_tts_path("failed");
                 (None, Vec::new(), Vec::new(), 0)
             }
         }
@@ -2006,23 +2068,37 @@ fn transcribe_stream_chunk(
             engine: "silence".into(),
             fell_back: false,
             error: Some("no speech detected by the energy VAD".into()),
+            audio_ms,
+            speech_ms: vad.speech_ms,
+            ms: 0.0,
+            queued_ms: None,
+            attempts: None,
+            done: Instant::now(),
+            tail: false,
         };
     }
     let started = Instant::now();
-    let (text, engine_name, fell_back, error) = match engine.transcribe(&vad.samples, sample_rate) {
+    let (text, engine_name, fell_back, error, queued_ms, attempts) = match engine.transcribe(&vad.samples, sample_rate) {
         Ok(transcription) => {
             let fell_back = transcription.fallback_from.is_some();
-            (transcription.text, transcription.engine, fell_back, None)
+            (
+                transcription.text,
+                transcription.engine,
+                fell_back,
+                None,
+                transcription.queued_ms,
+                Some(transcription.attempts),
+            )
         }
         // Canary found no words even after trying the audio another way, so
         // nothing stood in for it and this piece adds nothing to the answer.
         Err(error @ EllaError::Validation(_)) => {
             eprintln!("[LATENCY]     stt-stream> chunk {index} has no words ({error})");
-            (String::new(), "no-words".into(), false, Some(error.to_string()))
+            (String::new(), "no-words".into(), false, Some(error.to_string()), None, None)
         }
         Err(error) => {
             eprintln!("[LATENCY]     stt-stream> chunk {index} produced no words ({error})");
-            (String::new(), "none".into(), true, Some(error.to_string()))
+            (String::new(), "none".into(), true, Some(error.to_string()), None, None)
         }
     };
     let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
@@ -2035,6 +2111,13 @@ fn transcribe_stream_chunk(
         engine: engine_name,
         fell_back,
         error,
+        audio_ms,
+        speech_ms: vad.speech_ms,
+        ms: elapsed_ms,
+        queued_ms,
+        attempts,
+        done: Instant::now(),
+        tail: false,
     }
 }
 
@@ -3922,5 +4005,163 @@ mod speech_release_tests {
         assert!(result.audio.is_some(), "the recording is played instead");
         let timings = result.timings.unwrap();
         assert_eq!(timings.speech_ms, Some(timings.total_ms), "she speaks when the turn returns");
+    }
+}
+
+#[cfg(test)]
+mod telemetry_tests {
+    //! What a turn's `ella_turn_latency` event says, read back as the JSON
+    //! line written to `latency.jsonl`.
+
+    use super::*;
+    use crate::{
+        domain::EngineStatus,
+        infrastructure::{
+            database::Database,
+            engines::{DemoEngine, SynthesizedAudio},
+            stt::Transcription,
+        },
+        telemetry::{self, LlmRun},
+    };
+    use serde_json::Value;
+
+    /// Hears "I like it" in every piece of an answer, and records a
+    /// generation and a note for its reply, as the local engine does.
+    struct Ears;
+
+    impl TutorEngine for Ears {
+        fn status(&self) -> EngineStatus {
+            DemoEngine.status()
+        }
+        fn opening(&self, topic: &Topic, learner_name: &str, pitch: &Pitch) -> EllaResult<String> {
+            DemoEngine.opening(topic, learner_name, pitch)
+        }
+        fn reply(&self, _: &TutorRequest) -> EllaResult<GeneratedReply> {
+            telemetry::record_llm_run(LlmRun {
+                why: "reply",
+                wait_ms: 0,
+                errand: None,
+                ttft_ms: 1,
+                ms: 2,
+                prompt_tokens: Some(300),
+                prompt_evaluated: Some(40),
+                prompt_ms: Some(1),
+                gen_tokens: Some(9),
+                gen_ms: Some(1),
+            });
+            telemetry::note("repeat_dropped");
+            Ok(GeneratedReply::plain("That sounds fun. What did you eat there?".into(), 1.0, 2.0))
+        }
+        fn uses_native_stt(&self) -> bool {
+            true
+        }
+        fn transcribe(&self, _: &[i16], _: u32) -> EllaResult<Transcription> {
+            Ok(Transcription {
+                text: "I like it".into(),
+                engine: "test-ears".into(),
+                backend: "test".into(),
+                elapsed_ms: 1.0,
+                fallback_from: None,
+                mel_ms: None,
+                encode_ms: None,
+                decode_ms: None,
+                queued_ms: Some(0.0),
+                attempts: 1,
+            })
+        }
+        fn synthesize(&self, _: &str) -> EllaResult<SynthesizedAudio> {
+            DemoEngine.synthesize("")
+        }
+    }
+
+    /// `seconds` of a steady tone, which the VAD takes for speech.
+    fn tone(seconds: usize, sample_rate: u32) -> Vec<i16> {
+        (0..seconds * sample_rate as usize)
+            .map(|index| ((index as f64 * 440.0 * std::f64::consts::TAU / sample_rate as f64).sin() * 8_000.0) as i16)
+            .collect()
+    }
+
+    fn last_turn() -> Value {
+        telemetry::written()
+            .into_iter()
+            .rev()
+            .find(|event| event["event"] == "ella_turn_latency")
+            .expect("a turn event was written")
+    }
+
+    #[test]
+    fn a_streamed_turn_says_its_talk_its_pieces_and_what_the_engine_did() {
+        let service = AppService::new(Database::in_memory().unwrap(), Box::new(Ears));
+        service.save_learner("Asha", Some(14)).unwrap();
+        let session = service.start_session("street-food").unwrap();
+        let sample_rate = 16_000;
+        let stream = service.begin_voice_stream(&session.id).unwrap();
+        // Eight seconds in one-second pushes, as the window sends them: one
+        // piece goes while the learner speaks, and the rest is the tail.
+        for second in tone(8, sample_rate).chunks(sample_rate as usize) {
+            service.push_voice_stream(&stream, second.to_vec(), sample_rate).unwrap();
+        }
+        service
+            .finish_voice_stream_turn(&stream, tone(1, sample_rate), sample_rate, None)
+            .unwrap();
+
+        let event = last_turn();
+        assert_eq!(event["schema_version"], 2);
+        assert_eq!(event["app_version"], env!("CARGO_PKG_VERSION"));
+        assert!(!event["launch_id"].as_str().unwrap().is_empty());
+        assert_eq!(event["session_id"], session.id.as_str());
+        assert_eq!((&event["talk"], &event["topic"], &event["turn"]), (&"free".into(), &"street-food".into(), &1.into()));
+        assert!(event["level"].is_string());
+        assert_eq!(event["talk_over"], false);
+
+        let pieces = event["stt_pieces"].as_array().unwrap();
+        let parts: Vec<&str> = pieces.iter().map(|piece| piece["part"].as_str().unwrap()).collect();
+        assert_eq!(parts, ["background", "tail"]);
+        assert!(pieces.iter().all(|piece| piece["engine"] == "test-ears" && piece["words"] == 3));
+        assert!(pieces[0]["audio_ms"].as_u64().unwrap() >= 1_000);
+        assert!(
+            pieces[0]["done_ms"].as_i64().unwrap() <= pieces[1]["done_ms"].as_i64().unwrap(),
+            "the piece sent while they spoke was done first"
+        );
+        assert_eq!(event["learner_words"], 6);
+        assert_eq!(event["reply_words"], 8);
+
+        let runs = event["llm_runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 1, "the engine's generation lands in its turn");
+        assert_eq!(runs[0]["prompt_evaluated"], 40);
+        assert!(event["llm_start_ms"].is_u64());
+        assert_eq!(event["notes"], serde_json::json!(["repeat_dropped"]));
+        assert_eq!(event["tts_path"], "on_clock");
+        assert!(event.get("failed_at").is_none());
+    }
+
+    #[test]
+    fn a_failed_turn_says_where_it_stopped() {
+        let service = AppService::new(Database::in_memory().unwrap(), Box::new(DemoEngine));
+        service.save_learner("Asha", Some(14)).unwrap();
+        let session = service.start_session("street-food").unwrap();
+        assert!(service.send_text_turn(&session.id, "   ").is_err());
+
+        let event = last_turn();
+        assert_eq!(event["status"], "error");
+        assert_eq!(event["failed_at"], "turn:received");
+        assert!(event.get("llm_runs").is_none(), "nothing was asked of the model");
+    }
+
+    #[test]
+    fn the_turn_that_ends_a_talk_says_so_and_what_was_flagged_is_noted() {
+        let service = AppService::new(Database::in_memory().unwrap(), Box::new(DemoEngine));
+        service.save_learner("Asha", Some(14)).unwrap();
+        let session = service.start_session("booking-a-cab").unwrap();
+        // One the content filter is known to catch: see `safety`.
+        service.send_text_turn(&session.id, "sh1t").unwrap();
+        let flagged = last_turn();
+        assert_eq!(flagged["notes"], serde_json::json!(["flagged"]));
+        for _ in 2..=FREE_TOPIC_TURNS {
+            service.send_text_turn(&session.id, "I need to go to the station").unwrap();
+        }
+        let last = last_turn();
+        assert_eq!(last["turn"], FREE_TOPIC_TURNS);
+        assert_eq!(last["talk_over"], true);
     }
 }
