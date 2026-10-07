@@ -115,6 +115,10 @@ export function TalkScreen({
   // sent, so it is shown whole the moment she starts, and the turn that
   // arrives a moment later puts the same words in the conversation.
   const [incomingReply, setIncomingReply] = useState<string | null>(null);
+  // Set when Ella has finished a line on her own, so the mic opens for the
+  // answer without a click. Anything else that stops her - an interruption, a
+  // playback error, the watchdog's guess - leaves the mic to the learner.
+  const [answerDue, setAnswerDue] = useState(false);
 
   const voice = useRef(createVoiceCapture());
   const voiceStreamId = useRef<string | null>(null);
@@ -253,6 +257,7 @@ export function TalkScreen({
     speechQueue.current?.queue.cancel();
     speechQueue.current = null;
     setIncomingReply(null);
+    setAnswerDue(false);
     setSpokenIndex(-1);
     setFollowing(false);
     if (playbackWatchdog.current !== null) window.clearTimeout(playbackWatchdog.current);
@@ -363,6 +368,19 @@ export function TalkScreen({
     onComplete(pendingSummary);
   }, [pendingSummary, state, onComplete]);
 
+  // Once Ella has finished a line, the mic opens for the answer, as in a real
+  // conversation, where nobody presses anything to reply. Not in a talk that
+  // has closed itself, not while the learner is typing, and not where there is
+  // no microphone to open: that would only swap the screen for an error.
+  useEffect(() => {
+    if (!answerDue || sending || micStarting || state !== "resting") return;
+    setAnswerDue(false);
+    if (typing || pendingSummary || !voice.current.supported) return;
+    llog("mic:auto-open", `${speaker} finished speaking; opening the mic for the answer`);
+    void beginListening();
+    // beginListening is redeclared every render; the state it reads is fresh.
+  }, [answerDue, sending, micStarting, state, typing, pendingSummary]);
+
   function queueCallbacks(generation: number, label: string): SpeechQueueCallbacks {
     const live = (): boolean => mounted.current && playbackGeneration.current === generation;
     const rest = () => {
@@ -381,7 +399,10 @@ export function TalkScreen({
         setState("speaking");
         llog(label, `END-TO-END -> Ella starts speaking: ${turnElapsed().toFixed(1)}ms`);
       },
-      onEnd: rest,
+      onEnd: () => {
+        rest();
+        if (live()) setAnswerDue(true);
+      },
       onError: () => {
         rest();
         if (!live()) return;
@@ -427,6 +448,7 @@ export function TalkScreen({
           if (playbackWatchdog.current !== null) window.clearTimeout(playbackWatchdog.current);
           playbackWatchdog.current = null;
           setState("resting");
+          setAnswerDue(true);
         },
         onError: () => {
           playbackSettled = true;
@@ -688,18 +710,23 @@ export function TalkScreen({
     playElla(result.ella_message.content, result);
   }
 
-  async function switchToTyping() {
+  /** Close the mic without sending anything it heard. */
+  async function dropCapture() {
     micOperation.current += 1;
     setMicStarting(false);
-    stopPlayback();
     setLiveTranscript("");
-    setState("resting");
-    setTyping(true);
     await cancelVoiceStream();
     if (captureActive.current || state === "listening") {
       captureActive.current = false;
       await voice.current.cancel().catch(() => undefined);
     }
+  }
+
+  async function switchToTyping() {
+    stopPlayback();
+    setState("resting");
+    setTyping(true);
+    await dropCapture();
   }
 
   function switchToMicrophone() {
@@ -842,13 +869,17 @@ export function TalkScreen({
             <button
               type="button"
               className="btn btn--replay"
-              disabled={interactionLocked || state === "listening"}
+              disabled={interactionLocked}
               onClick={() => {
                 setReaction(null);
                 // The audio here has always been the real last question - only
                 // the screen could still be showing a retry prompt on top of
                 // it, from before this button was pressed.
                 setRetryPrompt(null);
+                // The mic opens by itself after every line, so it is usually
+                // open here. Hearing the line again puts the answer down
+                // unsent, and the mic opens again once Ella has said it.
+                if (state === "listening") void dropCapture();
                 playElla(latestElla.content, lastTurn ?? openingLine ?? undefined);
               }}
             >
