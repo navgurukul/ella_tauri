@@ -54,6 +54,15 @@ const SPEAK_UP_LEVEL_THRESHOLD = 0.05;
 // enough that a learner who has gone quiet does not sit there wondering if
 // anything is happening.
 const SPEAK_UP_DELAY_MS = 4000;
+// How many blocks of audio over that threshold (about 43 ms each at 48 kHz)
+// count as the mic having heard the learner: more than a click or a breath,
+// less than a word.
+const HEARD_BLOCKS = 4;
+// How long a mic that opened by itself waits for the learner to say anything
+// before it is put down unsent. Long enough to think an answer over; well
+// short of the 90 seconds an answer may last, which a mic left open in an
+// empty room ran into on the Windows test laptop.
+const UNHEARD_CLOSE_MS = 30_000;
 
 export function TalkScreen({
   session,
@@ -119,6 +128,18 @@ export function TalkScreen({
   // answer without a click. Anything else that stops her - an interruption, a
   // playback error, the watchdog's guess - leaves the mic to the learner.
   const [answerDue, setAnswerDue] = useState(false);
+  // Whether the open mic opened by itself, when it began listening, and how
+  // many loud blocks it has heard since. A learner used to pressing the mic to
+  // answer presses it just as it opens on its own, which used to send a
+  // fraction of a second of silence: on the Windows test laptop, 9 of 58
+  // answers on 0.1.15 came back "I couldn't hear any words" that way. So the
+  // first press on a mic that opened by itself and has heard nothing keeps it
+  // listening, and says so; a second press sends whatever it has.
+  const openedByItself = useRef(false);
+  const listeningSince = useRef(0);
+  const loudBlocks = useRef(0);
+  const pressedEarly = useRef(false);
+  const [pressedBeforeSpeaking, setPressedBeforeSpeaking] = useState(false);
 
   const voice = useRef(createVoiceCapture());
   const voiceStreamId = useRef<string | null>(null);
@@ -231,13 +252,23 @@ export function TalkScreen({
   // `lastSoundAt` is updated from `handleLevel` on every block of audio that
   // clears the threshold, so this timer only has to check whether it has gone
   // stale.
+  //
+  // A mic that opened by itself and has still heard nothing after
+  // `UNHEARD_CLOSE_MS` is put down unsent, as if it had never opened.
   useEffect(() => {
     if (state !== "listening") {
       setShowSpeakUpHint(false);
       return;
     }
     const id = window.setInterval(() => {
-      setShowSpeakUpHint(performance.now() - lastSoundAt.current >= SPEAK_UP_DELAY_MS);
+      const now = performance.now();
+      setShowSpeakUpHint(now - lastSoundAt.current >= SPEAK_UP_DELAY_MS);
+      if (unheard() && now - listeningSince.current >= UNHEARD_CLOSE_MS) {
+        llog("mic:auto-close", `nothing heard for ${UNHEARD_CLOSE_MS / 1000}s since it opened by itself; put down unsent`);
+        // This is the render that began listening, and its putDownUnheard
+        // closes the mic as that render knew it, which is still the mic open.
+        void putDownUnheard();
+      }
     }, 500);
     return () => window.clearInterval(id);
   }, [state]);
@@ -247,7 +278,36 @@ export function TalkScreen({
   // touches no state: a render per block would cost the CPU the model and the
   // speech recognizer are both waiting on.
   function handleLevel(level: number) {
-    if (level >= SPEAK_UP_LEVEL_THRESHOLD) lastSoundAt.current = performance.now();
+    if (level >= SPEAK_UP_LEVEL_THRESHOLD) {
+      lastSoundAt.current = performance.now();
+      loudBlocks.current += 1;
+    }
+  }
+
+  /** The open mic opened by itself and has not heard the learner yet. */
+  function unheard(): boolean {
+    return openedByItself.current && loudBlocks.current < HEARD_BLOCKS;
+  }
+
+  /** The mic button, or Space, while the mic is open. */
+  function pressWhileListening() {
+    if (unheard() && !pressedEarly.current) {
+      llog("mic:still-listening", "pressed before anything was heard on a mic that opened by itself; still listening");
+      pressedEarly.current = true;
+      setPressedBeforeSpeaking(true);
+      return;
+    }
+    void finishListening();
+  }
+
+  /** Close a mic that opened by itself and heard nothing, sending nothing. */
+  async function putDownUnheard() {
+    openedByItself.current = false;
+    await dropCapture();
+    if (!mounted.current) return;
+    pressedEarly.current = false;
+    setPressedBeforeSpeaking(false);
+    setState("resting");
   }
 
   function stopPlayback() {
@@ -377,7 +437,7 @@ export function TalkScreen({
     setAnswerDue(false);
     if (typing || pendingSummary || !voice.current.supported) return;
     llog("mic:auto-open", `${speaker} finished speaking; opening the mic for the answer`);
-    void beginListening();
+    void beginListening(true);
     // beginListening is redeclared every render; the state it reads is fresh.
   }, [answerDue, sending, micStarting, state, typing, pendingSummary]);
 
@@ -477,7 +537,9 @@ export function TalkScreen({
     );
   }
 
-  async function beginListening() {
+  /** Open the mic: `byItself` when Ella has just finished a line, rather than
+   * because the learner pressed it. */
+  async function beginListening(byItself = false) {
     if (micStarting || sending) return;
     const operation = ++micOperation.current;
     setMicStarting(true);
@@ -486,6 +548,10 @@ export function TalkScreen({
     setRetryPrompt(null);
     stopPlayback();
     setState("resting");
+    openedByItself.current = byItself;
+    loudBlocks.current = 0;
+    pressedEarly.current = false;
+    setPressedBeforeSpeaking(false);
     try {
       setLiveTranscript("");
       lastSoundAt.current = performance.now();
@@ -527,6 +593,7 @@ export function TalkScreen({
         return;
       }
       captureActive.current = true;
+      listeningSince.current = performance.now();
       setState("listening");
       llog("mic:listening", "microphone open, learner is speaking");
     } catch (reason) {
@@ -776,7 +843,9 @@ export function TalkScreen({
     ? "Opening the microphone…"
     : state === "speaking" && sending
       ? `${speaker} is answering…`
-      : MIC_HINT[state](speaker);
+      : state === "listening" && pressedBeforeSpeaking
+        ? "Still listening… say your answer, then press again"
+        : MIC_HINT[state](speaker);
   const spaceWorks = !micStarting && !sending && (state === "resting" || state === "listening");
   const announcedStatus = `${micHint}${spaceWorks && state === "resting" ? " Space" : ""}${
     reaction === "success" ? " Nice work." : ""
@@ -785,7 +854,8 @@ export function TalkScreen({
   useEffect(() => {
     spaceAction.current = () => {
       if (typing || interactionLocked) return;
-      void (state === "listening" ? finishListening() : beginListening());
+      if (state === "listening") pressWhileListening();
+      else void beginListening();
     };
   });
 
@@ -958,7 +1028,7 @@ export function TalkScreen({
                         ? `Interrupt ${speaker} and start speaking`
                         : "Start speaking"
                 }
-                onClick={() => (state === "listening" ? void finishListening() : void beginListening())}
+                onClick={() => (state === "listening" ? pressWhileListening() : void beginListening())}
               >
                 {micStarting ? <LoaderCircle className="spin" size={30} /> : <MicGlyph />}
               </button>
