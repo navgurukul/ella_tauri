@@ -523,8 +523,9 @@ use crate::domain::{
     Scorable, Topic, TutorRequest,
 };
 use crate::infrastructure::engines::{
-    GeneratedReply, NextTalk, SpeechSink, SynthesizedAudio, TutorEngine,
+    GeneratedReply, NextRecap, NextTalk, SpeechSink, SynthesizedAudio, TutorEngine,
 };
+use crate::infrastructure::model_queue::Held;
 use crate::infrastructure::stt::Transcription;
 
 /// A `TutorEngine` that is not there yet.
@@ -690,6 +691,21 @@ impl TutorEngine for DeferredEngine {
         }
     }
 
+    /// Dropped while there is no engine: the window reads Home again after
+    /// the next talk, and asks again.
+    fn prepare_recap(&self, next: &NextRecap) {
+        if let Some(engine) = self.inner.read().ok().as_ref().and_then(|slot| slot.as_ref()) {
+            engine.prepare_recap(next);
+        }
+    }
+
+    fn hold_for_assessment(&self) -> Option<Held> {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|slot| slot.as_ref().and_then(|engine| engine.hold_for_assessment()))
+    }
+
     fn opening(&self, topic: &Topic, learner_name: &str, pitch: &Pitch) -> EllaResult<String> {
         self.with_engine(|engine| engine.opening(topic, learner_name, pitch))
     }
@@ -727,8 +743,8 @@ impl TutorEngine for DeferredEngine {
         self.with_engine(|engine| engine.score(skills, messages))
     }
 
-    fn correct(&self, answers: &[&str]) -> EllaResult<Option<Vec<String>>> {
-        self.with_engine(|engine| engine.correct(answers))
+    fn correct(&self, answers: &[&str], settled: &dyn Fn(&[String]) -> bool) -> EllaResult<Option<Vec<String>>> {
+        self.with_engine(|engine| engine.correct(answers, settled))
     }
 
     fn opening_in_chore(&self, context: &ChoreContext, learner_name: &str) -> EllaResult<String> {

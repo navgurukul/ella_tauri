@@ -1,5 +1,6 @@
-use chrono::{Local, Utc};
+use chrono::{DateTime, Local, Utc};
 use std::{
+    cell::Cell,
     collections::HashMap,
     sync::{Arc, Mutex},
     thread,
@@ -11,7 +12,7 @@ use crate::{
     curriculum::{self, Position},
     domain::{
         find_character, find_chore, topics, topics_for_age, Advance, AppSnapshot, Assessment,
-        ChoreContext, ChoreRecap, Focus, LedgerTurn, AudioPayload, LedgerView, Learner, LearnerProfile,
+        ChoreContext, ChoreRecap, Fix, Focus, LedgerTurn, AudioPayload, LedgerView, Learner, LearnerProfile,
         LearnerProgress, LevelSkillView, LevelState, LevelView, Message, PhonemeSpan, Pitch,
         PlacementBrief, PlacementReading, Readiness, Scorable, Session, SessionSummary,
         SpeechStreamEvent, SpokenLine, Standing, StepView, TalkNotes, TurnSignal, WinCondition,
@@ -22,14 +23,14 @@ use crate::{
         audio::{quietest_cut_index, trim_to_speech, VadOutput},
         database::{AssessmentWrite, Database},
         engines::{
-            trailing_question, GeneratedReply, NextTalk, SpeechSegment, SpeechSink, TutorEngine,
+            trailing_question, GeneratedReply, NextRecap, NextTalk, SpeechSegment, SpeechSink, TutorEngine,
             FREE_TOPIC_TURNS,
         },
         safety,
     },
     notes,
     progress::{self, ProgressMap, SkillProgress},
-    telemetry::LatencyTrace,
+    telemetry::{AssessmentTrace, LatencyTrace},
 };
 
 /// The placement chat is a session like any other, marked with this kind. Its
@@ -237,24 +238,36 @@ impl AppService {
     /// window reads Home again after onboarding saves the learner, after a log
     /// in, and after every talk, and each time asks for this; once it is ready,
     /// asking again costs a look at a file.
+    ///
+    /// The recap after that talk is got ready next: the judges it asks, at the
+    /// learner's step. Their instructions are the same until the step changes,
+    /// so this is model work once a step, done while the learner reads the
+    /// recap that moved them on.
     fn prepare_next_talk(&self, learner: &Learner, never_talked: bool) -> EllaResult<()> {
-        let next = if never_talked && !self.database.placed()? {
-            NextTalk::Placement {
+        let (next, recap) = if never_talked && !self.database.placed()? {
+            let next = NextTalk::Placement {
                 learner_name: learner.name.clone(),
                 age: learner.age,
-            }
+            };
+            (next, NextRecap::Placement)
         } else {
             let Some(topic) = topics_for_age(learner.age).into_iter().next() else {
                 return Ok(());
             };
-            NextTalk::Topic {
+            let (position, _) = self.placement()?;
+            let recap = NextRecap::Talk {
+                skills: scorable(&progress::skills_in_play(&position)),
+            };
+            let next = NextTalk::Topic {
                 learner_name: learner.name.clone(),
                 topic_id: topic.id,
                 topic_label: topic.label,
-                level: self.placement()?.0.level,
-            }
+                level: position.level,
+            };
+            (next, recap)
         };
         self.engine.prepare(&next);
+        self.engine.prepare_recap(&recap);
         Ok(())
     }
 
@@ -1327,6 +1340,14 @@ impl AppService {
         };
         let short = notes::too_short(&answers);
         let chore = self.chore_recap(&session)?;
+        // Ready now, so the recap shows it from the first moment; a placement
+        // chat has no notes to show.
+        let placement = self.database.session_curriculum(session_id)?.kind.as_deref() == Some(PLACEMENT_KIND);
+        let went_well = if short || placement {
+            Vec::new()
+        } else {
+            notes::went_well(&answers, chore.as_ref())
+        };
         Ok(SessionSummary {
             session_id: session.id,
             topic_label: session.topic_label,
@@ -1335,6 +1356,7 @@ impl AppService {
             encouragement,
             short,
             chore,
+            went_well,
         })
     }
 
@@ -1376,33 +1398,38 @@ impl AppService {
         }))
     }
 
-    /// Ella's notes on a finished talk: what went well, read off the learner's
-    /// words, and one fix, if the model finds a mistake in them. `None` for a
-    /// talk too short to say anything about. A fix that could not be read
-    /// leaves the notes without one rather than failing the assessment, so the
-    /// talk still counts; `checked` says so, and nothing claims there was
-    /// nothing to fix.
-    fn notes_for(&self, session: &Session) -> EllaResult<Option<TalkNotes>> {
+    /// What went well in a finished talk, read off the learner's words: the
+    /// first half of Ella's notes, ready as the talk closes. `None` for a talk
+    /// too short to say anything about.
+    fn went_well_in(&self, session: &Session) -> EllaResult<Option<Vec<String>>> {
         let answers = answers_in(session);
         if notes::too_short(&answers) {
             return Ok(None);
         }
         let chore = self.chore_recap(session)?;
-        let went_well = notes::went_well(&answers, chore.as_ref());
+        Ok(Some(notes::went_well(&answers, chore.as_ref())))
+    }
+
+    /// The other half: one fix, if the model finds a mistake in the learner's
+    /// answers, and whether a model looked at all. A fix that could not be
+    /// read leaves the notes without one rather than failing the assessment,
+    /// so the talk still counts; nothing then claims there was nothing to fix.
+    ///
+    /// The correction is read only as far as it decides the fix: see
+    /// `notes::fix_settled`.
+    fn fix_for(&self, session: &Session, trace: &mut AssessmentTrace) -> (Option<Fix>, bool) {
+        let answers = answers_in(session);
         let checked = notes::answers_to_check(&answers);
-        let (fix, looked) = match self.engine.correct(&checked) {
+        trace.checked(checked.len());
+        let settled = |corrected: &[String]| notes::fix_settled(&checked, corrected);
+        match self.engine.correct(&checked, &settled) {
             Ok(Some(corrected)) => (notes::fix_from(&checked, &corrected), true),
             Ok(None) => (None, false),
             Err(error) => {
                 eprintln!("[recap] correcting {}: {error}", session.id);
                 (None, false)
             }
-        };
-        Ok(Some(TalkNotes {
-            went_well,
-            fix,
-            checked: looked,
-        }))
+        }
     }
 
     /// Whether the learner's `answers`-th answer is the placement chat's last.
@@ -1517,6 +1544,19 @@ impl AppService {
     /// scored. A model whose answer cannot be read is an error, so the window
     /// can ask again rather than have the talk count for nothing.
     pub fn assess_session(&self, session_id: &str) -> EllaResult<Assessment> {
+        self.assess_session_with(session_id, &|_| {})
+    }
+
+    /// `assess_session`, handing `scored` the assessment as soon as the talk
+    /// is scored and what it counted is kept, while the model still looks for
+    /// its one fix: the recap shows the skills, and any step or level
+    /// finished, that much sooner. What went well is in already; the fix is
+    /// not, and is not claimed to be missing. Never for a placement, nor for
+    /// an assessment kept before: those come back whole.
+    ///
+    /// Each assessment worked out is timed into the telemetry, as each turn
+    /// is: see `AssessmentTrace`.
+    pub fn assess_session_with(&self, session_id: &str, scored: &dyn Fn(&Assessment)) -> EllaResult<Assessment> {
         let learner = self
             .database
             .signed_in_learner()?
@@ -1529,16 +1569,25 @@ impl AppService {
         if session.status != "complete" {
             return Err(EllaError::Conflict("This talk is still going.".into()));
         }
-        let spoke = session
-            .messages
-            .iter()
-            .any(|message| message.speaker == Speaker::Learner);
-        let kept = if meta.kind.as_deref() == Some(PLACEMENT_KIND) {
-            self.assess_placement(&learner, &session)?
+        let answers = answers_in(&session).len() as u32;
+        let placement = meta.kind.as_deref() == Some(PLACEMENT_KIND);
+        let mut trace = AssessmentTrace::begin(
+            session_id,
+            if placement { PLACEMENT_KIND } else { "talk" },
+            answers,
+            since(session.completed_at.as_deref()),
+        );
+        let kept = if placement {
+            self.assess_placement(&learner, &session)
         } else {
-            self.assess_talk(&session, meta.target_skill, spoke)?
+            self.assess_talk(&session, meta.target_skill, answers > 0, scored, &mut trace)
         };
-        read_assessment(&kept)
+        let assessment = kept.and_then(|kept| read_assessment(&kept));
+        match &assessment {
+            Ok(_) => trace.finish("ok", None),
+            Err(error) => trace.finish("error", Some(&error.to_string())),
+        };
+        assessment
     }
 
     fn assess_placement(&self, learner: &Learner, session: &Session) -> EllaResult<String> {
@@ -1611,18 +1660,23 @@ impl AppService {
         })
     }
 
-    fn assess_talk(&self, session: &Session, target: Option<String>, spoke: bool) -> EllaResult<String> {
+    /// A talk's assessment, kept in two parts. The scores, what went well and
+    /// everything they change are committed together, and handed to `scored`;
+    /// then the one fix is looked for and filled in. The model reads the talk
+    /// for both under one hold, so nothing less urgent gets it in between.
+    fn assess_talk(
+        &self,
+        session: &Session,
+        target: Option<String>,
+        spoke: bool,
+        scored: &dyn Fn(&Assessment),
+        trace: &mut AssessmentTrace,
+    ) -> EllaResult<String> {
+        let _held = self.engine.hold_for_assessment();
         let (position, _) = self.placement()?;
         let in_play = progress::skills_in_play(&position);
         let scores = if spoke && !in_play.is_empty() {
-            let skills: Vec<Scorable> = in_play
-                .iter()
-                .map(|placed| Scorable {
-                    key: placed.key.clone(),
-                    text: placed.skill.text.clone(),
-                })
-                .collect();
-            self.engine.score(&skills, &session.messages).map_err(|error| {
+            self.engine.score(&scorable(&in_play), &session.messages).map_err(|error| {
                 eprintln!("[curriculum] scoring {}: {error}", session.id);
                 EllaError::Conflict(
                     "Ella could not look back over this talk just now. Try again in a moment.".into(),
@@ -1633,12 +1687,21 @@ impl AppService {
         };
         // After the scores: when the model cannot be reached at all, their
         // error is the one the window offers to retry, before any time is
-        // spent on notes.
-        let notes = self.notes_for(session)?;
+        // spent on notes. What went well needs no model, so it is kept with
+        // them; the fix is filled in below, once the model has looked.
+        let notes = self.went_well_in(session)?.map(|went_well| TalkNotes {
+            went_well,
+            fix: None,
+            checked: false,
+        });
+        let has_notes = notes.is_some();
         let today = today();
         let topic_id = session.topic_id.clone();
         let session_id = session.id.clone();
-        self.database.commit_assessment(&session.id, move |store| {
+        let committed = Cell::new(false);
+        let committed_here = &committed;
+        let kept = self.database.commit_assessment(&session.id, move |store| {
+            committed_here.set(true);
             // Where the learner stands as the transaction sees it: another
             // talk may have moved them since this one's skills were picked.
             let stored = store.position()?.and_then(known_position);
@@ -1695,7 +1758,32 @@ impl AppService {
             };
             write.assessment = to_json(&assessment)?;
             Ok(write)
-        })
+        })?;
+        trace.scored();
+        // A talk too short for notes has no fix to look for. One whose
+        // assessment another ask kept while this one read it has that ask to
+        // fill its fix in.
+        if !committed.get() || !has_notes {
+            return Ok(kept);
+        }
+        let assessment = read_assessment(&kept)?;
+        scored(&assessment);
+
+        let (fix, checked) = self.fix_for(session, trace);
+        if !checked {
+            return Ok(kept);
+        }
+        let notes = assessment.notes.clone().map(|notes| TalkNotes { fix, checked, ..notes });
+        let finished = to_json(&Assessment { notes, ..assessment })?;
+        match self.database.finish_assessment(&session.id, &kept, &finished) {
+            Ok(true) => Ok(finished),
+            Ok(false) => Ok(self.database.session_curriculum(&session.id)?.assessment.unwrap_or(kept)),
+            // The talk still counts, as it does when the fix cannot be read.
+            Err(error) => {
+                eprintln!("[recap] keeping the fix for {}: {error}", session.id);
+                Ok(kept)
+            }
+        }
     }
 
     /// The level map: every level, lowest first, as it stands for the learner.
@@ -1813,6 +1901,18 @@ fn focus_for(target: &str) -> Option<Focus> {
 
 fn keys_of(placed: &[progress::Placed]) -> Vec<String> {
     placed.iter().map(|placed| placed.key.clone()).collect()
+}
+
+/// `placed` as the scoring judge is asked about them: the same skills in the
+/// same order give the same instructions, the ones got ready ahead.
+fn scorable(placed: &[progress::Placed]) -> Vec<Scorable> {
+    placed
+        .iter()
+        .map(|placed| Scorable {
+            key: placed.key.clone(),
+            text: placed.skill.text.clone(),
+        })
+        .collect()
 }
 
 /// `keys` with each one once, in the order they first came.
@@ -1972,6 +2072,12 @@ fn gentle_correction(text: &str) -> Option<String> {
 
 fn now() -> String {
     Utc::now().to_rfc3339()
+}
+
+/// How long ago `at`, a time `now` wrote, was, in milliseconds.
+fn since(at: Option<&str>) -> Option<u64> {
+    let then = DateTime::parse_from_rfc3339(at?).ok()?;
+    u64::try_from((Utc::now() - then.with_timezone(&Utc)).num_milliseconds()).ok()
 }
 
 #[cfg(test)]
@@ -2620,6 +2726,12 @@ mod curriculum_flow_tests {
         prepared: Vec<NextTalk>,
         /// How many times it heard that a talk was over.
         talks_over: usize,
+        /// What recaps it was asked to get ready, in order.
+        recaps: Vec<NextRecap>,
+        /// How many corrected lines each correction wrote before it stopped.
+        written: Vec<usize>,
+        /// How many times an assessment kept the model for itself.
+        holds: usize,
     }
 
     /// A model that always answers the same: ready or not, one level, and the
@@ -2655,8 +2767,15 @@ mod curriculum_flow_tests {
         fn prepare(&self, next: &NextTalk) {
             self.heard.lock().unwrap().prepared.push(next.clone());
         }
+        fn prepare_recap(&self, next: &NextRecap) {
+            self.heard.lock().unwrap().recaps.push(next.clone());
+        }
         fn talk_over(&self) {
             self.heard.lock().unwrap().talks_over += 1;
+        }
+        fn hold_for_assessment(&self) -> Option<crate::infrastructure::model_queue::Held> {
+            self.heard.lock().unwrap().holds += 1;
+            None
         }
         fn opening(&self, topic: &Topic, learner_name: &str, pitch: &Pitch) -> EllaResult<String> {
             self.heard.lock().unwrap().pitches.push(pitch.clone());
@@ -2688,13 +2807,22 @@ mod curriculum_flow_tests {
             self.heard.lock().unwrap().scored.push(skills.iter().map(|skill| skill.key.clone()).collect());
             Ok(Some(skills.iter().map(|skill| (skill.key.clone(), self.confidence)).collect()))
         }
-        /// Knows one mistake, and corrects every "it have".
-        fn correct(&self, answers: &[&str]) -> EllaResult<Option<Vec<String>>> {
+        /// Knows one mistake, and corrects every "it have". Like the real one,
+        /// it stops writing once the lines so far are settled.
+        fn correct(&self, answers: &[&str], settled: &dyn Fn(&[String]) -> bool) -> EllaResult<Option<Vec<String>>> {
             self.heard.lock().unwrap().corrected.push(answers.iter().map(|answer| (*answer).to_owned()).collect());
             if self.correct_fails {
                 return Err(EllaError::Engine("The model could not correct the answers: an answer that could not be read".into()));
             }
-            Ok(Some(answers.iter().map(|answer| answer.replace("it have", "it has")).collect()))
+            let mut lines = Vec::new();
+            for answer in answers {
+                lines.push(answer.replace("it have", "it has"));
+                if lines.len() < answers.len() && settled(&lines) {
+                    break;
+                }
+            }
+            self.heard.lock().unwrap().written.push(lines.len());
+            Ok(Some(lines))
         }
         fn uses_native_stt(&self) -> bool {
             false
@@ -2762,6 +2890,27 @@ mod curriculum_flow_tests {
         let asked = heard.lock().unwrap().prepared.len();
         service.log_out().unwrap();
         assert_eq!(heard.lock().unwrap().prepared.len(), asked, "nobody signed in, nothing to get ready");
+    }
+
+    #[test]
+    fn the_recap_after_the_next_talk_is_got_ready_with_it() {
+        let heard: Arc<Mutex<Heard>> = Arc::default();
+        let service = judged(Judge::new(&heard));
+        service.bootstrap().unwrap();
+        assert_eq!(heard.lock().unwrap().recaps.last(), Some(&NextRecap::Placement), "the placement's level read");
+
+        place_at(&service, "A1", 2);
+        service.bootstrap().unwrap();
+        let expected = scorable(&progress::skills_in_play(&Position::new("A1", 2)));
+        assert_eq!(
+            heard.lock().unwrap().recaps.last(),
+            Some(&NextRecap::Talk { skills: expected.clone() }),
+            "scored on the step's skills and the next's"
+        );
+        // What the scoring is asked about is what was got ready.
+        talk_on(&service, "street-food");
+        let keys: Vec<String> = expected.iter().map(|skill| skill.key.clone()).collect();
+        assert_eq!(heard.lock().unwrap().scored.last(), Some(&keys));
     }
 
     #[test]
@@ -2872,6 +3021,70 @@ mod curriculum_flow_tests {
         assert_eq!(service.assess_session(&id).unwrap(), assessment);
         assert_eq!(heard.lock().unwrap().corrected.len(), 1);
         assert!(service.speak_fix(&id).is_ok());
+    }
+
+    #[test]
+    fn a_closed_talk_says_what_went_well_at_once() {
+        let service = judged(Judge::new(&Arc::default()));
+        let (id, summary) = talk_of(&service, &SCHOOL_TALK);
+        assert_eq!(summary.went_well, ["Gave reasons", "Full sentences"]);
+        assert_eq!(service.assess_session(&id).unwrap().notes.unwrap().went_well, summary.went_well);
+
+        let (_, short) = talk_of(&service, &["I ate poha", "It was good", "yes"]);
+        assert!(short.went_well.is_empty(), "too short for notes");
+        let placement = service.start_placement().unwrap();
+        for answer in SCHOOL_TALK {
+            service.send_text_turn(&placement.id, answer).unwrap();
+        }
+        assert!(service.complete_session(&placement.id).unwrap().went_well.is_empty(), "a placement has no notes");
+    }
+
+    #[test]
+    fn the_recap_hears_what_a_talk_counted_before_its_fix_is_looked_for() {
+        let heard: Arc<Mutex<Heard>> = Arc::default();
+        let service = judged(Judge::new(&heard));
+        let (id, _) = talk_of(&service, &SCHOOL_TALK);
+        let early = Mutex::new(None);
+        let assessment = service
+            .assess_session_with(&id, &|scored| {
+                *early.lock().unwrap() = Some((scored.clone(), heard.lock().unwrap().corrected.len()));
+            })
+            .unwrap();
+        let (scored, corrections) = early.into_inner().unwrap().expect("handed over once scored");
+        assert_eq!(corrections, 0, "before the model looked for the fix");
+        assert!(scored.scored);
+        assert_eq!((&scored.skills, &scored.standing), (&assessment.skills, &assessment.standing));
+        assert_eq!(
+            scored.notes,
+            Some(TalkNotes {
+                went_well: vec!["Gave reasons".into(), "Full sentences".into()],
+                fix: None,
+                checked: false,
+            }),
+            "what went well is in, and nothing is said about a fix yet"
+        );
+        assert!(assessment.notes.as_ref().unwrap().fix.is_some());
+        assert_eq!(heard.lock().unwrap().holds, 1, "the model kept for both judges at once");
+
+        // Kept, it comes back whole, with nothing handed over early.
+        let again = service.assess_session_with(&id, &|_| panic!("already kept")).unwrap();
+        assert_eq!(again, assessment);
+        assert_eq!(heard.lock().unwrap().holds, 1);
+    }
+
+    #[test]
+    fn the_correction_is_read_only_as_far_as_it_decides_the_fix() {
+        let heard: Arc<Mutex<Heard>> = Arc::default();
+        let service = judged(Judge::new(&heard));
+        let answers = [
+            "My school is very big and it have a big playground",
+            "We play football there because it is fun",
+            "Our teacher is very kind and she helps everyone",
+        ];
+        let (id, _) = talk_of(&service, &answers);
+        let fix = service.assess_session(&id).unwrap().notes.unwrap().fix.unwrap();
+        assert_eq!(fix.said, "It have a big playground");
+        assert_eq!(heard.lock().unwrap().written, [1], "the first answer's fix could not be beaten");
     }
 
     #[test]

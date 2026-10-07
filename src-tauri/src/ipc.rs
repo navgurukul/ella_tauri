@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tauri::State;
+use tauri::{ipc::Channel, State};
 
 use crate::{
     application::AppService,
@@ -230,14 +230,25 @@ pub async fn complete_session(
 
 /// What a finished talk did for the learner. Slow the first time — the model
 /// reads the talk — and kept, so asking again is instant and counts nothing
-/// twice.
+/// twice. `scored` hears the assessment as soon as the talk is scored, before
+/// its one fix is in: see `AppService::assess_session_with`.
 #[tauri::command]
 pub async fn assess_session(
     state: State<'_, AppState>,
     session_id: String,
+    scored: Channel<Assessment>,
 ) -> Result<Assessment, String> {
     let service = state.0.clone();
-    off_main_thread(move || service.assess_session(&session_id)).await
+    off_main_thread(move || {
+        service.assess_session_with(&session_id, &|assessment| {
+            // Losing it costs the recap its early skills, nothing else: the
+            // whole assessment still comes back.
+            if let Err(error) = scored.send(assessment.clone()) {
+                eprintln!("[recap] could not hand the scores over early: {error}");
+            }
+        })
+    })
+    .await
 }
 
 /// The level map: every level, lowest first, as it stands for the learner.

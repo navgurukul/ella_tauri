@@ -133,6 +133,48 @@ describe("the recap", () => {
     expect(onCelebrated).not.toHaveBeenCalled();
   });
 
+  it("shows what went well at once, the skills once scored, and the fix once looked for", () => {
+    const summary = summaryOf({ went_well: ["Warm greeting", "Gave reasons"] });
+    const { rerender, onDone, onTryAgain, onRetry, onCelebrated, onLevels } = renderRecap({ summary });
+    const recap = (props: Partial<Parameters<typeof SummaryScreen>[0]>) => (
+      <SummaryScreen
+        summary={summary}
+        assessment={null}
+        assessError={null}
+        before={nothingYet}
+        learnerName="Aarav Sharma"
+        standing={standing}
+        nextTopic="Sunday vegetable run"
+        {...{ onDone, onTryAgain, onRetry, onCelebrated, onLevels }}
+        {...props}
+      />
+    );
+    const waiting = () => screen.queryAllByRole("status", { name: "Ella is looking back over your talk…" });
+
+    // Read off the learner's words as the talk closed: no model needed.
+    const well = screen.getByRole("region", { name: "Went well" });
+    expect(well).toHaveTextContent("Warm greeting");
+    expect(well).toHaveTextContent("Gave reasons");
+    expect(waiting()).toHaveLength(2);
+
+    // Scored: the skills are in, and the fix keeps its place, still waiting.
+    const scored = assessed({ notes: { went_well: ["Warm greeting", "Gave reasons"], fix: null, checked: false } });
+    rerender(recap({ assessment: scored, fixPending: true }));
+    expect(screen.getByLabelText("Greeting: 4 talks")).toBeInTheDocument();
+    expect(waiting()).toHaveLength(1);
+    expect(screen.getByRole("region", { name: "One fix" })).toContainElement(waiting()[0]);
+    expect(screen.getByRole("region", { name: "Went well" })).not.toHaveTextContent("Nothing to fix");
+
+    rerender(recap({ assessment: assessed() }));
+    expect(waiting()).toHaveLength(0);
+    expect(screen.getByRole("region", { name: "One fix" })).toHaveTextContent("Better: I'm Aarav");
+
+    // Or the model looked and found nothing: the fix gives up its place.
+    rerender(recap({ assessment: assessed({ notes: { went_well: ["Warm greeting", "Gave reasons"], fix: null, checked: true } }) }));
+    expect(screen.queryByRole("region", { name: "One fix" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Went well" })).toHaveTextContent("Nothing to fix");
+  });
+
   it("says there was nothing to fix only when a model looked", () => {
     renderRecap({ assessment: assessed({ notes: { went_well: ["Gave reasons", "Full sentences"], fix: null, checked: true } }) });
     expect(screen.getByRole("region", { name: "Went well" })).toHaveTextContent("Nothing to fix");

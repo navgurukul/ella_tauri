@@ -395,6 +395,19 @@ impl Database {
         Ok(write.assessment)
     }
 
+    /// Puts `finished` in place of the assessment kept on a talk, if what is
+    /// kept is still `kept`: the recap's one fix, filled in once the model has
+    /// looked, after the rest of the assessment was committed. Nothing it
+    /// changes is counted anywhere else. False when something else changed
+    /// the kept assessment first, which then stands.
+    pub fn finish_assessment(&self, session_id: &str, kept: &str, finished: &str) -> EllaResult<bool> {
+        let changed = self.connection()?.execute(
+            "UPDATE sessions SET assessment = ?3 WHERE id = ?1 AND assessment = ?2",
+            params![session_id, kept, finished],
+        )?;
+        Ok(changed == 1)
+    }
+
     pub fn session(&self, id: &str) -> EllaResult<Session> {
         let connection = self.connection()?;
         let mut session = connection

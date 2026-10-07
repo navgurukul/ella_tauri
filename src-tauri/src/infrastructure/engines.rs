@@ -1,5 +1,6 @@
 // Local tutor engines with native Canary STT and HTTP Whisper fallback.
 use std::{
+    cell::Cell,
     collections::{hash_map::DefaultHasher, BTreeSet, HashMap, HashSet},
     env, fs,
     hash::{Hash, Hasher},
@@ -29,13 +30,14 @@ use crate::{
     infrastructure::{
         audio::raw_pcm_to_wav,
         engine_manager::LlamaServer,
-        model_queue::{Errand, ErrandTurn, GiveWay, ModelQueue, Step},
+        model_queue::{Errand, ErrandTurn, GiveWay, Held, ModelQueue, Step},
         speech_timing::{phoneme_spans, shifted, word_spans},
         stt::{
             CanaryStt, SpeechToTextEngine, SttRouter, Transcription, WindowsStt,
             CANARY_FILE_NAME,
         },
     },
+    telemetry::{record_judge, JudgeTiming},
 };
 
 #[derive(Debug)]
@@ -1880,6 +1882,46 @@ fn read_corrections(value: &Value, expected: usize) -> Option<Vec<String>> {
     (lines.len() == expected).then_some(lines)
 }
 
+/// The corrected answers already whole in the corrector's answer so far,
+/// `{"lines":["…","…` read as far as its last closing quote, so the caller
+/// can stop the answer once they say enough. A line still being written is
+/// left out.
+fn lines_so_far(text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let Some(key) = text.find("\"lines\"") else {
+        return lines;
+    };
+    let after_key = text[key + "\"lines\"".len()..].trim_start();
+    let Some(list) = after_key
+        .strip_prefix(':')
+        .map(str::trim_start)
+        .and_then(|value| value.strip_prefix('['))
+    else {
+        return lines;
+    };
+    let mut rest = list;
+    loop {
+        rest = rest.trim_start_matches(|character: char| character.is_whitespace() || character == ',');
+        if !rest.starts_with('"') {
+            return lines;
+        }
+        let mut escaped = false;
+        let close = rest.char_indices().skip(1).find_map(|(at, character)| {
+            let closes = !escaped && character == '"';
+            escaped = !escaped && character == '\\';
+            closes.then_some(at)
+        });
+        let Some(close) = close else {
+            return lines;
+        };
+        match serde_json::from_str::<String>(&rest[..=close]) {
+            Ok(line) => lines.push(line.trim().to_owned()),
+            Err(_) => return lines,
+        }
+        rest = &rest[close + 1..];
+    }
+}
+
 /// A session's messages as chat turns: Ella's are the model's own.
 fn chat_messages(messages: &[Message]) -> Vec<Value> {
     messages
@@ -2722,6 +2764,17 @@ pub enum NextTalk {
     Placement { learner_name: String, age: Option<u8> },
 }
 
+/// The recap after the talk the learner is likely to open next, named by the
+/// judges it asks, so an engine can get their instructions ready too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NextRecap {
+    /// A talk's: scored on `skills`, the learner's step's and the next's, in
+    /// the order the assessment asks about them, then corrected.
+    Talk { skills: Vec<Scorable> },
+    /// The placement chat's: a level read off the answers.
+    Placement,
+}
+
 pub trait TutorEngine: Send + Sync {
     fn status(&self) -> EngineStatus;
 
@@ -2730,9 +2783,23 @@ pub trait TutorEngine: Send + Sync {
     /// by default, where there is nothing to get ready.
     fn prepare(&self, _next: &NextTalk) {}
 
+    /// Get the judges of the recap after the next talk ready, the same way and
+    /// after it, so the recap waits only for the model to read the talk: their
+    /// instructions change only with the learner's step. Never waits itself.
+    /// Nothing by default.
+    fn prepare_recap(&self, _next: &NextRecap) {}
+
     /// The talk the learner was in is over: work held back so as not to slow
     /// it down can go ahead. Nothing by default.
     fn talk_over(&self) {}
+
+    /// Keeps the model for the assessment about to be worked out, from its
+    /// first judge to its last, until the guard is dropped: nothing less
+    /// urgent is let in between them, though a talk still goes first. Nothing
+    /// to keep by default.
+    fn hold_for_assessment(&self) -> Option<Held> {
+        None
+    }
 
     /// A free conversation's first line. `pitch` is what every reply of the
     /// session is told about the learner, so the engine can warm the prompt
@@ -2787,7 +2854,16 @@ pub trait TutorEngine: Send + Sync {
     /// The learner's `answers`, each with its grammar mistakes fixed and
     /// otherwise word for word, for the recap's one fix. `None` without a
     /// judge; an error when its answer could not be read.
-    fn correct(&self, _answers: &[&str]) -> EllaResult<Option<Vec<String>>> {
+    ///
+    /// `settled` is asked, as the corrected answers come in, whether those so
+    /// far already decide what the caller makes of them. Once it says so the
+    /// rest is not waited for, and only those come back: fewer lines than
+    /// answers.
+    fn correct(
+        &self,
+        _answers: &[&str],
+        _settled: &dyn Fn(&[String]) -> bool,
+    ) -> EllaResult<Option<Vec<String>>> {
         Ok(None)
     }
 
@@ -2966,6 +3042,15 @@ impl TutorEngine for DemoEngine {
 /// 35-45 MB, the placement chat's about 23 MB.
 const SAVED_SLOTS_KEPT: usize = 6;
 
+/// How many judges' instructions are kept, apart from the talks', so keeping
+/// them never costs a talk its own: the correction's, the scoring's at the
+/// learner's step, and one more, the placement's or the step before's. Each is
+/// 6-15 MB.
+const SAVED_JUDGES_KEPT: usize = 3;
+
+/// The start of the name of a file that keeps a judge's instructions.
+const JUDGE_FILE: &str = "ella-judge-";
+
 /// Slots llama-server has saved to disk: a talk's instructions, evaluated
 /// once and kept, so that the next talk like it, even after a restart, only
 /// evaluates what is its own: a free talk's aim, any talk's opening line.
@@ -2973,6 +3058,10 @@ const SAVED_SLOTS_KEPT: usize = 6;
 /// On a laptop's CPU a talk's whole instructions take 10-50 seconds to
 /// evaluate, and the talk's first reply waits for them. A restore reads a
 /// file instead.
+///
+/// A judge's instructions are kept the same way, the system message every ask
+/// of it starts with (see `LocalEngine::judge_aside`), so the recap waits for
+/// the model to read the talk and not its 160-400 tokens of instructions too.
 struct SlotStore {
     dir: PathBuf,
     /// Which model and which build of the server the slots belong to, asked
@@ -3209,9 +3298,15 @@ impl SlotStore {
         self.prune(&names);
     }
 
-    /// Keeps the files just used, and the most recently used of the others,
-    /// up to `SAVED_SLOTS_KEPT` in all.
+    /// Keeps the files just used, and the most recently used of the others
+    /// like them, up to `SAVED_SLOTS_KEPT` talks' in all, or
+    /// `SAVED_JUDGES_KEPT` judges'. Talks' and judges' are counted apart, and
+    /// neither is ever pruned to make room for the other.
     fn prune(&self, current: &[String]) {
+        let Some(judges) = current.first().map(|name| name.starts_with(JUDGE_FILE)) else {
+            return;
+        };
+        let kept = if judges { SAVED_JUDGES_KEPT } else { SAVED_SLOTS_KEPT };
         let Ok(entries) = fs::read_dir(&self.dir) else {
             return;
         };
@@ -3219,16 +3314,68 @@ impl SlotStore {
             .filter_map(Result::ok)
             .filter(|entry| {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                name.starts_with("ella-") && name.ends_with(".bin") && !current.contains(&name)
+                name.starts_with("ella-")
+                    && name.ends_with(".bin")
+                    && name.starts_with(JUDGE_FILE) == judges
+                    && !current.contains(&name)
             })
             .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
             .collect();
         others.sort_by(|left, right| right.0.cmp(&left.0));
-        for (_, path) in others
-            .into_iter()
-            .skip(SAVED_SLOTS_KEPT.saturating_sub(current.len()))
-        {
+        for (_, path) in others.into_iter().skip(kept.saturating_sub(current.len())) {
             let _ = fs::remove_file(path);
+        }
+    }
+
+    /// The file a judge's `instructions` are kept in. `None` where the server
+    /// keeps no slots, or would not say which model it runs.
+    fn judge_file(&self, client: &Client, root: &str, instructions: &str) -> Option<String> {
+        if self.refused.load(Ordering::Relaxed) {
+            return None;
+        }
+        let identity = self.identity(client, root)?;
+        Some(Self::file_name(identity, "judge", instructions))
+    }
+
+    /// Puts the instructions kept as `name` back in the slot, if they were
+    /// kept: how many tokens of them came back.
+    fn restore(&self, client: &Client, root: &str, slot: i32, name: &str) -> Option<u64> {
+        let path = self.dir.join(name);
+        if !path.is_file() {
+            return None;
+        }
+        let started = Instant::now();
+        match slot_action(client, root, slot, "restore", name) {
+            Ok(body) => {
+                eprintln!(
+                    "[LATENCY]     judge> restored {name} ({} tokens) in {:.0}ms",
+                    body["n_restored"],
+                    started.elapsed().as_secs_f64() * 1_000.0
+                );
+                touch(&path);
+                Some(body["n_restored"].as_u64().unwrap_or_default())
+            }
+            Err(error) => {
+                // Read again, and kept afresh: see `prime`.
+                eprintln!("[LATENCY]     judge> could not restore {name}: {error}");
+                let _ = fs::remove_file(&path);
+                None
+            }
+        }
+    }
+
+    /// Keeps what the slot holds as `name`. The caller holds `saving` from
+    /// the request that read it to here.
+    fn keep(&self, client: &Client, root: &str, slot: i32, name: &str) {
+        match slot_action(client, root, slot, "save", name) {
+            Ok(body) => {
+                eprintln!("[LATENCY]     judge> kept {name} ({} tokens)", body["n_saved"]);
+                self.prune(&[name.to_owned()]);
+            }
+            Err(error) => {
+                eprintln!("[LATENCY]     judge> the server keeps no slots, so every judge reads its instructions: {error}");
+                self.refused.store(true, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -3378,9 +3525,74 @@ fn read_in_pieces(
     Ok(errand.give_way())
 }
 
+/// `read_in_pieces` for a judge, whose instructions are kept between asks
+/// (see `SlotStore`): when `restored` they are in the slot already, and the
+/// reading starts after them, since a piece shorter than what the slot holds
+/// would have the server throw the rest of it away. When they were not, they
+/// are kept as `keep` once read, before the rest of the prompt goes in. The
+/// prompt tokens each piece had read are added to `timing`.
+#[allow(clippy::too_many_arguments)]
+fn read_judge_in_pieces(
+    client: &Client,
+    url: &str,
+    root: &str,
+    slot: i32,
+    messages: &[Value],
+    keep: Option<(&SlotStore, &str)>,
+    restored: bool,
+    errand: &ErrandTurn<'_>,
+    timing: &mut JudgeTiming,
+) -> EllaResult<Option<GiveWay>> {
+    for piece in pieces_of(messages) {
+        if restored && piece.len() == 1 {
+            continue;
+        }
+        if let Some(why) = errand.give_way() {
+            return Ok(Some(why));
+        }
+        // The instructions alone, read whole: kept now, with no talk's request
+        // let in between this one and the save.
+        let keeping = keep.filter(|_| !restored && piece.len() == 1 && piece[0] == messages[0]);
+        let _saving = keeping.map(|(slots, _)| slots.saving.lock().unwrap_or_else(PoisonError::into_inner));
+        if keeping.is_some() {
+            if let Some(why) = errand.give_way() {
+                return Ok(Some(why));
+            }
+        }
+        let read: Value = client
+            .post(url)
+            .json(&json!({
+                "model": "local",
+                "messages": piece,
+                "max_tokens": 1,
+                "temperature": 0.0,
+                "stream": false,
+                "cache_prompt": true,
+                "id_slot": slot,
+            }))
+            .send()?
+            .error_for_status()?
+            .json()?;
+        timing.read_tokens += read["timings"]["prompt_n"].as_u64().unwrap_or_default();
+        if let Some((slots, name)) = keeping {
+            slots.keep(client, root, slot, name);
+        }
+    }
+    Ok(errand.give_way())
+}
+
+/// What a judge makes of its answer so far, as it streams in: `Some` once it
+/// has all it needs, and the rest is not waited for.
+type Settle<'a, T> = Option<&'a dyn Fn(&str) -> Option<T>>;
+
 /// What came of an errand's streamed request.
-enum Answer {
-    Written { text: String, evaluated: Option<i64> },
+enum Answer<T> {
+    /// The whole answer, how many prompt tokens the server read for it, and
+    /// how many it wrote.
+    Written { text: String, read: u64, written: u64 },
+    /// Enough of the answer, by the judge's own reckoning, so the rest was not
+    /// waited for: dropped, as for a talk (below).
+    Settled { value: T, read: u64, written: u64 },
     /// It stopped partway to let something else have the model. Dropping the
     /// response closes the connection, and llama-server stops writing: the M1
     /// took the next request 0.4 s after one was dropped mid-answer.
@@ -3388,11 +3600,20 @@ enum Answer {
 }
 
 /// Sends `body`, a streamed chat request, and gathers what it writes, asking
-/// at every line whether to give way.
-fn stream_answer(client: &Client, url: &str, body: &Value, errand: &ErrandTurn<'_>) -> EllaResult<Answer> {
+/// at every line whether to give way, and with every piece of the answer
+/// whether `settle` makes enough of it already. With `timings_per_token` in
+/// the request, every piece says how much the server has read and written,
+/// so an answer stopped early still does.
+fn stream_answer<T>(
+    client: &Client,
+    url: &str,
+    body: &Value,
+    errand: &ErrandTurn<'_>,
+    settle: Settle<'_, T>,
+) -> EllaResult<Answer<T>> {
     let response = client.post(url).json(body).send()?.error_for_status()?;
     let mut text = String::new();
-    let mut evaluated = None;
+    let (mut read, mut written, mut pieces) = (0, 0, 0);
     for line in BufReader::new(response).lines() {
         if let Some(why) = errand.give_way() {
             return Ok(Answer::GaveWay(why));
@@ -3408,14 +3629,32 @@ fn stream_answer(client: &Client, url: &str, body: &Value, errand: &ErrandTurn<'
         let Ok(chunk) = serde_json::from_str::<Value>(data) else {
             continue;
         };
-        if let Some(prompt_n) = chunk["timings"]["prompt_n"].as_i64() {
-            evaluated = Some(prompt_n);
+        if let Some(prompt_n) = chunk["timings"]["prompt_n"].as_u64() {
+            read = prompt_n;
+        }
+        if let Some(predicted_n) = chunk["timings"]["predicted_n"].as_u64() {
+            written = predicted_n;
         }
         if let Some(delta) = chunk["choices"][0]["delta"]["content"].as_str() {
+            if delta.is_empty() {
+                continue;
+            }
             text.push_str(delta);
+            pieces += 1;
+            if let Some(value) = settle.and_then(|settle| settle(&text)) {
+                return Ok(Answer::Settled {
+                    value,
+                    read,
+                    written: written.max(pieces),
+                });
+            }
         }
     }
-    Ok(Answer::Written { text, evaluated })
+    Ok(Answer::Written {
+        text,
+        read,
+        written: written.max(pieces),
+    })
 }
 
 pub struct LocalEngine {
@@ -3646,8 +3885,25 @@ impl TutorEngine for LocalEngine {
         }
     }
 
+    fn prepare_recap(&self, next: &NextRecap) {
+        let judge = |instructions: String| self.prepare_prompt_as(Errand::PrepareRecap, "judge", instructions);
+        match next {
+            NextRecap::Talk { skills } => {
+                if !skills.is_empty() {
+                    judge(score_prompt(skills));
+                }
+                judge(CORRECTION_PROMPT.to_owned());
+            }
+            NextRecap::Placement => judge(PLACEMENT_ASSESSOR_PROMPT.to_owned()),
+        }
+    }
+
     fn talk_over(&self) {
         self.queue.talk_over();
+    }
+
+    fn hold_for_assessment(&self) -> Option<Held> {
+        Some(self.queue.hold(Errand::Assess))
     }
 
     /// Let go of every errand waiting its turn, so none of them holds the
@@ -3689,7 +3945,7 @@ impl TutorEngine for LocalEngine {
                 ),
             }),
         ];
-        self.judge_aside("read a level off the placement", request, 80, None, read_placement)
+        self.judge_aside("place", "read a level off the placement", request, 80, None, read_placement, None)
             .map(Some)
     }
 
@@ -3711,11 +3967,19 @@ impl TutorEngine for LocalEngine {
             .map(|message| message.content.as_str())
             .collect();
         // A quote per claim makes the answer longer than a bare score did.
-        self.judge_aside("score the talk", request, 320, None, |value| read_scores(value, skills, &learner))
-            .map(Some)
+        self.judge_aside(
+            "score",
+            "score the talk",
+            request,
+            320,
+            None,
+            |value| read_scores(value, skills, &learner),
+            None,
+        )
+        .map(Some)
     }
 
-    fn correct(&self, answers: &[&str]) -> EllaResult<Option<Vec<String>>> {
+    fn correct(&self, answers: &[&str], settled: &dyn Fn(&[String]) -> bool) -> EllaResult<Option<Vec<String>>> {
         if answers.is_empty() {
             return Ok(Some(Vec::new()));
         }
@@ -3738,9 +4002,28 @@ impl TutorEngine for LocalEngine {
         // The answer is the answers again, so its budget grows with them.
         let words: usize = answers.iter().map(|answer| answer.split_whitespace().count()).sum();
         let budget = (words * 2 + 12 * answers.len() + 24) as u32;
-        self.judge_aside("correct the answers", request, budget, Some(schema), |value| {
-            read_corrections(value, answers.len())
-        })
+        // On a laptop's CPU each corrected answer is seconds of the recap's
+        // wait, so `settled` is asked as each one comes in. The lines it has
+        // already said no to are not put to it again, even when the answer
+        // starts over after a talk.
+        let asked = Cell::new(0);
+        let settle = |text: &str| {
+            let lines = lines_so_far(text);
+            if lines.len() <= asked.get() || lines.len() >= answers.len() {
+                return None;
+            }
+            asked.set(lines.len());
+            settled(&lines).then_some(lines)
+        };
+        self.judge_aside(
+            "correct",
+            "correct the answers",
+            request,
+            budget,
+            Some(schema),
+            |value| read_corrections(value, answers.len()),
+            Some(&settle),
+        )
         .map(Some)
     }
 
@@ -4252,28 +4535,79 @@ impl LocalEngine {
     /// while no talk is open, with its prompt read a piece at a time and its
     /// answer streamed, so a talk opened while it runs waits for the piece in
     /// hand rather than all of it. See `ModelQueue`. Stopped, it starts again
-    /// once the talk is over, from whatever of its prompt the slot still holds.
+    /// once the talk is over.
+    ///
+    /// Its instructions, the system message it starts with, are the same
+    /// every time it is asked, or for a while (the scoring's change with the
+    /// learner's step), so they are kept like a talk's (see `SlotStore`): read
+    /// and kept the first time, restored in milliseconds every time after,
+    /// before the rest is read. The prompt itself is unchanged.
+    ///
+    /// `settle`, when given, is asked as the answer streams in whether what
+    /// has come is enough already; once it is, the rest is not waited for.
+    ///
+    /// `name` is the judge's, for the assessment's telemetry
+    /// (`telemetry::record_judge`).
+    #[allow(clippy::too_many_arguments)]
     fn judge_aside<T>(
         &self,
+        name: &'static str,
         label: &str,
         messages: Vec<Value>,
         max_tokens: u32,
         schema: Option<Value>,
         read: impl Fn(&Value) -> Option<T>,
+        settle: Settle<'_, T>,
     ) -> EllaResult<T> {
         let response_format = match schema {
             Some(schema) => json!({"type": "json_object", "schema": schema}),
             None => json!({"type": "json_object"}),
         };
         let url = format!("{}/chat/completions", self.llm_base_url.trim_end_matches('/'));
+        let root = self
+            .llm_base_url
+            .trim_end_matches('/')
+            .trim_end_matches("/v1")
+            .to_owned();
+        let asked = Instant::now();
+        let mut timing = JudgeTiming {
+            judge: name,
+            ..JudgeTiming::default()
+        };
+        let kept = self.slots.as_deref().and_then(|slots| {
+            let instructions = messages.first()?["content"].as_str()?;
+            Some((slots, slots.judge_file(&self.client, &root, instructions)?))
+        });
+        let mut waited = false;
         let mut attempt = 0;
         let mut failure = String::new();
         let outcome = self.queue.run(Errand::Assess, |errand| {
             let started = Instant::now();
-            match read_in_pieces(&self.client, &url, self.llm_slot, &messages, errand) {
+            if !waited {
+                waited = true;
+                timing.waited_ms = (asked.elapsed().as_secs_f64() * 1_000.0).round() as u64;
+            }
+            let restored = kept
+                .as_ref()
+                .and_then(|(slots, file)| slots.restore(&self.client, &root, self.llm_slot, file));
+            if restored.is_some() {
+                timing.restored_tokens = restored;
+            }
+            match read_judge_in_pieces(
+                &self.client,
+                &url,
+                &root,
+                self.llm_slot,
+                &messages,
+                kept.as_ref().map(|(slots, file)| (*slots, file.as_str())),
+                restored.is_some(),
+                errand,
+                &mut timing,
+            ) {
                 Ok(None) => {}
                 Ok(Some(why)) => {
                     eprintln!("[LATENCY]     judge> {label}: gave way ({why:?}) while reading its prompt");
+                    timing.gave_way += 1;
                     return Step::GaveWay;
                 }
                 Err(error) => return Step::Done(Err(error)),
@@ -4290,23 +4624,36 @@ impl LocalEngine {
                         "max_tokens": max_tokens,
                         "stream": true,
                         "stream_options": {"include_usage": true},
+                        "timings_per_token": true,
                         "cache_prompt": true,
                         "id_slot": self.llm_slot,
                         "response_format": response_format,
                     }),
                     errand,
+                    settle,
                 );
                 let took_ms = started.elapsed().as_secs_f64() * 1_000.0;
                 match answer {
                     Ok(Answer::GaveWay(why)) => {
                         attempt -= 1;
+                        timing.gave_way += 1;
                         eprintln!("[LATENCY]     judge> {label}: gave way ({why:?}) while answering");
                         return Step::GaveWay;
                     }
-                    Ok(Answer::Written { text, evaluated }) => {
+                    Ok(Answer::Settled { value, read: evaluated, written }) => {
+                        timing.read_tokens += evaluated;
+                        timing.written_tokens += written;
+                        timing.stopped_early = true;
                         eprintln!(
-                            "[LATENCY]     judge> {label}: attempt {attempt} took {took_ms:.0}ms (evaluated {} prompt tokens last): {}",
-                            evaluated.map_or_else(|| "?".into(), |n| n.to_string()),
+                            "[LATENCY]     judge> {label}: attempt {attempt} had all it needed after {took_ms:.0}ms ({written} tokens written), so the rest was not waited for"
+                        );
+                        return Step::Done(Ok(value));
+                    }
+                    Ok(Answer::Written { text, read: evaluated, written }) => {
+                        timing.read_tokens += evaluated;
+                        timing.written_tokens += written;
+                        eprintln!(
+                            "[LATENCY]     judge> {label}: attempt {attempt} took {took_ms:.0}ms (evaluated {evaluated} prompt tokens last): {}",
                             text.trim()
                         );
                         if let Some(read) = json_object_in(&text).as_ref().and_then(&read) {
@@ -4322,6 +4669,10 @@ impl LocalEngine {
             }
             Step::Done(Err(EllaError::Engine(format!("The model could not {label}: {failure}"))))
         });
+        timing.attempts = attempt;
+        timing.ms = (asked.elapsed().as_secs_f64() * 1_000.0).round() as u64;
+        timing.status = if matches!(outcome, Some(Ok(_))) { "ok" } else { "error" };
+        record_judge(timing);
         outcome.unwrap_or_else(|| Err(EllaError::Engine("Ella is closing.".into())))
     }
 
@@ -4333,7 +4684,15 @@ impl LocalEngine {
     /// Given way to an assessment, it waits for it and carries on. Given way to
     /// a talk, it is dropped: the talk changes what is likely next, and the
     /// window asks again when it next shows Home.
+    ///
+    /// A judge's instructions are got ready the same way, as `Errand::PrepareRecap`
+    /// so the talk's go first; kept under the name the judge looks for (see
+    /// `SlotStore::judge_file`).
     fn prepare_prompt(&self, kind: &'static str, prompt: String) {
+        self.prepare_prompt_as(Errand::Prepare, kind, prompt);
+    }
+
+    fn prepare_prompt_as(&self, errand_kind: Errand, kind: &'static str, prompt: String) {
         let Some(slots) = self.slots.clone() else {
             return;
         };
@@ -4354,7 +4713,7 @@ impl LocalEngine {
         let slot = self.llm_slot;
         let queue = Arc::clone(&self.queue);
         thread::spawn(move || {
-            queue.run(Errand::Prepare, |errand| {
+            queue.run(errand_kind, |errand| {
                 slots.prepare(&client, &url, &root, slot, kind, &prompt, errand)
             });
             slots.preparing.lock().unwrap_or_else(PoisonError::into_inner).remove(&key);
@@ -4971,6 +5330,57 @@ mod tests {
                 "not-a-slot.txt",
             ]
         );
+    }
+
+    #[test]
+    fn a_judges_instructions_and_a_talks_are_kept_apart() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SlotStore::new(root.path().to_path_buf());
+        let now = SystemTime::now();
+        let talks: Vec<String> = (0..SAVED_SLOTS_KEPT).map(|index| format!("ella-topic-{index}.bin")).collect();
+        let judges: Vec<String> = (0..5).map(|index| format!("{JUDGE_FILE}{index}.bin")).collect();
+        for (age, name) in talks.iter().chain(&judges).enumerate() {
+            let path = root.path().join(name);
+            fs::write(&path, b"slot").unwrap();
+            let file = fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(now - Duration::from_secs(age as u64 + 1)).unwrap();
+        }
+        let left = || {
+            let mut names: Vec<String> = fs::read_dir(root.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+
+        // A judge kept: only judges' files make room for it.
+        let kept = format!("{JUDGE_FILE}new.bin");
+        fs::write(root.path().join(&kept), b"slot").unwrap();
+        store.prune(&[kept.clone()]);
+        let mut expected: Vec<String> = talks.clone();
+        expected.extend([judges[0].clone(), judges[1].clone(), kept]);
+        expected.sort();
+        assert_eq!(left(), expected, "every talk's file stays");
+
+        // A talk kept: no judge's file goes for it.
+        fs::write(root.path().join("ella-chore-new.bin"), b"slot").unwrap();
+        store.prune(&["ella-chore-new.bin".into()]);
+        let after = left();
+        assert_eq!(after.iter().filter(|name| name.starts_with(JUDGE_FILE)).count(), SAVED_JUDGES_KEPT);
+        assert_eq!(after.iter().filter(|name| !name.starts_with(JUDGE_FILE)).count(), SAVED_SLOTS_KEPT);
+        assert!(!after.contains(&talks[SAVED_SLOTS_KEPT - 1]), "the oldest talk's went");
+    }
+
+    #[test]
+    fn the_corrections_whole_so_far_are_read_off_an_unfinished_answer() {
+        assert!(lines_so_far("").is_empty());
+        assert!(lines_so_far("{\"lines\": [\"It has a big").is_empty(), "a line still being written");
+        assert_eq!(
+            lines_so_far("{\"lines\": [\"It has a big playground.\", \"We play \\\"gully\\\" cricket\",\n \"And"),
+            ["It has a big playground.", "We play \"gully\" cricket"]
+        );
+        assert_eq!(lines_so_far("{\"lines\":[\" a back\\\\slash \",\"x\"]}"), ["a back\\slash", "x"]);
     }
 
     #[test]
@@ -6905,6 +7315,12 @@ mod errand_tests {
 
     const JUDGED: &str = r#"{"level": "B1", "closing": "Good job, Asha!"}"#;
     const REPLY: &str = "That sounds lovely. Which dish did you like best there?";
+    const SCHOOL: [&str; 3] = [
+        "My school is very big and it have a big playground",
+        "We play football there because it is fun",
+        "Our teacher is very kind and she helps everyone",
+    ];
+    const CORRECTED: &str = r#"{"lines": ["My school is very big and it has a big playground", "We play football there because it is fun", "Our teacher is very kind and she helps everyone"]}"#;
 
     struct FakeLlama {
         url: String,
@@ -7032,8 +7448,13 @@ mod errand_tests {
                 }
             } else if body["stream"] == true {
                 let judged = body.get("response_format").is_some();
+                let instructions = body["messages"][0]["content"].as_str().unwrap_or_default();
                 let scripted = (!judged).then(|| self.replies.lock().unwrap().pop_front()).flatten();
                 let (text, parts) = match &scripted {
+                    _ if instructions == CORRECTION_PROMPT => (CORRECTED, self.pace.parts),
+                    _ if instructions.starts_with("You check a spoken-English practice talk") => {
+                        (r#"{"shown": []}"#, self.pace.parts)
+                    }
                     _ if judged => (JUDGED, self.pace.parts),
                     Some(reply) => (reply.as_str(), 4),
                     None => (REPLY, 4),
@@ -7513,6 +7934,126 @@ mod errand_tests {
         engine.talk_over();
         thread::sleep(Duration::from_millis(500));
         assert_eq!(fake.kept().len(), 1, "only the talk that opened kept its instructions: {:?}", fake.kept());
+    }
+
+    #[test]
+    fn a_judge_keeps_its_instructions_and_next_time_reads_only_what_follows_them() {
+        let fake = FakeLlama::start(pace(5, 5, 4));
+        let engine = fake.engine(Duration::from_secs(60));
+        engine.place("Asha", &placement_chat()).unwrap();
+        let kept: Vec<String> = fake.kept().into_iter().filter(|name| name.starts_with(JUDGE_FILE)).collect();
+        assert_eq!(kept.len(), 1, "{:?}", fake.kept());
+        let seen = fake.seen();
+        let save = seen.iter().position(|seen| seen.path.ends_with("action=save")).unwrap();
+        assert_eq!(
+            seen[save - 1].body["messages"],
+            json!([{"role": "system", "content": PLACEMENT_ASSESSOR_PROMPT}]),
+            "kept as soon as its instructions alone were read"
+        );
+
+        let before = fake.completions().len();
+        engine.place("Asha", &placement_chat()).unwrap();
+        assert!(fake
+            .seen()
+            .iter()
+            .any(|seen| seen.path.ends_with("action=restore") && seen.body["filename"] == kept[0]));
+        let again = &fake.completions()[before..];
+        assert!(
+            again.iter().all(|seen| seen.body["messages"].as_array().unwrap().len() == 2),
+            "nothing short of the instructions is read again, which would throw them out of the slot"
+        );
+        assert_eq!(fake.kept().iter().filter(|name| name.starts_with(JUDGE_FILE)).count(), 1);
+    }
+
+    #[test]
+    fn a_correction_is_read_only_as_far_as_its_caller_needs() {
+        let fake = FakeLlama::start(pace(5, 30, 16));
+        let engine = fake.engine(Duration::from_secs(60));
+        let asked = Mutex::new(Vec::new());
+        let lines = engine
+            .correct(&SCHOOL, &|lines| {
+                asked.lock().unwrap().push(lines.len());
+                true
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(lines, [SCHOOL[0].replace("it have", "it has")]);
+        assert_eq!(*asked.lock().unwrap(), [1], "asked once the first line was whole");
+        eventually("the rest of the answer was not waited for", || {
+            fake.completions().iter().any(|seen| seen.dropped && seen.body["stream"] == true)
+        });
+
+        // Not settled, it reads every line, and the whole answer.
+        let lines = engine.correct(&SCHOOL, &|_| false).unwrap().unwrap();
+        assert_eq!(lines.len(), SCHOOL.len());
+    }
+
+    #[test]
+    fn the_next_recaps_judges_are_got_ready_after_the_next_talk() {
+        let fake = FakeLlama::start(pace(5, 5, 4));
+        let engine = fake.engine(Duration::from_secs(60));
+        let topic = crate::domain::topics()[0].clone();
+        let skills = vec![
+            Scorable { key: "A2:U1-VOC-01".into(), text: "I can name the food I eat every day.".into() },
+            Scorable { key: "A2:U1-GRA-01".into(), text: "I can say what I usually do with the present simple.".into() },
+        ];
+        engine.prepare_recap(&NextRecap::Talk { skills: skills.clone() });
+        engine.prepare(&NextTalk::Topic {
+            learner_name: "Asha".into(),
+            topic_id: topic.id.clone(),
+            topic_label: topic.label.clone(),
+            level: "A2".into(),
+        });
+        eventually("the talk's and both judges' instructions are kept", || fake.kept().len() == 3);
+        let judges: Vec<String> = fake.kept().into_iter().filter(|name| name.starts_with(JUDGE_FILE)).collect();
+        assert_eq!(judges.len(), 2, "the scoring's and the correction's");
+
+        // The recap's judges then restore their instructions rather than read them.
+        let before = fake.completions().len();
+        let scores = engine.score(&skills, &placement_chat()).unwrap().unwrap();
+        assert!(scores.is_empty());
+        engine.correct(&SCHOOL, &|_| false).unwrap();
+        let restored: Vec<String> = fake
+            .seen()
+            .iter()
+            .filter(|seen| seen.path.ends_with("action=restore"))
+            .map(|seen| seen.body["filename"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(judges.iter().all(|judge| restored.contains(judge)), "{restored:?}");
+        assert!(fake.completions()[before..].iter().all(|seen| seen.body["messages"].as_array().unwrap().len() == 2));
+        assert_eq!(fake.kept().len(), 3, "nothing kept twice");
+    }
+
+    #[test]
+    fn nothing_less_urgent_gets_the_model_between_an_assessments_judges() {
+        let fake = FakeLlama::start(pace(20, 5, 4));
+        let engine = fake.engine(Duration::from_secs(60));
+        let topic = crate::domain::topics()[0].clone();
+        let held = engine.hold_for_assessment();
+        engine.place("Asha", &placement_chat()).unwrap();
+        // Home is read between the judges, and asks for its talk to be got ready.
+        engine.prepare(&NextTalk::Topic {
+            learner_name: "Asha".into(),
+            topic_id: topic.id.clone(),
+            topic_label: topic.label.clone(),
+            level: "A2".into(),
+        });
+        thread::sleep(Duration::from_millis(150));
+        engine.correct(&SCHOOL, &|_| false).unwrap();
+        drop(held);
+        eventually("the talk is got ready once the assessment is over", || {
+            fake.kept().iter().any(|name| name.starts_with("ella-topic-"))
+        });
+
+        // A piece holds the start of its instructions, or all of them.
+        let judge = |seen: &Seen| {
+            let instructions = seen.body["messages"][0]["content"].as_str().unwrap_or_default();
+            PLACEMENT_ASSESSOR_PROMPT.starts_with(instructions) || CORRECTION_PROMPT.starts_with(instructions)
+        };
+        let asked = fake.completions();
+        let last_judged = asked.iter().rposition(judge).unwrap();
+        let first_prepared = asked.iter().position(|seen| !judge(seen)).unwrap();
+        assert!(last_judged < first_prepared, "the judges went first, back to back");
     }
 
     #[test]

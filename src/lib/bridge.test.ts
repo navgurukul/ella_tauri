@@ -51,6 +51,9 @@ describe("browser proof-of-concept bridge", () => {
     expect(summary.turns).toBe(3);
     expect(summary.headline).not.toHaveLength(0);
     expect(summary.encouragement).toBe("That is 1 conversation finished. Come back and talk to Ella again.");
+    // Ready as the talk closes, and the same as the notes the assessment keeps.
+    expect(summary.went_well).toEqual(["Gave reasons", "Told what happened"]);
+    expect((await bridge.assessSession(session.id)).notes?.went_well).toEqual(summary.went_well);
 
     const restored = await bridge.bootstrap();
     expect(restored.learner?.name).toBe("Asha");
@@ -58,6 +61,9 @@ describe("browser proof-of-concept bridge", () => {
     expect(restored.progress).toMatchObject({ talks_finished: 1, answers: 3, finished_topics: ["street-food"] });
     expect(restored.progress.days).toHaveLength(1);
     expect(restored.progress.days[0]).toMatchObject({ talks: 1, answers: 3 });
+
+    // A talk too short for notes has nothing to say went well.
+    expect((await talk(bridge, ["yes", "samosa", "good"])).went_well).toEqual([]);
   });
 
   it("requires an actual transcript in demo voice mode", async () => {
