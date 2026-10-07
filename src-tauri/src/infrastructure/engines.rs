@@ -2064,8 +2064,8 @@ const QUESTION_FILLER: &[&str] = &[
     "about", "with", "from", "there", "here", "sir", "madam", "ok", "okay",
 ];
 
-/// The question a reply ends on, if it ends on one. Ella's prompt asks for
-/// exactly one question at the end, so this is the whole of what she asked.
+/// The question a reply ends on, if it ends on one: the one Ella's prompt asks
+/// her to end on, and the one the learner answers.
 pub(crate) fn trailing_question(reply: &str) -> Option<&str> {
     let end = reply.rfind('?')?;
     let start = reply[..end].rfind(['.', '!', '?']).map_or(0, |index| index + 1);
@@ -2083,16 +2083,53 @@ fn question_words(question: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// `Some(earlier)` when this reply closes on a question Ella has already asked.
-///
-/// The cab transcript is what this exists for: Ella asked "How long will the
-/// trip take?" on four turns running while the learner objected twice, and
-/// "never ask a question you have already asked" is already in the prompt and
-/// did nothing. Compared as word sets, not strings, because the repeat comes
-/// back reworded — "How long will the trip take?" then "How long will the trip
-/// to the airport take?"
-fn repeated_question(reply: &str, earlier: &[String]) -> Option<String> {
-    let asking = question_words(trailing_question(reply)?);
+/// The reply's sentences, each with the mark that ends it. A mark ends a
+/// sentence only where a space or the end of the reply follows it, so
+/// "Rs 2.5" and "Wait..." stay whole.
+fn sentences(reply: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    let mut start = 0;
+    let mut characters = reply.char_indices().peekable();
+    while let Some((index, mark)) = characters.next() {
+        if !matches!(mark, '.' | '!' | '?') {
+            continue;
+        }
+        if characters.peek().is_some_and(|(_, next)| !next.is_whitespace()) {
+            continue;
+        }
+        let end = index + mark.len_utf8();
+        let sentence = reply[start..end].trim();
+        if !sentence.is_empty() {
+            found.push(sentence);
+        }
+        start = end;
+    }
+    let rest = reply[start..].trim();
+    if !rest.is_empty() {
+        found.push(rest);
+    }
+    found
+}
+
+/// Every question Ella has asked so far, wherever it fell in her reply. Her
+/// prompt asks for one question, at the end, but she often asks two: "Where
+/// did you find it? What kind of food does this place serve?" Both were put
+/// to the learner, so both are asked.
+fn asked_questions(messages: &[Message]) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|message| message.speaker == Speaker::Ella)
+        .flat_map(|message| sentences(&message.content))
+        .filter(|sentence| sentence.ends_with('?'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The earlier question this one asks again, if any. Compared as word sets,
+/// not strings, because the repeat comes back reworded — "How long will the
+/// trip take?" then "How long will the trip to the airport take?"
+fn asked_before<'a>(question: &str, earlier: &'a [String]) -> Option<&'a String> {
+    let asking = question_words(question);
     // One content word is too little to call: "Really?" is not a repeat.
     if asking.len() < 2 {
         return None;
@@ -2115,7 +2152,36 @@ fn repeated_question(reply: &str, earlier: &[String]) -> Option<String> {
         // Or three quarters in common, for a repeat that swaps a word rather
         // than adding one.
         union > 0 && shared * 4 >= union * 3
-    }).cloned()
+    })
+}
+
+/// `Some(earlier)` when this reply closes on a question Ella has already asked.
+///
+/// The cab transcript is what this exists for: Ella asked "How long will the
+/// trip take?" on four turns running while the learner objected twice, and
+/// "never ask a question you have already asked" is already in the prompt and
+/// did nothing.
+fn repeated_question(reply: &str, earlier: &[String]) -> Option<String> {
+    asked_before(trailing_question(reply)?, earlier).cloned()
+}
+
+/// The reply without the questions in it that Ella has already asked,
+/// wherever they fall. `None` when nothing in it repeats, so a reply that is
+/// fine comes back exactly as written and the audio synthesized for it still
+/// matches; an empty string when every sentence in it was a repeat.
+///
+/// A repeat is not always last. A street-food talk's rewrite, made because
+/// the first try ended on "Where did you find it?", still asked it — just not
+/// last — after the learner had named the restaurant, and a Kunafa talk asked
+/// "What did it look like?" again ahead of a new question on the next turn.
+fn without_repeated_questions(reply: &str, earlier: &[String]) -> Option<String> {
+    let all = sentences(reply);
+    let kept: Vec<&str> = all
+        .iter()
+        .copied()
+        .filter(|sentence| !(sentence.ends_with('?') && asked_before(sentence, earlier).is_some()))
+        .collect();
+    (kept.len() < all.len()).then(|| kept.join(" "))
 }
 
 /// Case-insensitive search for an ASCII needle, returning a byte offset into
@@ -3551,13 +3617,8 @@ impl TutorEngine for LocalEngine {
         // for four turns, so it is caught here and asked again rather than
         // spoken.
         let Some(ledger) = request.chore.as_ref().and_then(|c| c.ledger.as_ref()) else {
-            let asked_before: Vec<String> = request
-                .messages
-                .iter()
-                .filter(|message| message.speaker == Speaker::Ella)
-                .filter_map(|message| trailing_question(&message.content).map(str::to_owned))
-                .collect();
-            if let Some(already) = repeated_question(&text, &asked_before) {
+            let asked = asked_questions(&request.messages);
+            if let Some(already) = repeated_question(&text, &asked) {
                 eprintln!("[LATENCY]     llm> repeated question: {already:?} - regenerating once");
                 let corrective = format!(
                     "You have already asked them this earlier in the conversation: \"{already}\" \
@@ -3571,8 +3632,16 @@ impl TutorEngine for LocalEngine {
                 drop(pipeline.take());
                 let second = self.stream_once(&system, &history, Some(&corrective), None)?;
                 let (retry_text, _) = take_signal(&second.text);
-                // Once only. A second repeat is left alone: another generation
-                // costs the learner more silence than the repeat costs them.
+                // Once only. Whatever the second asks again is dropped rather
+                // than written a third time: another generation costs the
+                // learner more silence than the question is worth.
+                let retry_text = match without_repeated_questions(&retry_text, &asked) {
+                    Some(kept) => {
+                        eprintln!("[LATENCY]     llm> the rewrite asked again too - dropped from it");
+                        kept
+                    }
+                    None => retry_text,
+                };
                 if !retry_text.is_empty() {
                     return Ok(GeneratedReply {
                         text: retry_text,
@@ -3584,6 +3653,14 @@ impl TutorEngine for LocalEngine {
                         pending: None,
                     });
                 }
+            }
+            // A question asked again ahead of a new one is dropped without
+            // writing the reply again: what is left still ends on something
+            // new to answer. Nothing is dropped from a reply that is all
+            // repeats; it is said as it is.
+            if let Some(kept) = without_repeated_questions(&text, &asked).filter(|kept| !kept.is_empty()) {
+                eprintln!("[LATENCY]     llm> dropped a question asked earlier in the talk");
+                text = kept;
             }
             return Ok(GeneratedReply {
                 pending: PendingSpeech::matching(pipeline, &text),
@@ -5212,6 +5289,84 @@ mod ledger_tests {
     }
 
     #[test]
+    fn a_reply_splits_into_sentences_only_where_a_space_follows_the_mark() {
+        assert_eq!(
+            sentences("Oh, yummy! I bet it was crispy. Where did you find it? What kind of food is it?"),
+            ["Oh, yummy!", "I bet it was crispy.", "Where did you find it?", "What kind of food is it?"]
+        );
+        assert_eq!(
+            sentences("It cost Rs 2.5 lakh... really? Wait...what"),
+            ["It cost Rs 2.5 lakh...", "really?", "Wait...what"]
+        );
+        assert!(sentences("  ").is_empty());
+    }
+
+    #[test]
+    fn every_question_ella_asked_counts_not_only_the_last() {
+        // The Kunafa talk on the Windows laptop: its second reply asked two.
+        let messages = [
+            Message {
+                id: "0".into(),
+                speaker: Speaker::Ella,
+                content: "Hi Souvik! Tell me about the tastiest thing you ate this week. Where did you find it?".into(),
+                turn: 0,
+                created_at: "2026-10-05T06:10:29Z".into(),
+            },
+            Message {
+                id: "1".into(),
+                speaker: Speaker::Learner,
+                content: "I said I ate Kunafa this week. Which I ordered from Swiggy.".into(),
+                turn: 2,
+                created_at: "2026-10-05T06:11:17Z".into(),
+            },
+            Message {
+                id: "2".into(),
+                speaker: Speaker::Ella,
+                content: "That Kunafa sounds amazing! What did it taste like? What did it look like?".into(),
+                turn: 2,
+                created_at: "2026-10-05T06:11:17Z".into(),
+            },
+        ];
+        assert_eq!(
+            asked_questions(&messages),
+            ["Where did you find it?", "What did it taste like?", "What did it look like?"]
+        );
+    }
+
+    #[test]
+    fn a_question_asked_again_is_dropped_wherever_it_falls() {
+        let asked = vec!["Where did you find it?".to_owned()];
+        // The street-food rewrite on the Windows laptop, after the learner had
+        // said "the crispy corn in Barbecue Nation".
+        assert_eq!(
+            without_repeated_questions(
+                "Oh, yummy! I bet it was crispy and tasty. Where did you find it? What kind of food does this place serve?",
+                &asked
+            )
+            .as_deref(),
+            Some("Oh, yummy! I bet it was crispy and tasty. What kind of food does this place serve?")
+        );
+        // And the next turn of the Kunafa talk, which asked "What did it look
+        // like?" for the second time ahead of a new question.
+        let asked = vec!["What did it taste like?".to_owned(), "What did it look like?".to_owned()];
+        assert_eq!(
+            without_repeated_questions("Konafa sounds delightful! What did it look like? What kind of syrup was used?", &asked)
+                .as_deref(),
+            Some("Konafa sounds delightful! What kind of syrup was used?")
+        );
+        assert_eq!(
+            without_repeated_questions("Konafa sounds delightful! What kind of syrup was used?", &asked),
+            None,
+            "a reply that repeats nothing comes back as it was, so its audio still matches"
+        );
+        assert_eq!(
+            without_repeated_questions("What did it look like?", &asked).as_deref(),
+            Some(""),
+            "a reply that is nothing but a repeat leaves nothing, and the caller decides"
+        );
+    }
+
+    #[test]
     fn a_ledger_turn_message_never_ends_on_a_figure() {
         // Measured against the live 3B: with the number last, 5/5 replies opened
         // "Rs 550."; with this instruction last, 0/5 did.
@@ -6346,6 +6501,7 @@ mod errand_tests {
 
     use super::*;
     use crate::domain::{find_character, find_chore, LedgerTurn, WinCondition};
+    use std::collections::VecDeque;
     use std::net::{TcpListener, TcpStream};
 
     /// A request the stand-in took up, once it had answered it.
@@ -6394,10 +6550,19 @@ mod errand_tests {
         slot: Mutex<()>,
         slot_dir: PathBuf,
         model: String,
+        /// Replies to hand out in order, one per talk turn asked for, before
+        /// falling back to `REPLY`.
+        replies: Mutex<VecDeque<String>>,
     }
 
     impl FakeLlama {
         fn start(pace: Pace) -> Self {
+            Self::scripted(pace, &[])
+        }
+
+        /// A stand-in that writes these replies, in order, to the talk turns
+        /// it is asked for.
+        fn scripted(pace: Pace, replies: &[&str]) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
             let slots = tempfile::tempdir().unwrap();
@@ -6409,6 +6574,7 @@ mod errand_tests {
                 slot: Mutex::new(()),
                 slot_dir: slots.path().to_path_buf(),
                 model: model.path().display().to_string(),
+                replies: Mutex::new(replies.iter().map(|reply| (*reply).to_owned()).collect()),
             });
             thread::spawn(move || {
                 for stream in listener.incoming().flatten() {
@@ -6496,7 +6662,12 @@ mod errand_tests {
                 }
             } else if body["stream"] == true {
                 let judged = body.get("response_format").is_some();
-                let (text, parts) = if judged { (JUDGED, self.pace.parts) } else { (REPLY, 4) };
+                let scripted = (!judged).then(|| self.replies.lock().unwrap().pop_front()).flatten();
+                let (text, parts) = match &scripted {
+                    _ if judged => (JUDGED, self.pace.parts),
+                    Some(reply) => (reply.as_str(), 4),
+                    None => (REPLY, 4),
+                };
                 let streamed = stream_parts(&mut stream, text, parts, self.pace.part);
                 dropped = streamed.is_err();
                 streamed
@@ -6649,6 +6820,75 @@ mod errand_tests {
             assert!(started.elapsed() < Duration::from_secs(10), "never: {what}");
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// How many talk turns the stand-in was asked to write.
+    fn talk_turns(fake: &FakeLlama) -> usize {
+        fake.completions()
+            .iter()
+            .filter(|seen| seen.body["stream"] == true && seen.body.get("response_format").is_none())
+            .count()
+    }
+
+    /// The first turn of a street-food talk, whose opening asked where.
+    fn after_where(answer: &str) -> TutorRequest {
+        TutorRequest {
+            learner_name: "Souvik".into(),
+            topic_id: "street-food".into(),
+            topic_label: "Street food stories".into(),
+            messages: vec![said(
+                Speaker::Ella,
+                "Hi Souvik! Tell me about the tastiest thing you ate this week. Where did you find it?",
+                0,
+            )],
+            learner_text: answer.into(),
+            turn: 1,
+            chore: None,
+            pitch: Pitch::at("B2"),
+            placement: None,
+        }
+    }
+
+    #[test]
+    fn a_rewrite_that_asks_again_loses_the_repeat_instead_of_being_written_a_third_time() {
+        // The first turn of the street-food talk on the Windows laptop.
+        let fake = FakeLlama::scripted(
+            pace(5, 5, 4),
+            &[
+                "Oh, yummy! Where did you find it?",
+                "Oh, yummy! I bet it was crispy and tasty. Where did you find it? What kind of food does this place serve?",
+            ],
+        );
+        let engine = fake.engine(Duration::from_secs(60));
+        let reply = engine.reply(&after_where("I had the crispy corn in Barbecue Nation.")).unwrap();
+        assert_eq!(
+            reply.text,
+            "Oh, yummy! I bet it was crispy and tasty. What kind of food does this place serve?"
+        );
+        assert!(reply.regenerated);
+        assert_eq!(talk_turns(&fake), 2, "written twice, never three times");
+    }
+
+    #[test]
+    fn a_repeat_ahead_of_a_new_question_is_dropped_without_writing_the_reply_again() {
+        let fake = FakeLlama::scripted(
+            pace(5, 5, 4),
+            &["Crispy corn sounds great! Where did you find it? What made it so special?"],
+        );
+        let engine = fake.engine(Duration::from_secs(60));
+        let reply = engine.reply(&after_where("I had the crispy corn in Barbecue Nation.")).unwrap();
+        assert_eq!(reply.text, "Crispy corn sounds great! What made it so special?");
+        assert!(!reply.regenerated);
+        assert_eq!(talk_turns(&fake), 1);
+    }
+
+    #[test]
+    fn a_reply_that_asks_nothing_again_is_said_as_it_was_written() {
+        let fake = FakeLlama::scripted(pace(5, 5, 4), &["Barbecue Nation, nice! What made the crispy corn so special?"]);
+        let engine = fake.engine(Duration::from_secs(60));
+        let reply = engine.reply(&after_where("I had the crispy corn in Barbecue Nation.")).unwrap();
+        assert_eq!(reply.text, "Barbecue Nation, nice! What made the crispy corn so special?");
+        assert_eq!(talk_turns(&fake), 1);
     }
 
     #[test]
