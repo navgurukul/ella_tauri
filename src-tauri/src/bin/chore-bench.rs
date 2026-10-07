@@ -119,6 +119,26 @@ const LEDGER_UP_SCRIPT: &[ScriptLine] = &[
     ScriptLine { intent: "confirm", text: "Yes, three thousand five hundred is fine. Thank you, sir." },
 ];
 
+/// The deposit talk on the Windows test laptop (2026-10-07), the learner's
+/// lines as they reached the model; the second as Canary hears it when asked
+/// again without punctuation, not as Windows speech wrote it. Grumble told the
+/// tenant "You are holding my deposit", raised his own offer from Rs 500 to
+/// Rs 1000 straight after it was accepted, never closed the deal, and said "I
+/// will only return what I owe" in seven of his twelve replies.
+/// `--script deposit-windows`.
+const DEPOSIT_WINDOWS_SCRIPT: &[ScriptLine] = &[
+    ScriptLine { intent: "open", text: "I just wanted the refund." },
+    ScriptLine {
+        intent: "answers the role swap",
+        text: "How am I holding your deposit You are holding my deposit right I deposited the money to you and now I want a A refund of the defo deposits.",
+    },
+    ScriptLine { intent: "names a figure", text: "No, I would require at least three thousand five hundred." },
+    ScriptLine { intent: "asks why", text: "How do you owe five hundred?" },
+    ScriptLine { intent: "accepts the figure on the table", text: "Okay, so be it, return the RuPaid is five hundred to me." },
+    ScriptLine { intent: "confirms", text: "Okay, give it back." },
+    ScriptLine { intent: "thanks", text: "Thank you." },
+];
+
 const RUBRIC_SCRIPT: &[ScriptLine] = &[
     ScriptLine { intent: "open", text: "Hello. Can I show you this pen?" },
     ScriptLine { intent: "ask about needs", text: "What do you write with mostly, at work?" },
@@ -209,7 +229,8 @@ struct Options {
     /// the speaker live — a ledger chore holds them until the figure is checked.
     topic_id: Option<String>,
     /// "safety" swaps in `SAFETY_ESCALATION_SCRIPT`, "off-topic" swaps in
-    /// `OFF_TOPIC_SCRIPT`, regardless of chore/topic.
+    /// `OFF_TOPIC_SCRIPT`, regardless of chore/topic; "deposit-windows" swaps
+    /// in `DEPOSIT_WINDOWS_SCRIPT` for a chore.
     script: Option<String>,
     learner_name: String,
     output: Option<PathBuf>,
@@ -255,7 +276,7 @@ fn parse_options() -> Result<Options, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "chore-bench [--chore <id> | --topic <id>] [--script safety|off-topic] \
+                    "chore-bench [--chore <id> | --topic <id>] [--script safety|off-topic|deposit-windows] \
                      [--name <learner>] [--max-turns <n>] [--output <file.json>] [--list]"
                 );
                 process::exit(0);
@@ -550,6 +571,7 @@ fn run(options: &Options) -> Result<(), String> {
     let script = match options.script.as_deref() {
         Some("safety") => SAFETY_ESCALATION_SCRIPT,
         Some("off-topic") => OFF_TOPIC_SCRIPT,
+        Some("deposit-windows") => DEPOSIT_WINDOWS_SCRIPT,
         _ => script_for(&chore.id),
     };
     let mut turns = Vec::new();
@@ -628,6 +650,10 @@ fn run(options: &Options) -> Result<(), String> {
 
         if ended_with.is_some() {
             println!("\n  character ended the conversation: {:?}", ended_with.unwrap());
+            break;
+        }
+        if result.session_summary.is_some() {
+            println!("\n  the talk closed itself");
             break;
         }
     }
