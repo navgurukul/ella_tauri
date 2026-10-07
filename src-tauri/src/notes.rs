@@ -87,46 +87,78 @@ pub fn went_well(answers: &[&str], chore: Option<&ChoreRecap>) -> Vec<String> {
 /// word is preferred to one only added or dropped, and then the earliest.
 pub fn fix_from(answers: &[&str], corrected: &[String]) -> Option<Fix> {
     let said: Vec<Vec<Token>> = answers.iter().map(|answer| tokens_of(answer)).collect();
-    let mut found: Vec<((bool, usize, usize), Fix)> = Vec::new();
-    for line in corrected {
-        let fixed = tokens_of(line);
-        let Some((index, segments, _)) = said
-            .iter()
-            .enumerate()
-            .map(|(index, answer)| {
-                let segments = heard_alike(answer, &fixed, diff(answer, &fixed));
-                let similarity = similarity(answer, &fixed, &segments);
-                (index, segments, similarity)
-            })
-            .filter(|(_, _, similarity)| *similarity >= 0.6)
-            .max_by(|a, b| a.2.total_cmp(&b.2))
-        else {
-            continue;
-        };
-        let answer = &said[index];
-        let changed: usize = segments
-            .iter()
-            .filter(|segment| !segment.equal)
-            .map(|segment| segment.said.len() + segment.fixed.len())
-            .sum();
-        if changed == 0 || changed * 2 > answer.len().max(4) {
-            continue;
-        }
-        for (position, segment) in segments.iter().enumerate() {
-            if segment.equal || segment.said.len() > 3 || segment.fixed.len() > 3 {
-                continue;
-            }
-            let next = answer.get(segment.said.end);
-            if !fixes_grammar(&answer[segment.said.clone()], &fixed[segment.fixed.clone()], next) {
-                continue;
-            }
-            if let Some(fix) = phrase_around(answer, &fixed, &segments, position) {
-                let added_or_dropped = segment.said.is_empty() || segment.fixed.is_empty();
-                found.push(((added_or_dropped, index, segment.said.start), fix));
-            }
+    corrected
+        .iter()
+        .filter_map(|line| fixes_in(&said, line))
+        .flat_map(|(_, found)| found)
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, fix)| fix)
+}
+
+/// Whether `corrected`, the first of the corrected answers, already decide
+/// the fix `fix_from` makes of all of them, so the rest need not be waited
+/// for. They do once the best fix so far changes a word, rather than only
+/// adding or dropping one, and every answer before the one it is in has had
+/// its line: a line still to come corrects a later answer, and a fix in a
+/// later answer ranks below it. A line correcting an answer a second time
+/// could still outrank it, but the model is held by the schema to one line
+/// per answer, and writes them in order. Nothing to fix, or only a word to
+/// add or drop, is never known before the last line.
+pub fn fix_settled(answers: &[&str], corrected: &[String]) -> bool {
+    let said: Vec<Vec<Token>> = answers.iter().map(|answer| tokens_of(answer)).collect();
+    let mut corrected_already = vec![false; said.len()];
+    let mut best: Option<Rank> = None;
+    for (index, found) in corrected.iter().filter_map(|line| fixes_in(&said, line)) {
+        corrected_already[index] = true;
+        for (rank, _) in found {
+            best = Some(best.map_or(rank, |best| best.min(rank)));
         }
     }
-    found.into_iter().min_by_key(|(rank, _)| *rank).map(|(_, fix)| fix)
+    matches!(best, Some((false, index, _)) if corrected_already[..index].iter().all(|&done| done))
+}
+
+/// Where a fix ranks among those found, lowest first: a word changed before
+/// one only added or dropped, then by answer, then by where in it.
+type Rank = (bool, usize, usize);
+
+/// The answer a corrected `line` belongs to, the one it is closest to, if any
+/// is close enough; and the fixes in it, ranked. See `fix_from`.
+fn fixes_in(said: &[Vec<Token>], line: &str) -> Option<(usize, Vec<(Rank, Fix)>)> {
+    let fixed = tokens_of(line);
+    let (index, segments, _) = said
+        .iter()
+        .enumerate()
+        .map(|(index, answer)| {
+            let segments = heard_alike(answer, &fixed, diff(answer, &fixed));
+            let similarity = similarity(answer, &fixed, &segments);
+            (index, segments, similarity)
+        })
+        .filter(|(_, _, similarity)| *similarity >= 0.6)
+        .max_by(|a, b| a.2.total_cmp(&b.2))?;
+    let answer = &said[index];
+    let changed: usize = segments
+        .iter()
+        .filter(|segment| !segment.equal)
+        .map(|segment| segment.said.len() + segment.fixed.len())
+        .sum();
+    let mut found = Vec::new();
+    if changed == 0 || changed * 2 > answer.len().max(4) {
+        return Some((index, found));
+    }
+    for (position, segment) in segments.iter().enumerate() {
+        if segment.equal || segment.said.len() > 3 || segment.fixed.len() > 3 {
+            continue;
+        }
+        let next = answer.get(segment.said.end);
+        if !fixes_grammar(&answer[segment.said.clone()], &fixed[segment.fixed.clone()], next) {
+            continue;
+        }
+        if let Some(fix) = phrase_around(answer, &fixed, &segments, position) {
+            let added_or_dropped = segment.said.is_empty() || segment.fixed.is_empty();
+            found.push(((added_or_dropped, index, segment.said.start), fix));
+        }
+    }
+    Some((index, found))
 }
 
 /// A word as said, and as compared: lower case, apostrophes dropped, and
@@ -842,6 +874,56 @@ mod tests {
 
         let only_added = owned(&["My school is very big and it have a big playground", "Rahul is the best player in our class"]);
         assert_eq!(fix_from(&answers, &only_added), fix("Rahul is best player", "Rahul is the best player"));
+    }
+
+    #[test]
+    fn a_changed_word_in_the_first_answer_settles_the_fix_at_once() {
+        let answers = [
+            "Yesterday I go to market with my mother",
+            "It was very spicy and tangy",
+            "Rahul is best player in our class",
+        ];
+        let corrected = owned(&[
+            "Yesterday I went to market with my mother.",
+            "It was very spicy and tangy.",
+            "Rahul is the best player in our class.",
+        ]);
+        assert!(fix_settled(&answers, &corrected[..1]));
+        assert_eq!(fix_from(&answers, &corrected[..1]), fix("Yesterday I go to market", "Yesterday I went to market"));
+        assert_eq!(fix_from(&answers, &corrected[..1]), fix_from(&answers, &corrected), "what all the lines give");
+    }
+
+    #[test]
+    fn a_fix_is_settled_only_when_nothing_still_to_come_could_rank_above_it() {
+        let answers = [
+            "My school is very big and it has a big playground",
+            "Rahul is best player in our class",
+            "We plays cricket there every evening",
+            "Sometimes my friends comes to watch",
+        ];
+        let corrected = owned(&[
+            "My school is very big and it has a big playground.",
+            "Rahul is the best player in our class.",
+            "We play cricket there every evening.",
+            "Sometimes my friends come to watch.",
+        ]);
+        // Nothing to fix yet, then only a word to add: a word changed could
+        // still come, and would be the fix.
+        assert!(!fix_settled(&answers, &corrected[..1]));
+        assert!(!fix_settled(&answers, &corrected[..2]));
+        assert!(fix_settled(&answers, &corrected[..3]));
+        assert_eq!(fix_from(&answers, &corrected[..3]), fix_from(&answers, &corrected));
+        assert!(fix_from(&answers, &corrected).is_some_and(|fix| fix.said.starts_with("We plays")));
+
+        // A line for a later answer first: those before it have not had theirs.
+        assert!(!fix_settled(&answers, &corrected[2..3]));
+    }
+
+    #[test]
+    fn nothing_to_fix_is_never_settled_before_the_last_line() {
+        let answers = ["I need to get to the railway station", "My train leaves at six"];
+        assert!(!fix_settled(&answers, &owned(&["I need to get to the railway station."])));
+        assert!(!fix_settled(&answers, &owned(&["I need to get to the railway station.", "My train leaves at six."])));
     }
 
     #[test]

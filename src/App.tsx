@@ -42,10 +42,12 @@ interface Finished {
   topicId: string | null;
 }
 
-/** The assessment of one finished talk, as far as it has got. */
+/** The assessment of one finished talk, as far as it has got: nothing yet,
+ * the talk scored with its fix still to come, or all of it (`settled`). */
 interface Assessing {
   sessionId: string;
   result: Assessment | null;
+  settled: boolean;
   error: string | null;
 }
 
@@ -108,6 +110,13 @@ export default function App() {
   // Bumped by every log out, so an assessment still on its way from the
   // learner who left cannot celebrate on the next sign-in.
   const signIns = useRef(0);
+  // The talk whose assessment was last asked for, and whether that ask
+  // failed. A talk that closes itself is asked about as its last turn
+  // arrives, and its recap opening must not ask again.
+  const asked = useRef<{ sessionId: string; failed: boolean } | null>(null);
+  // The talk whose finished step or level has gone to `movedOn`: its scores
+  // and its whole assessment both say so, and it is celebrated once.
+  const announced = useRef<string | null>(null);
   // The avatar colour the backend last confirmed, which is what a refused
   // save goes back to — not whatever an earlier, unsaved press showed.
   const savedAvatarColor = useRef<string | null>(null);
@@ -322,31 +331,48 @@ export default function App() {
     });
     setScreen("summary");
     void refreshSnapshot();
-    assess(result.session_id);
+    assessOnce(result.session_id);
+  }
+
+  /** Asks about a finished talk, unless that is already under way: a talk
+   * that closes itself is asked about as its last turn arrives, while Ella
+   * still says goodbye, and the model is not left idle until she is done. */
+  function assessOnce(sessionId: string) {
+    if (asked.current?.sessionId === sessionId && !asked.current.failed) return;
+    assess(sessionId);
   }
 
   /**
    * Asks what a finished talk did: the skills it counted and any step or
-   * level it finished. The first ask can take a while, as the model reads the
-   * talk; the backend keeps the answer, so asking again is instant and counts
-   * nothing twice. When it lands the snapshot is read again, wherever the
-   * learner is by then, and if they have left the summary a step or level it
-   * finished is celebrated where they are.
+   * level it finished, then its one fix. The first ask can take a while, as
+   * the model reads the talk; the backend keeps the answer, so asking again
+   * is instant and counts nothing twice. The skills come as soon as the talk
+   * is scored, and the fix after them. Each time the snapshot is read again,
+   * wherever the learner is by then, and if they have left the summary a step
+   * or level it finished is celebrated where they are.
    */
   function assess(sessionId: string) {
     const signIn = signIns.current;
-    setAssessing({ sessionId, result: null, error: null });
+    asked.current = { sessionId, failed: false };
+    setAssessing({ sessionId, result: null, settled: false, error: null });
+    const landed = (result: Assessment, settled: boolean) => {
+      if (signIns.current !== signIn) return;
+      setAssessing((current) =>
+        current?.sessionId === sessionId && !current.settled ? { ...current, result, settled } : current,
+      );
+      // Kept until something shows it: the summary, if it is still up, or
+      // else the toast wherever the learner has gone.
+      if (result.advanced && announced.current !== sessionId) {
+        announced.current = sessionId;
+        setMovedOn(result);
+      }
+      void refreshSnapshot();
+    };
     bridge
-      .assessSession(sessionId)
-      .then((result) => {
-        if (signIns.current !== signIn) return;
-        setAssessing((current) => (current?.sessionId === sessionId ? { ...current, result } : current));
-        // Kept until something shows it: the summary, if it is still up,
-        // or else the toast wherever the learner has gone.
-        if (result.advanced) setMovedOn(result);
-        void refreshSnapshot();
-      })
+      .assessSession(sessionId, (scored) => landed(scored, false))
+      .then((result) => landed(result, true))
       .catch((reason: unknown) => {
+        if (asked.current?.sessionId === sessionId) asked.current = { sessionId, failed: true };
         if (signIns.current !== signIn) return;
         setAssessing((current) =>
           current?.sessionId === sessionId ? { ...current, error: errorMessage(reason) } : current,
@@ -368,6 +394,7 @@ export default function App() {
       setSession(null);
       setFinished(null);
       setAssessing(null);
+      asked.current = null;
       setMovedOn(null);
       setScreen("onboarding");
     });
@@ -539,6 +566,7 @@ export default function App() {
               (topicPartner?.sessionId === session.id ? topicPartner.partner : null)
             }
             onSessionChange={setSession}
+            onClosing={(closing) => assessOnce(closing.session_id)}
             onComplete={handleComplete}
           />
         )}
@@ -547,6 +575,7 @@ export default function App() {
             key={summary.session_id}
             summary={summary}
             assessment={assessing?.sessionId === summary.session_id ? assessing.result : null}
+            fixPending={assessing?.sessionId === summary.session_id && !assessing.settled}
             assessError={assessing?.sessionId === summary.session_id ? assessing.error : null}
             before={finished.before}
             learnerName={snapshot.learner?.name ?? "friend"}

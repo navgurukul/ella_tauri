@@ -346,6 +346,10 @@ export interface SessionSummary {
   short: boolean;
   /** How a ledger chore ended; null for a free talk and a rubric chore. */
   chore?: ChoreRecap | null;
+  /** What went well, read off the learner's words as the talk closed, so
+   * the recap shows it before the model has read the talk. Empty for a talk
+   * too short for notes, and for the placement chat. */
+  went_well?: string[];
 }
 
 /** How a ledger chore ended, for the recap's role-play band. */
@@ -400,8 +404,10 @@ export interface EllaBridge {
   /** What a finished talk did: a placement's level, or a talk's skills and any
    * step or level it finished. Slow the first time (the model reads the talk),
    * then kept. Rejects while the talk is still going, or when the model could
-   * not be read — asking again later is safe. */
-  assessSession(sessionId: string): Promise<Assessment>;
+   * not be read — asking again later is safe. `onScored` hears a talk's
+   * assessment as soon as the talk is scored and what it counted is kept,
+   * before its one fix has been looked for; the whole of it follows. */
+  assessSession(sessionId: string, onScored?: (scored: Assessment) => void): Promise<Assessment>;
   /** Every level, lowest first, as it stands for the learner. */
   levels(): Promise<LevelView[]>;
   /** Start a talk partner's goal: a chore from the Rust catalog, played by its

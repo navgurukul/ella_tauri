@@ -39,9 +39,12 @@ pub enum Errand {
     /// Getting a talk the learner is likely to open next ready, so its first
     /// reply does not wait for its instructions to be evaluated.
     Prepare,
+    /// Getting the next recap's judges ready, so it waits only for the model
+    /// to read the talk, not their instructions too. After the talk's own.
+    PrepareRecap,
 }
 
-const KINDS: usize = 2;
+const KINDS: usize = 3;
 
 /// Why an errand should stop and let something else have the model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,6 +141,22 @@ impl ModelQueue {
         self.changed.notify_all();
     }
 
+    /// Keeps the model for `kind` from one of its errands to the next, until
+    /// the guard is dropped. A `kind` errand counts as waiting all along, so
+    /// nothing less urgent starts in the gap between two of them, and one
+    /// already running gives way at its next piece, as it would to the first.
+    /// A talk still goes first.
+    ///
+    /// For an assessment's two judges, asked one after the other: without it,
+    /// getting Home's talk ready took the model between them for a piece.
+    pub fn hold(self: &Arc<Self>, kind: Errand) -> Held {
+        self.lock().waiting[kind as usize] += 1;
+        Held {
+            queue: Arc::clone(self),
+            kind,
+        }
+    }
+
     /// Runs `errand` once nothing should go ahead of it, and again each time
     /// it gives way, until it is done. `None` if Ella closed first.
     ///
@@ -203,6 +222,21 @@ impl Drop for Talking {
         }
         drop(state);
         self.0.changed.notify_all();
+    }
+}
+
+/// Keeps the model for one kind of errand: see `ModelQueue::hold`.
+pub struct Held {
+    queue: Arc<ModelQueue>,
+    kind: Errand,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let mut state = self.queue.lock();
+        state.waiting[self.kind as usize] = state.waiting[self.kind as usize].saturating_sub(1);
+        drop(state);
+        self.queue.changed.notify_all();
     }
 }
 
@@ -339,6 +373,63 @@ mod tests {
         assert!(assessed < resumed, "the assessment finished first: {order:?}");
         assert_eq!(assess.join().unwrap(), Some(1));
         assert_eq!(prepare.join().unwrap(), Some(2));
+    }
+
+    #[test]
+    fn the_next_talk_is_got_ready_before_the_recap_after_it() {
+        let queue = queue(Duration::from_secs(60));
+        let (done, pieces) = mpsc::channel();
+        let recap = errand(&queue, Errand::PrepareRecap, 3, Duration::from_millis(100), done.clone());
+        assert_eq!(pieces.recv_timeout(Duration::from_secs(2)).unwrap(), (Errand::PrepareRecap, 1));
+
+        let talk = errand(&queue, Errand::Prepare, 2, Duration::from_millis(50), done);
+        let order: Vec<(Errand, usize)> = (0..4)
+            .map(|_| pieces.recv_timeout(Duration::from_secs(2)).unwrap())
+            .collect();
+        let prepared = order.iter().rposition(|(kind, _)| *kind == Errand::Prepare).unwrap();
+        let resumed = order.iter().position(|(kind, piece)| *kind == Errand::PrepareRecap && *piece == 3).unwrap();
+        assert!(prepared < resumed, "the talk's went first: {order:?}");
+        assert_eq!(talk.join().unwrap(), Some(1));
+        assert_eq!(recap.join().unwrap(), Some(2));
+    }
+
+    #[test]
+    fn an_assessment_held_between_its_judges_lets_nothing_less_urgent_in() {
+        let queue = queue(Duration::from_secs(60));
+        let (done, pieces) = mpsc::channel();
+        // Getting a talk ready is under way when the assessment starts.
+        let prepare = errand(&queue, Errand::Prepare, 3, Duration::from_millis(100), done.clone());
+        assert_eq!(pieces.recv_timeout(Duration::from_secs(2)).unwrap(), (Errand::Prepare, 1));
+
+        let held = queue.hold(Errand::Assess);
+        errand(&queue, Errand::Assess, 1, Duration::ZERO, done.clone()).join().unwrap();
+        // It finished the piece it had in hand, and gave way to the first judge.
+        assert_eq!(pieces.try_iter().collect::<Vec<_>>(), [(Errand::Prepare, 2), (Errand::Assess, 1)]);
+
+        // Between the judges nothing of the assessment is waiting, and still
+        // the preparation stays put.
+        assert!(pieces.recv_timeout(Duration::from_millis(300)).is_err(), "nothing ran between the judges");
+        errand(&queue, Errand::Assess, 1, Duration::ZERO, done).join().unwrap();
+        assert_eq!(pieces.try_iter().collect::<Vec<_>>(), [(Errand::Assess, 1)]);
+        assert!(!prepare.is_finished(), "it waits for the hold");
+
+        drop(held);
+        assert_eq!(prepare.join().unwrap(), Some(2), "and carries on once the assessment is over");
+        assert_eq!(pieces.try_iter().collect::<Vec<_>>(), [(Errand::Prepare, 3)]);
+    }
+
+    #[test]
+    fn a_held_assessment_still_lets_a_talk_go_first() {
+        let queue = queue(Duration::from_secs(60));
+        let _held = queue.hold(Errand::Assess);
+        let talking = queue.talking();
+        let (done, pieces) = mpsc::channel();
+        let assess = errand(&queue, Errand::Assess, 1, Duration::ZERO, done);
+        assert!(pieces.recv_timeout(SOON).is_err(), "nothing runs beside a talk");
+        drop(talking);
+        queue.talk_over();
+        assert_eq!(pieces.recv_timeout(Duration::from_secs(2)).unwrap(), (Errand::Assess, 1));
+        assess.join().unwrap();
     }
 
     #[test]

@@ -24,7 +24,6 @@ import type {
   SessionSummary,
   SkillGrowth,
   Standing,
-  TalkNotes,
 } from "../types";
 
 /**
@@ -33,11 +32,13 @@ import type {
  * Ella's notes in tiles — what went well, one fix, the skills that grew — the
  * streak, and what is next.
  *
- * It opens at once, while the backend works out what the talk did; the notes
- * tiles wait with three dots and fill in when it answers. The app owns that
- * question, so leaving before the answer comes loses nothing. A talk too short
- * for notes says so straight away, and a talk that could not be read offers to
- * try again — the streak counts either way.
+ * It opens at once, while the backend works out what the talk did. What went
+ * well is there from the start, read off the learner's words as the talk
+ * closed; the skills fill in once the model has scored the talk, and the one
+ * fix once it has looked for it, each tile waiting with three dots until
+ * then. The app owns that question, so leaving before the answer comes loses
+ * nothing. A talk too short for notes says so straight away, and a talk that
+ * could not be read offers to try again — the streak counts either way.
  *
  * Nothing on it moves: the scoring that fills it in, and the getting ready of
  * the next talk, run on the same CPU as this window.
@@ -45,6 +46,7 @@ import type {
 export function SummaryScreen({
   summary,
   assessment,
+  fixPending = false,
   assessError,
   before,
   learnerName,
@@ -59,6 +61,8 @@ export function SummaryScreen({
   summary: SessionSummary;
   /** Null until the backend has answered. */
   assessment: Assessment | null;
+  /** The talk is scored, and its one fix is still being looked for. */
+  fixPending?: boolean;
   /** Why it could not answer; asking again is safe. */
   assessError: string | null;
   /** The learner's figures from before this talk, which the streak counts on from. */
@@ -88,8 +92,10 @@ export function SummaryScreen({
 
   const chore = summary.chore ?? null;
   const notes = assessment?.notes ?? null;
+  const fixReady = assessment !== null && !fixPending;
+  const wentWell = notes?.went_well ?? (summary.went_well?.length ? summary.went_well : null);
   const standing = assessment?.standing ?? standingBefore;
-  const tiles = tilesFor(summary, assessment, assessError);
+  const tiles = tilesFor(summary, assessment, assessError, fixPending);
   const noticeSpan = Math.max(1, 4 - tiles.length);
   const columns = tiles.reduce((sum, tile) => sum + (isNotice(tile) ? noticeSpan : 1), 1);
 
@@ -111,9 +117,10 @@ export function SummaryScreen({
           {tiles.map((tile) => (
             <Tile key={tile} kind={tile} span={isNotice(tile) ? noticeSpan : 1}>
               {tile === "well" ? (
-                <WentWell notes={notes} ready={assessment !== null} />
+                // "Nothing to fix" is only said when a model looked.
+                <WentWell items={wentWell} nothingToFix={fixReady && Boolean(notes?.checked) && !notes?.fix} />
               ) : tile === "fix" ? (
-                <OneFix fix={notes?.fix ?? null} ready={assessment !== null} sessionId={summary.session_id} />
+                <OneFix fix={notes?.fix ?? null} ready={fixReady} sessionId={summary.session_id} />
               ) : tile === "skills" ? (
                 <SkillsGrew skills={assessment?.skills ?? null} />
               ) : tile === "failed" ? (
@@ -327,15 +334,21 @@ function isNotice(tile: TileKey | "streak") {
 }
 
 /** Which tiles the recap has, in reading order. Before the answer it holds a
- * place for every note; once it lands, only what the talk has fills one. */
-function tilesFor(summary: SessionSummary, assessment: Assessment | null, error: string | null): TileKey[] {
+ * place for every note; once it lands, only what the talk has fills one, and
+ * the fix keeps its place while it is still being looked for. */
+function tilesFor(
+  summary: SessionSummary,
+  assessment: Assessment | null,
+  error: string | null,
+  fixPending: boolean,
+): TileKey[] {
   const grew: TileKey[] = assessment && assessment.skills.length > 0 ? ["skills"] : [];
   if (summary.short) return ["notice", ...grew];
   if (error) return ["failed"];
   if (!assessment) return ["well", "fix", "skills"];
   const notes = assessment.notes;
   if (!notes) return [...grew, "notice"];
-  return ["well", ...(notes.fix ? (["fix"] as TileKey[]) : []), ...grew];
+  return ["well", ...(notes.fix || fixPending ? (["fix"] as TileKey[]) : []), ...grew];
 }
 
 const TILE_LABEL: Record<TileKey, string> = {
@@ -368,10 +381,10 @@ function Waiting() {
   );
 }
 
-function WentWell({ notes, ready }: { notes: TalkNotes | null; ready: boolean }) {
+function WentWell({ items, nothingToFix }: { items: string[] | null; nothingToFix: boolean }) {
   return (
     <>
-      {ready ? (
+      {items ? (
         <span className="recap-well__check" aria-hidden="true">
           <Check size={32} />
         </span>
@@ -379,14 +392,12 @@ function WentWell({ notes, ready }: { notes: TalkNotes | null; ready: boolean })
         <span className="recap-well__ring" aria-hidden="true" />
       )}
       <h2 className="display recap-tile__title">Went well</h2>
-      {ready && notes ? <WellItems notes={notes} /> : <Waiting />}
+      {items ? <WellItems items={nothingToFix ? [...items, "Nothing to fix"] : items} /> : <Waiting />}
     </>
   );
 }
 
-function WellItems({ notes }: { notes: TalkNotes }) {
-  // "Nothing to fix" is only said when a model looked.
-  const items = notes.checked && !notes.fix ? [...notes.went_well, "Nothing to fix"] : notes.went_well;
+function WellItems({ items }: { items: string[] }) {
   return (
     <ul className="recap-well__list">
       {items.map((item) => (

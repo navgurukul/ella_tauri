@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   atMost,
@@ -212,7 +212,12 @@ class TauriBridge implements EllaBridge {
     invoke<Learner>("save_learner", { name, age: age ?? null });
   startSession = (topicId: string) => invoke<Session>("start_session", { topicId });
   startPlacement = () => invoke<Session>("start_placement");
-  assessSession = (sessionId: string) => invoke<Assessment>("assess_session", { sessionId });
+  /** The scores come back early on a channel of this call's own. */
+  assessSession = (sessionId: string, onScored?: (scored: Assessment) => void) =>
+    invoke<Assessment>("assess_session", {
+      sessionId,
+      scored: new Channel<Assessment>((scored) => onScored?.(scored)),
+    });
   levels = () => invoke<LevelView[]>("levels");
   startChore = (choreId: string) => invoke<Session>("start_chore", { choreId });
   getSession = (sessionId: string) => invoke<Session>("get_session", { sessionId });
@@ -486,12 +491,15 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
     const answers = answersIn(session);
     const turns = answers.length;
     const conversations = progressOf(state.sessions).talks_finished;
+    const short = tooShort(answers);
     return {
       session_id: session.id,
       topic_label: session.topic_label,
       turns,
-      short: tooShort(answers),
+      short,
       chore: null,
+      // As the backend: ready as the talk closes, and none for a placement.
+      went_well: short || session.kind === "placement" ? [] : wentWell(answers),
       headline: turns >= 3 ? "You kept that conversation going" : "Every answer counts",
       // A talk with nothing said in it is not counted, so it is not thanked
       // for as though it were.

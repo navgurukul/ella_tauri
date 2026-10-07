@@ -1094,6 +1094,34 @@ describe("Ella levels", () => {
     expect(screen.getByRole("region", { name: "Level 1: Pre-Beginner" })).toHaveTextContent("You’ve already passed this level.");
   });
 
+  it("asks what a talk did as its last turn arrives, while Ella says goodbye, and only once", async () => {
+    const assess = vi.spyOn(bridge, "assessSession");
+    let goodbye: SpeechSynthesisUtterance | undefined;
+    vi.mocked(window.speechSynthesis.speak).mockImplementation((utterance: SpeechSynthesisUtterance) => {
+      // Every line ends at once, but the one after the last answer is still
+      // being said.
+      if (assess.mock.calls.length > 0 || goodbye) {
+        goodbye = utterance;
+        return;
+      }
+      setTimeout(() => utterance.onend?.call(utterance, new Event("end") as SpeechSynthesisEvent), 0);
+    });
+    await onboard("Nina");
+    fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
+    await screen.findByText("End talk");
+    // The preview's talk closes itself on its sixth answer.
+    await typeAnswers(6);
+    await waitFor(() => expect(assess).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("heading", { name: "Nice talking, Nina!" })).not.toBeInTheDocument();
+
+    await waitFor(() => expect(goodbye).toBeDefined());
+    act(() => goodbye?.onend?.call(goodbye, new Event("end") as SpeechSynthesisEvent));
+    expect(await screen.findByRole("heading", { name: "Nice talking, Nina!" })).toBeInTheDocument();
+    // What went well is there from the first moment of the recap.
+    expect(screen.getByRole("region", { name: "Went well" }).querySelectorAll("li")).not.toHaveLength(0);
+    expect(assess).toHaveBeenCalledTimes(1);
+  });
+
   it("celebrates a talk that finished a step, and one that finished a level", async () => {
     const standing = {
       level_number: 3,

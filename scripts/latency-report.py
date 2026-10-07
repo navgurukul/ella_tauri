@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize Ella's persisted turn telemetry (latency + errors) by day.
+"""Summarize Ella's persisted turn and recap telemetry (latency + errors) by day.
 
 Reads latency.jsonl from the app data dir (or a path passed as argv[1]) and
 prints per-day medians/p95s per pipeline stage, error counts, and STT
@@ -37,6 +37,7 @@ def main() -> int:
         return 1
 
     days = defaultdict(list)
+    recaps = defaultdict(list)
     for line in path.read_text().splitlines():
         line = line.strip()
         if not line:
@@ -45,9 +46,11 @@ def main() -> int:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("event") != "ella_turn_latency":
-            continue
-        days[event.get("timestamp", "?")[:10]].append(event)
+        day = event.get("timestamp", "?")[:10]
+        if event.get("event") == "ella_turn_latency":
+            days[day].append(event)
+        elif event.get("event") == "ella_assessment":
+            recaps[day].append(event)
 
     if not days:
         print(f"{path} contains no turn events yet.")
@@ -95,6 +98,32 @@ def main() -> int:
         print("\nRecent errors:")
         for event in errors[-8:]:
             print(f"  {event.get('timestamp','?')[:19]}  {event.get('error','?')}")
+
+    if recaps:
+        # What the recap waits for after a talk: its skills ("scored"), then
+        # all of it, the one fix included.
+        print()
+        header = (
+            f"{'day':10} {'recaps':>6} {'errors':>6} {'asked p50':>9} "
+            f"{'scored p50/p95':>15} {'total p50/p95':>14} {'restored':>8} {'stopped':>7}"
+        )
+        print(header)
+        print("-" * len(header))
+        for day in sorted(recaps):
+            events = recaps[day]
+            ok = [e for e in events if e.get("status") == "ok"]
+            asked = [e["since_close_ms"] for e in ok if e.get("since_close_ms") is not None]
+            scored = [e["scored_ms"] for e in ok if e.get("scored_ms") is not None]
+            total = [e["total_ms"] for e in ok if e.get("total_ms") is not None]
+            judges = [judge for e in ok for judge in e.get("judges", [])]
+            restored = sum(1 for judge in judges if judge.get("restored_tokens") is not None)
+            stopped = sum(1 for judge in judges if judge.get("stopped_early"))
+            print(
+                f"{day:10} {len(events):>6} {len(events) - len(ok):>6} {fmt(pct(asked, 50)):>9} "
+                f"{fmt(pct(scored, 50)):>7}/{fmt(pct(scored, 95)):>7} "
+                f"{fmt(pct(total, 50)):>6}/{fmt(pct(total, 95)):>7} "
+                f"{restored:>3}/{len(judges):<4} {stopped:>7}"
+            )
 
     if len(sys.argv) <= 1:
         failures = path.parent.parent / "stt-failures"

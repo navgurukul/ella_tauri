@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     fs::{self, OpenOptions},
     io::Write as _,
     path::PathBuf,
@@ -217,6 +218,176 @@ impl LatencyTrace {
 
 fn round_ms(value: f64) -> u64 {
     value.max(0.0).round() as u64
+}
+
+fn elapsed_ms(since: Instant) -> u64 {
+    round_ms(since.elapsed().as_secs_f64() * 1_000.0)
+}
+
+/// One judge's part in an assessment: how long it waited for the model and
+/// then had it, and what it read and wrote. The engine records it as the judge
+/// answers (`record_judge`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct JudgeTiming {
+    /// `score`, `correct` or `place`.
+    pub judge: &'static str,
+    /// `ok`, or `error` for an answer that never came or could not be read.
+    pub status: &'static str,
+    /// From asking to the model's first piece: what a talk, or a more urgent
+    /// errand, held it back.
+    pub waited_ms: u64,
+    /// From asking to the answer, waits included.
+    pub ms: u64,
+    /// Times it stopped to let a talk or a more urgent errand go first.
+    pub gave_way: u32,
+    pub attempts: u32,
+    /// Its instructions, restored from where they were kept rather than read.
+    pub restored_tokens: Option<u64>,
+    /// Prompt tokens the server read for it, every piece and the answer's
+    /// last stretch together, as far as the server said.
+    pub read_tokens: u64,
+    /// Tokens of the answer the server wrote.
+    pub written_tokens: u64,
+    /// The answer said all that was needed before it was finished, and the
+    /// rest of it was not waited for.
+    pub stopped_early: bool,
+}
+
+thread_local! {
+    /// The judges of the assessment being worked out on this thread, if one is.
+    static JUDGES: RefCell<Option<Vec<JudgeTiming>>> = const { RefCell::new(None) };
+}
+
+/// Keeps `timing` for the assessment being worked out on this thread. A judge
+/// runs on the thread that asked for it, so an assessment's judges land in
+/// its own `AssessmentTrace`; asked for anywhere else, it is only logged.
+pub fn record_judge(timing: JudgeTiming) {
+    JUDGES.with(|judges| {
+        if let Some(judges) = judges.borrow_mut().as_mut() {
+            judges.push(timing);
+        }
+    });
+}
+
+/// One assessment, from the window asking for it to the last of it kept,
+/// written to `latency.jsonl` as an `ella_assessment` event: what the recap
+/// waits for, as `ella_turn_latency` is what a turn waits for.
+pub struct AssessmentTrace {
+    started: Instant,
+    session_id: String,
+    kind: String,
+    answers: u32,
+    checked_answers: Option<u32>,
+    since_close_ms: Option<u64>,
+    scored_ms: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct AssessmentEvent<'a> {
+    event: &'static str,
+    schema_version: u8,
+    timestamp: String,
+    status: &'a str,
+    error: Option<&'a str>,
+    session_id: &'a str,
+    /// `talk` or `placement`.
+    kind: &'a str,
+    /// The learner's answers in the talk.
+    answers: u32,
+    /// How many of them went to be corrected, for a talk with notes.
+    checked_answers: Option<u32>,
+    /// From the talk closing to this assessment being asked for.
+    since_close_ms: Option<u64>,
+    /// From asking to what the talk counted being kept: when the recap's
+    /// skills, and any step or level finished, are on screen.
+    scored_ms: Option<u64>,
+    /// From asking to the whole of it kept, the one fix included.
+    total_ms: u64,
+    judges: &'a [JudgeTiming],
+}
+
+impl AssessmentTrace {
+    /// Starts timing an assessment of `session_id`, and collecting the
+    /// judges this thread asks until it finishes.
+    pub fn begin(session_id: &str, kind: &str, answers: u32, since_close_ms: Option<u64>) -> Self {
+        JUDGES.with(|judges| *judges.borrow_mut() = Some(Vec::new()));
+        Self {
+            started: Instant::now(),
+            session_id: session_id.to_owned(),
+            kind: kind.to_owned(),
+            answers,
+            checked_answers: None,
+            since_close_ms,
+            scored_ms: None,
+        }
+    }
+
+    /// What the talk counted is kept, and on its way to the window.
+    pub fn scored(&mut self) {
+        self.scored_ms = Some(elapsed_ms(self.started));
+    }
+
+    /// `answers` of the talk's went to be corrected.
+    pub fn checked(&mut self, answers: usize) {
+        self.checked_answers = Some(answers as u32);
+    }
+
+    pub fn finish(self, status: &str, error: Option<&str>) {
+        let judges = JUDGES.with(|judges| judges.borrow_mut().take()).unwrap_or_default();
+        let total_ms = elapsed_ms(self.started);
+        let fmt = |value: Option<u64>| value.map_or_else(|| "-".to_string(), |ms| format!("{ms}ms"));
+        eprintln!(
+            "[LATENCY] ── assessment summary ({}) status={status} ──\n\
+             [LATENCY]   asked {} after the talk closed; scored at {}; all of it at {total_ms}ms",
+            self.kind,
+            fmt(self.since_close_ms),
+            fmt(self.scored_ms),
+        );
+        for judge in &judges {
+            eprintln!(
+                "[LATENCY]   {:<8} {} waited={}ms took={}ms gave_way={} attempts={} restored={} read={} wrote={}{}",
+                judge.judge,
+                judge.status,
+                judge.waited_ms,
+                judge.ms,
+                judge.gave_way,
+                judge.attempts,
+                judge.restored_tokens.map_or_else(|| "-".to_string(), |tokens| tokens.to_string()),
+                judge.read_tokens,
+                judge.written_tokens,
+                if judge.stopped_early { " stopped early" } else { "" },
+            );
+        }
+        let event = AssessmentEvent {
+            event: "ella_assessment",
+            schema_version: 1,
+            timestamp: Utc::now().to_rfc3339(),
+            status,
+            error,
+            session_id: &self.session_id,
+            kind: &self.kind,
+            answers: self.answers,
+            checked_answers: self.checked_answers,
+            since_close_ms: self.since_close_ms,
+            scored_ms: self.scored_ms,
+            total_ms,
+            judges: &judges,
+        };
+        match serde_json::to_string(&event) {
+            Ok(line) => {
+                eprintln!("{line}");
+                append_event_line(&line);
+            }
+            Err(error) => eprintln!("[LATENCY] could not write the assessment's telemetry: {error}"),
+        }
+    }
+}
+
+impl Drop for AssessmentTrace {
+    /// Whatever ends the assessment, its judges stop landing here.
+    fn drop(&mut self) {
+        JUDGES.with(|judges| judges.borrow_mut().take());
+    }
 }
 
 #[cfg(test)]

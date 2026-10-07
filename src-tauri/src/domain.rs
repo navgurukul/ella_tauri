@@ -547,6 +547,12 @@ pub struct SessionSummary {
     pub short: bool,
     /// How a ledger chore ended; `None` for a free talk and a rubric chore.
     pub chore: Option<ChoreRecap>,
+    /// What went well, read off the learner's words as the talk closes
+    /// (`notes::went_well`), so the recap shows it before any model has read
+    /// the talk. The assessment's notes say the same. Empty for a talk too
+    /// short for notes, and for the placement chat, which has none.
+    #[serde(default)]
+    pub went_well: Vec<String>,
 }
 
 /// How a ledger chore ended, for the recap's role-play band.

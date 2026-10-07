@@ -191,8 +191,11 @@ number on the ladder, 1 to 6.
   goal was met, its badge and their last line; then Ella's notes — what went
   well, one fix the learner can hear said right, and the skills that grew — the
   streak with today counted, and tomorrow's topic. "Step complete!" or "Level
-  up!" shows under the headline when a talk moved them on. It opens at once and
-  the notes fill in when the model has read the talk. The app owns that
+  up!" shows under the headline when a talk moved them on. It opens at once
+  with what went well, read off the learner's words as the talk closed; the
+  skills that grew, and any step or level finished, fill in once the model has
+  scored the talk, and the fix once it has looked for one (see
+  [Latency on laptops](#latency-on-laptops)). The app owns that
   question, so leaving early loses nothing: Home catches up, and a step or
   level finished meanwhile is celebrated in a toast. Home and the profile carry
   a MY LEVEL card, and both open the level map, as the recap's footer does.
@@ -216,9 +219,10 @@ number on the ladder, 1 to 6.
   down, or the free bargaining talk finished. Deposit back is earned the same
   way, by Grumble's refund goal met.
 
-Assessments are worked out once and kept on the talk (`sessions.assessment`),
-in one transaction with the skills and the level they change, so asking again
-is instant and counts nothing twice. A model whose answer cannot be read is an
+Assessments are worked out once and kept on the talk (`sessions.assessment`):
+the scores in one transaction with the skills and the level they change, then
+the one fix, which counts towards nothing, filled in, so asking again is
+instant and counts nothing twice. A model whose answer cannot be read is an
 error the summary offers to retry, never a talk that silently counts for
 nothing. Without a model (demo mode, the browser preview) the placement runs to
 five answers and places at A2, and talks are kept unscored.
@@ -415,12 +419,21 @@ sentence handed to the window, or the total for a reply the window plays whole),
 total latency, and success/error status. The WebView also logs
 `ella_voice_playback_ready` after audio reaches the browser playback path.
 
+Every assessment worked out writes one line with `event: "ella_assessment"`:
+how long after the talk closed it was asked for (`since_close_ms`), when what
+the talk counted was kept and on its way to the recap (`scored_ms`), when all
+of it was (`total_ms`), and for each judge (`score`, `correct`, `place`) how
+long it waited for the model and then had it, how often it gave way to a talk,
+the tokens of its instructions restored and the prompt tokens it read, the
+tokens it wrote, and whether its answer was stopped early.
+
 The lines are kept in `telemetry/latency.jsonl` in the app's data folder, on
 every laptop. `npm run telemetry:report -- <path>` prints each day's medians and
 95th percentiles, including when Ella started speaking ("speaks"); a log from
 before `speech_ms` counts its total there. A talk's first turn is the one that
 waits for the talk's instructions to be evaluated, and shows it in its
-`llm_ttft_ms`.
+`llm_ttft_ms`. The recaps follow, by day: when the skills were on screen
+("scored") and when all of it was.
 
 ## Latency on laptops
 
@@ -522,6 +535,38 @@ evaluated once when the talk opens, and its first reply waits for them.
   was ready 41 s after it was asked for, and the talk then restored 1,092
   tokens in 15 ms and had its first answer's first token after 1.2 s, against
   a 39 s wait for the warm-up of a first talk on a topic.
+- **The recap fills in as soon as it can.** It used to wait for the scoring and
+  then the correction, each reading its prompt from nothing, after Ella had
+  finished her goodbye; nothing but the streak showed until both were done.
+  Measured on the M4 held to one thread, which reads a prompt at about 40
+  tokens a second as the Windows test laptop does, over three scripted talks of
+  six answers: everything came 27-33 s after the recap opened. Now:
+  - The talk's own last turn starts the assessment, while Ella still says
+    goodbye, as the placement chat already did.
+  - What went well is read off the words as the talk closes and comes with its
+    summary, so it shows at once. The skills, and any step or level finished,
+    come as soon as the talk is scored and kept (`assess_session`'s `scored`
+    channel); the fix after them.
+  - The scoring and the correction hold the model between them
+    (`ModelQueue::hold`): getting Home's talk ready had taken it for a piece
+    in between.
+  - Each judge's instructions are kept like a talk's (`ella-judge-*.bin`,
+    6-15 MB, three of them, counted apart from the talks' six so they never
+    push one out): read once and kept, then restored in a few milliseconds,
+    369 tokens of the scoring's and 160 of the correction's. Only what follows
+    them is read in pieces, since a piece shorter than what the slot holds
+    would throw the rest away. They are got ready ahead too, after Home's
+    talk (`Errand::PrepareRecap`): once a step, while the learner reads the
+    recap that moved them on, and the placement's before the placement chat.
+  - The correction is read only as far as it decides the fix
+    (`notes::fix_settled`): a word to change in an answer whose earlier
+    answers are all in cannot be beaten by any line after it, so the rest of
+    the answer is dropped. Its tokens are a second or more each on a laptop.
+
+  The skills now show 8-13 s after the recap opens and the fix 13-17 s after,
+  what went well at once. The first recap before a judge's instructions are
+  kept scored after 21 s and had its fix after 29 s. Talks are untouched:
+  their prompts, slots and requests, and the rule that a talk goes first.
 
 Tried and not kept:
 
@@ -537,6 +582,14 @@ Tried and not kept:
   turn, and eight bench runs of the two ledger chores broke the ledger 5 times
   with it against 4 without: too few runs to tell, and too little saved to try
   it on learners.
+- llama-server's n-gram speculative decoding (`--spec-type ngram-simple`,
+  drafts of 8-16 tokens looked up after 4), for the correction, which mostly
+  copies the answers back. It is a server flag, so the talk's replies draft
+  too, and only one draft token in ten was taken there: on one thread their
+  writing slowed from 13.3 to 10.8 tokens a second. The correction took 39% of
+  its drafts and still slowed, from 18.5 to 15.7, since one thread checks a
+  draft about as slowly as it writes one; on four threads it sped up from 26.1
+  to 36.4. Not worth a slower talk on the laptops with fewest cores.
 
 ## Repeatable Canary/Whisper benchmark
 
