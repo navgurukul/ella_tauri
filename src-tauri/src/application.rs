@@ -1909,6 +1909,12 @@ fn transcribe_stream_chunk(
             let fell_back = transcription.fallback_from.is_some();
             (transcription.text, transcription.engine, fell_back, None)
         }
+        // Canary found no words even after trying the audio another way, so
+        // nothing stood in for it and this piece adds nothing to the answer.
+        Err(error @ EllaError::Validation(_)) => {
+            eprintln!("[LATENCY]     stt-stream> chunk {index} has no words ({error})");
+            (String::new(), "no-words".into(), false, Some(error.to_string()))
+        }
         Err(error) => {
             eprintln!("[LATENCY]     stt-stream> chunk {index} produced no words ({error})");
             (String::new(), "none".into(), true, Some(error.to_string()))

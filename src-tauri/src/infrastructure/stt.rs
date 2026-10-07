@@ -45,6 +45,12 @@ pub struct Transcription {
 pub trait SpeechToTextEngine: Send + Sync {
     fn status(&self) -> SttStatus;
     fn transcribe(&self, samples: &[i16], sample_rate: u32) -> EllaResult<Transcription>;
+    /// Whether this engine finding no words should be taken as the answer,
+    /// rather than handed to the fallback. True for an engine that has
+    /// already tried the audio more than one way before saying so.
+    fn heard_nothing_is_final(&self) -> bool {
+        false
+    }
 }
 
 pub struct SttRouter {
@@ -72,6 +78,15 @@ impl SttRouter {
         eprintln!("[LATENCY]     stt> trying primary engine: {primary_name}");
         match self.primary.transcribe(samples, sample_rate) {
             Ok(result) => Ok(result),
+            // No words, from an engine that has already tried the audio more
+            // than one way, is the answer. On the Windows test laptop every
+            // piece of an answer Canary found no words in went to Windows
+            // speech, which wrote "I have a felony and" for "I found it at"
+            // and "Senators Alan Hiatt lives of all" for "How am I holding
+            // your deposit?", and the model replied to that.
+            Err(EllaError::Validation(reason)) if self.primary.heard_nothing_is_final() => {
+                Err(EllaError::Validation(reason))
+            }
             Err(primary_error) => {
                 eprintln!(
                     "[LATENCY]     stt> primary {primary_name} FAILED ({primary_error}), trying fallback"
@@ -168,6 +183,10 @@ impl CanaryStt {
 }
 
 impl SpeechToTextEngine for CanaryStt {
+    fn heard_nothing_is_final(&self) -> bool {
+        true
+    }
+
     fn status(&self) -> SttStatus {
         match &self.runtime {
             Ok(runtime) => SttStatus {
@@ -213,6 +232,7 @@ impl SpeechToTextEngine for CanaryStt {
                 "I did not hear enough speech. Please speak for at least a quarter second.".into(),
             ));
         }
+        let unpadded = pcm.clone();
         // Canary's attention decoder emits an instant EOS ("no words") when
         // speech starts or ends flush at the utterance boundary, which the
         // tight VAD trim produces (verified against captured failure WAVs).
@@ -220,24 +240,51 @@ impl SpeechToTextEngine for CanaryStt {
         // and costs only ~60 ms of extra encode time.
         pad_with_silence(&mut pcm, CANARY_EDGE_SILENCE_SAMPLES);
         let started = Instant::now();
-        let options = RunOptions {
-            language: Some("en".into()),
-            timestamps: TimestampKind::None,
-            pnc: Pnc::On,
-            ..RunOptions::default()
-        };
-        let result = runtime
+        let mut session = runtime
             .session
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .run(&pcm, &options)
-            .map_err(|error| {
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut run = |audio: &[f32], pnc: Pnc| {
+            let options = RunOptions {
+                language: Some("en".into()),
+                timestamps: TimestampKind::None,
+                pnc,
+                ..RunOptions::default()
+            };
+            session.run(audio, &options).map_err(|error| {
                 let dump = dump_canary_failure(samples, sample_rate);
                 EllaError::Engine(format!(
                     "Canary transcription failed: {error}{}",
                     dump_note(&dump)
                 ))
-            })?;
+            })
+        };
+        let mut result = run(&pcm, Pnc::On)?;
+        let mut text = result.text.trim().to_owned();
+        // With punctuation and capitals on, the decoder can also end before
+        // it begins on audio that is full of words, padded or not. All 11
+        // pieces the Windows test laptop saved that way came back empty on
+        // every retry with punctuation on, on the CPU and on Metal; with it
+        // off, the 10 that held speech came back with their words — "How am
+        // I holding your deposit?", which Windows speech had written as
+        // "Senators Alan Hiatt lives of all The Lotto" — and the one that was
+        // near silence stayed empty. Padded first, then not: one of the ten
+        // gave its words only unpadded.
+        if text.is_empty() {
+            for (audio, padding) in [(&pcm, "padded"), (&unpadded, "unpadded")] {
+                let retry = run(audio, Pnc::Off)?;
+                let heard = retry.text.trim();
+                if !heard.is_empty() {
+                    eprintln!(
+                        "[LATENCY]     stt> canary heard no words with punctuation on; with it off ({padding}): \"{heard}\""
+                    );
+                    text = written_up(heard);
+                    result = retry;
+                    break;
+                }
+            }
+        }
+        drop(session);
         let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
         eprintln!(
             "[LATENCY]     stt> canary inference took {:.1}ms (mel={:.1}ms encode={:.1}ms decode={:.1}ms, backend={})",
@@ -247,7 +294,6 @@ impl SpeechToTextEngine for CanaryStt {
             result.timings.decode_ms,
             runtime.model.backend()
         );
-        let text = result.text.trim().to_owned();
         if text.is_empty() {
             let dump = dump_canary_failure(samples, sample_rate);
             eprintln!(
@@ -428,6 +474,27 @@ pub fn validate_canary_model(path: &Path, verify_sha256: bool) -> Result<(), Str
 /// 500 ms at 16 kHz, applied to both ends of the audio Canary decodes.
 const CANARY_EDGE_SILENCE_SAMPLES: usize = 8_000;
 
+/// Words Canary wrote with punctuation and capitals off, made to read like
+/// the rest of the answer: a capital to begin with, and "I" as a word.
+fn written_up(heard: &str) -> String {
+    let words: Vec<String> = heard
+        .split_whitespace()
+        .map(|word| {
+            if word == "i" || word.starts_with("i'") {
+                format!("I{}", &word[1..])
+            } else {
+                word.to_owned()
+            }
+        })
+        .collect();
+    let joined = words.join(" ");
+    let mut characters = joined.chars();
+    match characters.next() {
+        Some(first) => first.to_uppercase().chain(characters).collect(),
+        None => joined,
+    }
+}
+
 fn pad_with_silence(pcm: &mut Vec<f32>, samples_each_side: usize) {
     let mut padded = Vec::with_capacity(pcm.len() + samples_each_side * 2);
     padded.extend(std::iter::repeat(0.0_f32).take(samples_each_side));
@@ -494,6 +561,15 @@ mod tests {
     struct FakeStt {
         name: &'static str,
         fails: bool,
+        /// Finds no words, and says so the way Canary and SAPI do.
+        hears_nothing: bool,
+        heard_nothing_is_final: bool,
+    }
+
+    impl FakeStt {
+        fn hearing(name: &'static str) -> Self {
+            Self { name, fails: false, hears_nothing: false, heard_nothing_is_final: false }
+        }
     }
 
     impl SpeechToTextEngine for FakeStt {
@@ -505,9 +581,16 @@ mod tests {
             }
         }
 
+        fn heard_nothing_is_final(&self) -> bool {
+            self.heard_nothing_is_final
+        }
+
         fn transcribe(&self, _samples: &[i16], _sample_rate: u32) -> EllaResult<Transcription> {
             if self.fails {
                 return Err(EllaError::Engine("deliberate primary failure".into()));
+            }
+            if self.hears_nothing {
+                return Err(EllaError::Validation("received audio but found no words".into()));
             }
             Ok(Transcription {
                 text: "fallback transcript".into(),
@@ -551,18 +634,48 @@ mod tests {
     #[test]
     fn router_uses_fallback_and_records_the_failed_primary() {
         let router = SttRouter::new(
-            Box::new(FakeStt {
-                name: "canary-test",
-                fails: true,
-            }),
-            Some(Box::new(FakeStt {
-                name: "whisper-test",
-                fails: false,
-            })),
+            Box::new(FakeStt { fails: true, ..FakeStt::hearing("canary-test") }),
+            Some(Box::new(FakeStt::hearing("whisper-test"))),
         );
 
         let transcription = router.transcribe(&[1; 8_000], 16_000).unwrap();
         assert_eq!(transcription.engine, "whisper-test");
         assert_eq!(transcription.fallback_from.as_deref(), Some("canary-test"));
+    }
+
+    #[test]
+    fn no_words_from_canary_is_the_answer_and_never_goes_to_the_fallback() {
+        let router = SttRouter::new(
+            Box::new(FakeStt {
+                hears_nothing: true,
+                heard_nothing_is_final: true,
+                ..FakeStt::hearing("canary-test")
+            }),
+            Some(Box::new(FakeStt::hearing("windows-test"))),
+        );
+        let error = router.transcribe(&[1; 8_000], 16_000).unwrap_err();
+        assert!(
+            matches!(error, EllaError::Validation(_)),
+            "the fallback's words would have been used instead: {error}"
+        );
+    }
+
+    #[test]
+    fn no_words_from_an_engine_that_tried_once_still_goes_to_the_fallback() {
+        // `ELLA_STT_ENGINE=windows` puts SAPI first and Canary behind it.
+        let router = SttRouter::new(
+            Box::new(FakeStt { hears_nothing: true, ..FakeStt::hearing("windows-test") }),
+            Some(Box::new(FakeStt::hearing("canary-test"))),
+        );
+        let transcription = router.transcribe(&[1; 8_000], 16_000).unwrap();
+        assert_eq!(transcription.engine, "canary-test");
+        assert_eq!(transcription.fallback_from.as_deref(), Some("windows-test"));
+    }
+
+    #[test]
+    fn words_heard_without_punctuation_read_like_the_rest_of_the_answer() {
+        assert_eq!(written_up("how am i holding your deposit"), "How am I holding your deposit");
+        assert_eq!(written_up("i'm sure it's  crispy and i've had it"), "I'm sure it's crispy and I've had it");
+        assert_eq!(written_up(""), "");
     }
 }
