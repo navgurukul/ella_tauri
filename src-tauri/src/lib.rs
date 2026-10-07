@@ -4,6 +4,7 @@ pub mod domain;
 pub mod error;
 pub mod infrastructure;
 mod ipc;
+mod machine;
 pub mod notes;
 pub mod progress;
 mod setup;

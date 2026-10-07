@@ -149,6 +149,8 @@ impl LlamaServer {
                 binary.display()
             ))
         })?;
+        // Its CPU time is Ella's, not something else's slowing her down.
+        crate::machine::watch(child.id());
 
         let tail = Arc::new(Mutex::new(Vec::new()));
         if let Some(stderr) = child.stderr.take() {
