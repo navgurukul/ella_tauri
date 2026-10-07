@@ -6368,6 +6368,14 @@ mod speech_stream_tests {
         starts: PathBuf,
     }
 
+    /// The standalone Piper writes its WAVs into the shared temp directory,
+    /// named for the process and counted from 0 by each daemon. Two of these
+    /// tests at once write the same `ella-piper-<pid>-0.wav`, and one sees
+    /// the other's file in its check that nothing was left behind, so they
+    /// take turns.
+    #[cfg(unix)]
+    static ONE_PIPER_AT_A_TIME: Mutex<()> = Mutex::new(());
+
     #[cfg(unix)]
     fn fake_piper(root: &Path) -> FakePiper {
         use std::os::unix::fs::PermissionsExt;
@@ -6402,6 +6410,7 @@ mod speech_stream_tests {
     #[cfg(unix)]
     #[test]
     fn the_standalone_piper_stays_up_and_answers_each_line_with_its_own_wav() {
+        let _turn = ONE_PIPER_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
         let root = tempfile::tempdir().unwrap();
         let fake = fake_piper(root.path());
         let daemon = PiperDaemon::binary(fake.piper.clone(), fake.voice.clone());
@@ -6441,6 +6450,7 @@ mod speech_stream_tests {
     #[cfg(unix)]
     #[test]
     fn a_held_reply_is_heard_whole_and_in_order_once_released() {
+        let _turn = ONE_PIPER_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
         for wait_before_release in [Duration::from_millis(600), Duration::ZERO] {
             let root = tempfile::tempdir().unwrap();
             let fake = fake_piper(root.path());
@@ -6472,6 +6482,7 @@ mod speech_stream_tests {
     #[cfg(unix)]
     #[test]
     fn a_reply_nobody_released_comes_back_as_one_recording() {
+        let _turn = ONE_PIPER_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
         let root = tempfile::tempdir().unwrap();
         let fake = fake_piper(root.path());
         let mut pipeline =
