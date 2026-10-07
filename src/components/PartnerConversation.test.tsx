@@ -51,7 +51,7 @@ describe("talk partner conversation states", () => {
     expect(view.container.querySelector(".figure")).toHaveClass("figure--listening");
   });
 
-  it("follows the microphone and reply through speaking, listening, thinking and resting", async () => {
+  it("follows the microphone and reply through speaking, listening and thinking, then listens again", async () => {
     window.localStorage.clear();
     await bridge.saveLearner("Meera", 15);
     const session = await bridge.startChore("deposit-refund");
@@ -80,7 +80,9 @@ describe("talk partner conversation states", () => {
     expect(figure()).toHaveClass("figure--thinking");
     await act(async () => answer(reply));
     expect(figure()).toHaveClass("figure--speaking");
+    // Once Grumble has finished the line, the mic opens for the answer by itself.
     act(() => utterance?.onend?.({} as SpeechSynthesisEvent));
-    expect(figure()).toHaveClass("figure--resting");
+    await waitFor(() => expect(figure()).toHaveClass("figure--listening"));
+    expect(capture.start).toHaveBeenCalledTimes(2);
   });
 });
