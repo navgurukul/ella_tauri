@@ -1591,9 +1591,11 @@ fn chore_turn_message(context: &ChoreContext, turn: u32, answer: &str) -> Option
             // test laptop to "give some ground this turn" just as the tenant
             // said yes to Rs 500, and he answered "Understood. I will return
             // Rs 1000 now. I had a bit more time to think."
+            // The deal ends the talk, so this is the character's last line.
             parts.push(format!(
                 "They have just said yes to your figure of {} {}. Agree to it in one \
-                 short sentence, name no other figure, and write [DEAL] at the very end.",
+                 short sentence, name no other figure, and write [DEAL] at the very end. \
+                 It is the last thing you will say to them.",
                 ledger.spec.unit, ledger.current
             ));
         } else if turn >= 2 && ledger.current == ledger.spec.opening {

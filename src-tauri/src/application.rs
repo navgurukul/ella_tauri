@@ -1192,17 +1192,22 @@ impl AppService {
         // with nothing acting on it the cab conversation wished the learner
         // well on turn 6 and then again on turn 7.
         //
-        // Only the hard endings close the session. `[DEAL]` is deliberately not
-        // one of them: the deposit bench ran one more turn after signing off and
-        // spent it on "Thank you for understanding", which is a conversation
-        // ending the way conversations do. `suggested_complete` already offers
-        // the learner the way out at that point.
+        // Only the hard endings close the session, and a chore's deal is one.
+        // It used to be left for the learner to close, but nothing on the talk
+        // screen offers that: the deposit talk on the Windows test laptop
+        // agreed Rs 1000 at turn 6 and ran on to the turn limit at 12, the
+        // tenant saying "Thank you" and "Okay, give it back" to finish it and
+        // the landlord answering "I return Rs 1000 now". The character's
+        // agreement is its last line, and the recap follows it. A `[WALK]`
+        // still leaves the talk open.
         //
         // The placement chat closes on its goodbye, and its level is read
         // afterwards, by `assess_session`, while Ella is still saying it.
         let conversation_over = match (&brief, chore_context.as_ref()) {
             (Some(brief), _) => brief.closing,
-            (None, Some(context)) => turn >= context.max_turns,
+            (None, Some(context)) => {
+                turn >= context.max_turns || ledger_view.as_ref().is_some_and(|ledger| ledger.agreed)
+            }
             (None, None) => turn >= FREE_TOPIC_TURNS,
         };
         // `persist_turn` above already wrote this turn, so the summary counts it.
@@ -3509,6 +3514,80 @@ mod curriculum_flow_tests {
         service.log_out().unwrap();
         assert!(service.levels().is_err());
         assert!(service.start_placement().is_err());
+    }
+}
+
+/// How a chore with a ledger ends.
+#[cfg(test)]
+mod deal_tests {
+    use super::*;
+    use crate::{
+        domain::EngineStatus,
+        infrastructure::{
+            database::Database,
+            engines::{DemoEngine, SynthesizedAudio},
+            stt::Transcription,
+        },
+    };
+
+    /// A character who either agrees to whatever was said, the way a haggle
+    /// closes, or answers without agreeing.
+    struct Character {
+        agrees: bool,
+    }
+
+    impl TutorEngine for Character {
+        fn status(&self) -> EngineStatus {
+            DemoEngine.status()
+        }
+        fn opening(&self, topic: &Topic, learner_name: &str, pitch: &Pitch) -> EllaResult<String> {
+            DemoEngine.opening(topic, learner_name, pitch)
+        }
+        fn reply(&self, _: &TutorRequest) -> EllaResult<GeneratedReply> {
+            let reply = GeneratedReply::plain("Alright, alright. Take it at that price.".into(), 1.0, 1.0);
+            Ok(GeneratedReply {
+                signal: self.agrees.then_some(TurnSignal::Deal),
+                ..reply
+            })
+        }
+        fn uses_native_stt(&self) -> bool {
+            false
+        }
+        fn transcribe(&self, _: &[i16], _: u32) -> EllaResult<Transcription> {
+            Err(EllaError::Engine("no microphone in tests".into()))
+        }
+        fn synthesize(&self, _: &str) -> EllaResult<SynthesizedAudio> {
+            DemoEngine.synthesize("")
+        }
+    }
+
+    fn haggle(agrees: bool) -> (AppService, Session) {
+        let service = AppService::new(Database::in_memory().unwrap(), Box::new(Character { agrees }));
+        service.save_learner("Asha", Some(14)).unwrap();
+        let chore = service.start_chore("market-cloth-price").unwrap();
+        (service, chore)
+    }
+
+    #[test]
+    fn a_deal_ends_the_talk_on_the_characters_agreement() {
+        let (service, chore) = haggle(true);
+        let turn = service.send_text_turn(&chore.id, "Okay, I will take it at that price.").unwrap();
+        assert!(turn.ledger.as_ref().is_some_and(|ledger| ledger.agreed));
+        let summary = turn.session_summary.expect("the deal closes the talk");
+        assert!(summary.chore.is_some_and(|recap| recap.agreed), "the recap says they agreed");
+        assert_eq!(service.get_session(&chore.id).unwrap().status, "complete");
+        assert!(
+            service.send_text_turn(&chore.id, "Thank you.").is_err(),
+            "nothing more is said in a talk that has ended"
+        );
+    }
+
+    #[test]
+    fn a_turn_without_a_deal_leaves_the_talk_open() {
+        let (service, chore) = haggle(false);
+        let turn = service.send_text_turn(&chore.id, "That is too much for me.").unwrap();
+        assert!(turn.session_summary.is_none());
+        assert_eq!(service.get_session(&chore.id).unwrap().status, "active");
     }
 }
 

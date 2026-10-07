@@ -652,6 +652,10 @@ fn run(options: &Options) -> Result<(), String> {
             println!("\n  character ended the conversation: {:?}", ended_with.unwrap());
             break;
         }
+        if result.session_summary.is_some() {
+            println!("\n  the talk closed itself");
+            break;
+        }
     }
 
     // ---- summary ----
