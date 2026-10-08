@@ -16,3 +16,6 @@ engines
 # updater signing keys must never enter the repo
 *.key
 *.key.pub
+
+# local Claude Code settings
+.claude/
