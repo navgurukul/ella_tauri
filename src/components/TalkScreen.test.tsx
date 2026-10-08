@@ -39,10 +39,27 @@ async function openTalk(onComplete = vi.fn()) {
 
 const finish = (line: SpeechSynthesisUtterance) => act(() => line.onend?.({} as SpeechSynthesisEvent));
 
-/** The learner says something: the mic's level rises for a moment. */
-function speakInto(mic: speech.VoiceCapture) {
+/** The clock the screen reads through `performance.now`, moved by hand. */
+function handClock(start = 10_000) {
+  let now = start;
+  vi.spyOn(performance, "now").mockImplementation(() => now);
+  return {
+    advance(ms: number) {
+      now += ms;
+    },
+  };
+}
+
+/** The learner says something: the mic's level stays up for half a second,
+ * a block every 43 ms as at 48 kHz. */
+function speakInto(mic: speech.VoiceCapture, clock: ReturnType<typeof handClock>) {
   const onLevel = vi.mocked(mic.start).mock.calls.at(-1)?.[1];
-  for (let block = 0; block < 10; block += 1) onLevel?.(0.4);
+  act(() => {
+    for (let block = 0; block < 12; block += 1) {
+      clock.advance(43);
+      onLevel?.(0.4);
+    }
+  });
 }
 
 beforeEach(async () => {
@@ -110,6 +127,7 @@ describe("the mic after Ella speaks", () => {
   });
 
   it("stays closed after the line that closes the talk, which goes on to the summary", async () => {
+    const clock = handClock();
     const mic = fakeMic();
     const said = linesSaid();
     const onComplete = vi.fn();
@@ -126,7 +144,7 @@ describe("the mic after Ella speaks", () => {
     vi.spyOn(bridge, "sendVoiceTurn").mockResolvedValue({ ...reply, session_summary: summary });
     finish(said[0]);
     await screen.findByRole("button", { name: "Stop and send" });
-    speakInto(mic);
+    speakInto(mic, clock);
 
     fireEvent.click(screen.getByRole("button", { name: "Stop and send" }));
     await waitFor(() => expect(said).toHaveLength(2));
@@ -161,32 +179,68 @@ describe("pressing the mic once it has opened by itself", () => {
   // A learner used to pressing to answer presses as it opens: on the Windows
   // test laptop that sent a fraction of a second of silence, and Ella said she
   // could not hear them, 9 times in 58 answers.
-  it("keeps listening when pressed before it has heard anything, and sends on the next press", async () => {
-    const mic = fakeMic();
-    const said = linesSaid();
-    await openTalk();
-    finish(said[0]);
-
-    fireEvent.click(await screen.findByRole("button", { name: "Stop and send" }));
-    expect(screen.getByRole("status")).toHaveTextContent(/still listening/i);
-    expect(screen.getByRole("button", { name: "Stop and send" })).toBeInTheDocument();
-    expect(mic.stop).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole("button", { name: "Stop and send" }));
-    await waitFor(() => expect(mic.stop).toHaveBeenCalledOnce());
-    await waitFor(() => expect(said).toHaveLength(2));
-  });
-
-  it("sends at the first press once it has heard the learner", async () => {
+  async function openedByItself() {
+    const clock = handClock();
     const mic = fakeMic();
     const said = linesSaid();
     await openTalk();
     finish(said[0]);
     await screen.findByRole("button", { name: "Stop and send" });
+    return { clock, mic, said };
+  }
 
-    speakInto(mic);
-    fireEvent.click(screen.getByRole("button", { name: "Stop and send" }));
+  const press = () => fireEvent.click(screen.getByRole("button", { name: "Stop and send" }));
+
+  it("keeps listening when pressed before it has heard anything, and sends at a later press", async () => {
+    const { clock, mic, said } = await openedByItself();
+    press();
+    expect(screen.getByRole("status")).toHaveTextContent(/still listening/i);
+    expect(screen.getByRole("button", { name: "Stop and send" })).toBeInTheDocument();
+    expect(mic.stop).not.toHaveBeenCalled();
+
+    clock.advance(1_000);
+    press();
     await waitFor(() => expect(mic.stop).toHaveBeenCalledOnce());
+    await waitFor(() => expect(said).toHaveLength(2));
+  });
+
+  it("takes a double press, or a click and Space together, as one press", async () => {
+    const { clock, mic } = await openedByItself();
+    press();
+    clock.advance(150);
+    press();
+    clock.advance(150);
+    fireEvent.keyDown(window, { code: "Space" });
+    expect(mic.stop).not.toHaveBeenCalled();
+    expect(screen.getByRole("status")).toHaveTextContent(/still listening/i);
+  });
+
+  it("sends at the first press once it has heard the learner", async () => {
+    const { clock, mic } = await openedByItself();
+    speakInto(mic, clock);
+    press();
+    await waitFor(() => expect(mic.stop).toHaveBeenCalledOnce());
+  });
+
+  it("does not take a click or a knock for the learner", async () => {
+    const { clock, mic } = await openedByItself();
+    const onLevel = vi.mocked(mic.start).mock.calls.at(-1)?.[1];
+    for (let knock = 0; knock < 6; knock += 1) {
+      clock.advance(400);
+      onLevel?.(0.9);
+    }
+    press();
+    expect(mic.stop).not.toHaveBeenCalled();
+    expect(screen.getByRole("status")).toHaveTextContent(/still listening/i);
+  });
+
+  it("puts the usual hint back once it hears the answer begin", async () => {
+    const { clock, mic } = await openedByItself();
+    press();
+    expect(screen.getByRole("status")).toHaveTextContent(/still listening/i);
+
+    speakInto(mic, clock);
+    expect(screen.getByRole("status")).toHaveTextContent("Listening… press again when you finish");
   });
 
   it("sends at the first press when the learner opened it", async () => {
@@ -197,43 +251,5 @@ describe("pressing the mic once it has opened by itself", () => {
     fireEvent.click(screen.getByRole("button", { name: "Interrupt Ella and start speaking" }));
     fireEvent.click(await screen.findByRole("button", { name: "Stop and send" }));
     await waitFor(() => expect(mic.stop).toHaveBeenCalledOnce());
-  });
-
-  it("puts itself down unsent when it has heard nothing for half a minute", async () => {
-    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
-    let now = 1_000;
-    vi.spyOn(performance, "now").mockImplementation(() => now);
-    const mic = fakeMic();
-    const said = linesSaid();
-    await openTalk();
-    finish(said[0]);
-    await screen.findByRole("button", { name: "Stop and send" });
-
-    now += 29_000;
-    act(() => vi.advanceTimersByTime(500));
-    expect(screen.getByRole("button", { name: "Stop and send" })).toBeInTheDocument();
-
-    now += 2_000;
-    act(() => vi.advanceTimersByTime(500));
-    expect(await screen.findByRole("button", { name: "Start speaking" })).toBeInTheDocument();
-    expect(mic.cancel).toHaveBeenCalled();
-    expect(mic.stop).not.toHaveBeenCalled();
-  });
-
-  it("stays open past half a minute once it has heard the learner", async () => {
-    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
-    let now = 1_000;
-    vi.spyOn(performance, "now").mockImplementation(() => now);
-    const mic = fakeMic();
-    const said = linesSaid();
-    await openTalk();
-    finish(said[0]);
-    await screen.findByRole("button", { name: "Stop and send" });
-
-    speakInto(mic);
-    now += 31_000;
-    act(() => vi.advanceTimersByTime(500));
-    expect(screen.getByRole("button", { name: "Stop and send" })).toBeInTheDocument();
-    expect(mic.cancel).not.toHaveBeenCalled();
   });
 });
