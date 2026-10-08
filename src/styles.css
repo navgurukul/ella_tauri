@@ -1881,6 +1881,15 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 }
 .mic:not(:disabled):active { transform: scale(0.95); }
 .mic:disabled { opacity: 0.65; cursor: not-allowed; }
+/* Listening, whether the learner opened the mic or it opened by itself after a
+   line: a still ring, so the open mic shows without an animation costing the
+   CPU the model is waiting on. */
+.mic[aria-pressed="true"] {
+  box-shadow: 0 0 0 6px rgba(255, 255, 255, 0.6), 0 12px 28px rgba(38, 38, 38, 0.35);
+}
+.has-partner .mic[aria-pressed="true"] {
+  box-shadow: 0 0 0 6px rgba(38, 38, 38, 0.4), 0 12px 28px rgba(38, 38, 38, 0.35);
+}
 .mic.is-done { background: var(--green); }
 .mic.is-done:disabled { opacity: 1; cursor: default; }
 .mic__check {

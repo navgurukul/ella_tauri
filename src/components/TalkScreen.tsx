@@ -54,6 +54,15 @@ const SPEAK_UP_LEVEL_THRESHOLD = 0.05;
 // enough that a learner who has gone quiet does not sit there wondering if
 // anything is happening.
 const SPEAK_UP_DELAY_MS = 4000;
+// The mic has heard the learner once its level has stayed over that threshold
+// for this long, with no gap longer than `HEARD_GAP_MS`: longer than a click,
+// a knock or a breath, shorter than a word. Timed rather than counted in
+// blocks, whose length follows the sound card's rate.
+const HEARD_MS = 150;
+const HEARD_GAP_MS = 250;
+// After a press the mic held back, further presses are held back too for this
+// long: a double-click, or a click and Space together, is one press.
+const HELD_PRESS_MS = 800;
 
 export function TalkScreen({
   session,
@@ -119,6 +128,21 @@ export function TalkScreen({
   // answer without a click. Anything else that stops her - an interruption, a
   // playback error, the watchdog's guess - leaves the mic to the learner.
   const [answerDue, setAnswerDue] = useState(false);
+  // Whether the open mic opened by itself, and whether it has heard the
+  // learner yet. A learner used to pressing the mic to answer presses it just
+  // as it opens on its own, which used to send a fraction of a second of
+  // silence: on the Windows test laptop, 9 of 58 answers on 0.1.15 came back
+  // "I couldn't hear any words" that way. So a press on a mic that opened by
+  // itself and has heard nothing keeps it listening, and says so. It sends
+  // once the learner has been heard, or at the next press after a moment, so
+  // nobody the meter misses is ever stuck.
+  const openedByItself = useRef(false);
+  const heard = useRef(false);
+  const loudSince = useRef(0);
+  const lastLoudAt = useRef(Number.NEGATIVE_INFINITY);
+  /** When a press was held back, while the mic is still waiting to hear. */
+  const heldPressAt = useRef<number | null>(null);
+  const [holdingForAnswer, setHoldingForAnswer] = useState(false);
 
   const voice = useRef(createVoiceCapture());
   const voiceStreamId = useRef<string | null>(null);
@@ -243,11 +267,38 @@ export function TalkScreen({
   }, [state]);
 
   // Called for every block of audio, about 23 times a second, while Canary
-  // transcribes the answer beside it. Nothing on screen shows the level, so it
-  // touches no state: a render per block would cost the CPU the model and the
-  // speech recognizer are both waiting on.
+  // transcribes the answer beside it. Nothing on screen shows the level, and a
+  // render per block would cost the CPU the model and the speech recognizer
+  // are both waiting on, so it touches state only once: when the mic first
+  // hears the learner after a held press, to put the usual hint back.
   function handleLevel(level: number) {
-    if (level >= SPEAK_UP_LEVEL_THRESHOLD) lastSoundAt.current = performance.now();
+    if (level < SPEAK_UP_LEVEL_THRESHOLD) return;
+    const now = performance.now();
+    lastSoundAt.current = now;
+    if (now - lastLoudAt.current > HEARD_GAP_MS) loudSince.current = now;
+    lastLoudAt.current = now;
+    if (!heard.current && now - loudSince.current >= HEARD_MS) {
+      heard.current = true;
+      if (heldPressAt.current !== null) setHoldingForAnswer(false);
+    }
+  }
+
+  /** The mic button, or Space. */
+  function pressMic() {
+    if (state !== "listening") {
+      void beginListening();
+      return;
+    }
+    const held = heldPressAt.current;
+    const now = performance.now();
+    if (held !== null && now - held < HELD_PRESS_MS) return;
+    if (openedByItself.current && !heard.current && held === null) {
+      llog("mic:still-listening", "pressed before anything was heard on a mic that opened by itself; still listening");
+      heldPressAt.current = now;
+      setHoldingForAnswer(true);
+      return;
+    }
+    void finishListening();
   }
 
   function stopPlayback() {
@@ -377,7 +428,7 @@ export function TalkScreen({
     setAnswerDue(false);
     if (typing || pendingSummary || !voice.current.supported) return;
     llog("mic:auto-open", `${speaker} finished speaking; opening the mic for the answer`);
-    void beginListening();
+    void beginListening(true);
     // beginListening is redeclared every render; the state it reads is fresh.
   }, [answerDue, sending, micStarting, state, typing, pendingSummary]);
 
@@ -477,7 +528,9 @@ export function TalkScreen({
     );
   }
 
-  async function beginListening() {
+  /** Open the mic: `byItself` when Ella has just finished a line, rather than
+   * because the learner pressed it. */
+  async function beginListening(byItself = false) {
     if (micStarting || sending) return;
     const operation = ++micOperation.current;
     setMicStarting(true);
@@ -486,6 +539,12 @@ export function TalkScreen({
     setRetryPrompt(null);
     stopPlayback();
     setState("resting");
+    openedByItself.current = byItself;
+    heard.current = false;
+    loudSince.current = 0;
+    lastLoudAt.current = Number.NEGATIVE_INFINITY;
+    heldPressAt.current = null;
+    setHoldingForAnswer(false);
     try {
       setLiveTranscript("");
       lastSoundAt.current = performance.now();
@@ -776,7 +835,9 @@ export function TalkScreen({
     ? "Opening the microphone…"
     : state === "speaking" && sending
       ? `${speaker} is answering…`
-      : MIC_HINT[state](speaker);
+      : state === "listening" && holdingForAnswer
+        ? "Still listening… say your answer, then press again"
+        : MIC_HINT[state](speaker);
   const spaceWorks = !micStarting && !sending && (state === "resting" || state === "listening");
   const announcedStatus = `${micHint}${spaceWorks && state === "resting" ? " Space" : ""}${
     reaction === "success" ? " Nice work." : ""
@@ -785,7 +846,7 @@ export function TalkScreen({
   useEffect(() => {
     spaceAction.current = () => {
       if (typing || interactionLocked) return;
-      void (state === "listening" ? finishListening() : beginListening());
+      pressMic();
     };
   });
 
@@ -937,7 +998,9 @@ export function TalkScreen({
           </form>
         ) : (
           <div className="mic-stack">
-            {showSpeakUpHint && (
+            {/* The hint under the mic already asks for the answer after a
+                held press; two prompts at once would talk over each other. */}
+            {showSpeakUpHint && !holdingForAnswer && (
               <span className="pill pill--nudge" role="status" aria-live="polite">
                 Speak up to continue the conversation
               </span>
@@ -958,7 +1021,7 @@ export function TalkScreen({
                         ? `Interrupt ${speaker} and start speaking`
                         : "Start speaking"
                 }
-                onClick={() => (state === "listening" ? void finishListening() : void beginListening())}
+                onClick={pressMic}
               >
                 {micStarting ? <LoaderCircle className="spin" size={30} /> : <MicGlyph />}
               </button>
