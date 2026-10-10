@@ -489,6 +489,29 @@ impl Database {
         Ok(sessions)
     }
 
+    /// The topics of the latest talks the learner spoke in, each once, newest
+    /// first, and at most `limit` of them: what Home moves to the back of its
+    /// topics (`topics::offered`). A placement chat is not a topic, and a talk
+    /// opened and left without an answer was not talked about. A chore's talk
+    /// keeps its chore's id here, which is no topic's.
+    pub fn recent_topics(&self, limit: u32) -> EllaResult<Vec<String>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT topic_id FROM sessions s
+             WHERE topic_id != 'placement'
+               AND EXISTS (
+                 SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.speaker = 'learner'
+               )
+             GROUP BY topic_id
+             ORDER BY MAX(julianday(started_at)) DESC, MAX(rowid) DESC
+             LIMIT ?1",
+        )?;
+        let topics = statement
+            .query_map([limit], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(topics)
+    }
+
     /// Lifetime figures over every session on the laptop, not just the five
     /// on the home screen: the streak and the badges are computed from these,
     /// and a list that stopped at five made both shrink the more the learner
@@ -2699,6 +2722,25 @@ mod tests {
         database.sign_out().unwrap();
         database.sign_in().unwrap();
         assert_eq!(database.progress().unwrap(), open);
+    }
+
+    #[test]
+    fn the_recent_topics_are_the_latest_talked_about_each_once() {
+        let database = Database::in_memory().unwrap();
+        save_asha(&database);
+        talk(&database, "street-food", noon_utc(2026, 1, 10), 2, true);
+        talk(&database, "a2-cricket", noon_utc(2026, 1, 11), 1, true);
+        talk(&database, "placement", noon_utc(2026, 1, 12), 5, true);
+        // Opened and left without a word: not talked about.
+        talk(&database, "gbu", noon_utc(2026, 1, 13), 0, false);
+        // Talked about again, and left open: newest now.
+        talk(&database, "street-food", noon_utc(2026, 1, 14), 1, false);
+        talk(&database, "market-cloth-price", noon_utc(2026, 1, 15), 3, true);
+        assert_eq!(
+            database.recent_topics(20).unwrap(),
+            vec!["market-cloth-price", "street-food", "a2-cricket"]
+        );
+        assert_eq!(database.recent_topics(2).unwrap(), vec!["market-cloth-price", "street-food"]);
     }
 
     #[test]

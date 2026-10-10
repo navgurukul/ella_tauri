@@ -40,6 +40,7 @@ use crate::{
     },
     machine,
     telemetry::{self, record_judge, EngineDetails, JudgeTiming, LlmRun, WarmUpReport},
+    topics,
 };
 
 #[derive(Debug)]
@@ -1183,6 +1184,10 @@ fn read_daemon_header(stdout: &mut BufReader<ChildStdout>) -> EllaResult<Value> 
 /// fiction going: before the two were tied together the driver greeted the
 /// learner and turn 1 came back as a speaking buddy discussing cabs in the
 /// abstract.
+///
+/// Each topic's scene is in `shared/topics.json`. A topic with no role of its
+/// own, Street food stories and most of the levels' talks, is Ella as herself
+/// over a cup of chai, there to listen.
 struct Scene {
     /// Who Ella is here, written as a second-person clause.
     role: &'static str,
@@ -1192,115 +1197,32 @@ struct Scene {
     /// passenger "How much fare do you expect?" and then "How long will the
     /// trip take?" four turns running, while the learner objected twice.
     ///
-    /// Each scene also names the *kind* of concrete detail its role invents
-    /// (a dish, a fare, a symptom, a price) and tells it to keep whatever it
-    /// first says fixed for the rest of the conversation. A chore's ledger
-    /// gets this for free from `ledger_rules_fragment` and the state passed
-    /// back in on every turn; a free conversation has neither, so nothing
-    /// stops a 3B model from naming a different price for the same dish two
-    /// turns later unless the prompt says to hold it.
+    /// Each role also names the *kind* of concrete detail it invents (a dish,
+    /// a fare, a symptom, a price) and tells it to keep whatever it first says
+    /// fixed for the rest of the conversation. A chore's ledger gets this for
+    /// free from `ledger_rules_fragment` and the state passed back in on every
+    /// turn; a free conversation has neither, so nothing stops a 3B model from
+    /// naming a different price for the same dish two turns later unless the
+    /// prompt says to hold it.
     owns: &'static str,
     /// What the learner came to do, phrased as what Ella draws out of them
-    /// rather than as a list of actions somebody performs. Mirrors the
-    /// `Topic::prompt` they read on the topic card.
+    /// rather than as a list of actions somebody performs.
     draw_out: &'static str,
 }
 
 fn scene_for(topic_id: &str) -> Scene {
-    match topic_id {
-        "restaurant-order" => Scene {
-            role: "the waiter at the restaurant they have just sat down in",
-            owns: "You know the menu, the dishes and what everything costs. Say what a \
-                   dish is and what it costs yourself, picking ordinary Indian dishes and \
-                   rupee prices as you go — a dosa, a biryani, a butter chicken, priced \
-                   the way a modest local restaurant would. Once you have named a dish \
-                   or a price in this conversation, keep it the same later on instead of \
-                   naming a different one next time. For example, if they ask for a \
-                   burger, say it is ninety rupees and ask what they would like to \
-                   drink. Never ask them what is on the menu, what a dish costs, or \
-                   what the bill comes to: those are yours to answer, not theirs.",
-            draw_out: "order a meal, ask you about the menu, and settle the bill with you",
+    match topics::find(topic_id) {
+        Some(topic) => Scene {
+            role: topic.role(),
+            owns: topic.owns(),
+            draw_out: topic.draw_out(),
         },
-        "booking-a-cab" => Scene {
-            role: "the cab driver they have just flagged down",
-            owns: "You know the roads, the fares and how long a trip takes. Name your \
-                   fare yourself, in rupees, and say yourself how long the trip will \
-                   take — pick an ordinary local fare and a plausible number of minutes \
-                   for wherever they say they are going. Once you have named a fare or a \
-                   time in this conversation, keep it the same later on instead of \
-                   naming a different one next time. For example, if they say they are \
-                   going to the railway station, name a fare like sixty rupees and say \
-                   it will take about fifteen minutes. Never ask them how much the fare \
-                   should be, how much they want to pay, how far it is, or how long it \
-                   takes: those are yours to answer, not theirs.",
-            draw_out: "tell you where to pick them up, say where they are going, and \
-                       agree your fare",
-        },
-        "job-interview" => Scene {
-            role: "the interviewer meeting them for a first interview",
-            owns: "You know the job and what you are looking for. Ask them about their \
-                   work yourself. If they ask what the role is or what it pays, answer \
-                   with an ordinary job an Indian employer might advertise — a shop \
-                   assistant, a delivery rider, an office assistant — and a plausible \
-                   monthly salary in rupees. Once you have named a role or a salary in \
-                   this conversation, keep it the same later on instead of naming \
-                   something different next time. For example, if they ask what the \
-                   role is, say you need a shop assistant for evening shifts and ask \
-                   what shop experience they have. Never ask them what the job is, what \
-                   it pays, or what you are looking for: those are yours to answer, not \
-                   theirs.",
-            draw_out: "introduce themselves and answer your questions about their work",
-        },
-        "doctor-clinic" => Scene {
-            role: "the doctor at the clinic they have walked into",
-            owns: "You are the one with the medical knowledge. Say what is wrong and \
-                   what they should do yourself, using an ordinary complaint like a \
-                   fever, a cough, or a stomach ache and a plain everyday remedy — rest, \
-                   water, a common tablet — never anything serious or frightening. Once \
-                   you have named what is wrong in this conversation, keep it the same \
-                   later on instead of naming something different next time. For \
-                   example, if they describe a headache, say it sounds like a mild \
-                   fever and tell them to rest and drink water, then ask how long they \
-                   have felt this way. Never ask them what their illness is, what \
-                   medicine to take, or how long it will last: those are yours to \
-                   answer, not theirs.",
-            draw_out: "explain how they feel and understand what you tell them to do",
-        },
-        "asking-directions" => Scene {
-            role: "a friendly local they have stopped on the street",
-            owns: "You know this area well. Give the directions yourself, street by \
-                   street, naming ordinary landmarks as you go — a market, a temple, a \
-                   bus stop, a signal — the way a local actually would. Once you have \
-                   named a landmark or a turn in this conversation, keep it the same \
-                   later on instead of naming something different next time. For \
-                   example, if they ask the way to the bus stand, tell them to walk \
-                   straight past the temple and turn left at the market, then ask if \
-                   that makes sense. Never ask them which way it is, how far it is, or \
-                   how long it takes to get there: those are yours to answer, not \
-                   theirs.",
-            draw_out: "say where they are trying to get to, and repeat your directions \
-                       back to you",
-        },
-        "market-bargaining" => Scene {
-            role: "the shopkeeper at the stall they are standing in front of",
-            owns: "You know your stock and your prices. Name your price yourself, in \
-                   rupees, for ordinary market goods — cloth, vegetables, fruit, a snack \
-                   — priced the way a local stall would. Once you have named a price in \
-                   this conversation, keep it the same later on instead of naming a \
-                   different one next time. For example, if they ask the price of a \
-                   shirt, say it is two hundred rupees and ask how many they would \
-                   like. Never ask them what the price should be or how much they want \
-                   to pay: naming a price is yours to do, not theirs.",
-            draw_out: "ask you the price, bargain with you, and agree a deal",
-        },
-        // Street food stories, and anything added to the catalog without a
-        // scene of its own: Ella as herself, which is what its opener says too.
-        // Nothing here is hers to answer, so `owns` only keeps her listening.
-        _ => Scene {
-            role: "yourself, sitting with them over a cup of chai",
-            owns: "You are here to listen to their story, so let them do the telling and \
-                   keep your own memories short.",
-            draw_out: "describe tastes and smells and tell you about a stall they love",
+        // Nothing starts a talk on a topic the catalogue does not have, but a
+        // talk that did would still be Ella, listening.
+        None => Scene {
+            role: topics::default_role(),
+            owns: topics::default_owns(),
+            draw_out: "talk with you about it",
         },
     }
 }
@@ -1344,6 +1266,11 @@ fn scene_clause(prompt: &str) -> &str {
 /// a hug in four of twelve replies where she had accepted none.
 fn ella_topic_prompt(learner_name: &str, topic_id: &str, topic_label: &str, level: &str) -> String {
     let scene = scene_for(topic_id);
+    // The catalogue's name for the topic in these instructions, where the
+    // label does not read as one: "family", not "My family", which would be
+    // the model's own. A topic the catalogue no longer has keeps the label its
+    // talk was saved with.
+    let topic_label = topics::find(topic_id).map_or(topic_label, |topic| topic.subject());
     format!(
         "You are Ella, a warm speaking buddy for an Indian learner named {learner_name}, \
          who is practising English at about {level} level. In this \
@@ -5731,30 +5658,14 @@ fn fallback_opening(context: &ChoreContext) -> String {
     )
 }
 
+/// A topic's first line: its greeting with the learner's name, then its
+/// opener, both authored in `shared/topics.json` rather than generated, for
+/// the same reason the chores' are (`chore_opening_for`).
 fn opening_for(topic_id: &str, learner_name: &str) -> String {
-    match topic_id {
-        "restaurant-order" => format!(
-            "Hi {learner_name}! We are at a restaurant and I am your waiter. What would you like to order today?"
-        ),
-        "booking-a-cab" => format!(
-            "Hi {learner_name}! I am the cab driver. Where would you like to go, and where should I pick you up?"
-        ),
-        "job-interview" => format!(
-            "Hello {learner_name}! Thank you for coming in. To start, could you tell me a little about yourself?"
-        ),
-        "doctor-clinic" => format!(
-            "Hi {learner_name}! I am the doctor here. Please sit down and tell me, how have you been feeling?"
-        ),
-        "asking-directions" => format!(
-            "Hi {learner_name}! You look a little lost. Where are you trying to go? I know this area well."
-        ),
-        "market-bargaining" => format!(
-            "Hi {learner_name}! Come, come, best prices here. What are you looking for today?"
-        ),
-        _ => format!(
-            "Hi {learner_name}! Tell me about the tastiest thing you ate this week. Where did you find it?"
-        ),
-    }
+    topics::find(topic_id).map_or_else(
+        || format!("Hi {learner_name}! What would you like to tell me about today?"),
+        |topic| topic.opening(learner_name),
+    )
 }
 
 #[cfg(test)]
@@ -6185,19 +6096,50 @@ mod ledger_tests {
     #[test]
     fn every_topic_in_the_catalog_has_a_scene_of_its_own() {
         let generic = scene_for("no-such-topic-id");
-        for topic in crate::domain::topics() {
-            // Street food is Ella as herself, which is what its opener says
-            // too, so it is the one topic the fallback scene is right for.
-            if topic.id == "street-food" {
-                continue;
+        for topic in topics::all() {
+            let scene = scene_for(&topic.id);
+            assert_eq!(scene.draw_out, topic.draw_out(), "{}", topic.id);
+            assert_ne!(scene.draw_out, generic.draw_out, "{} says nothing of what it is for", topic.id);
+            // A topic whose opener makes Ella somebody keeps her that somebody
+            // at turn 1; the rest are Ella as herself, which is what their
+            // openers say too.
+            if topic.plays_a_role() {
+                assert_ne!(
+                    scene.role, generic.role,
+                    "{} falls through to Ella as herself, so its opener's role is dropped at turn 1",
+                    topic.id
+                );
+            } else {
+                assert_eq!(scene.role, generic.role, "{}", topic.id);
             }
-            assert_ne!(
-                scene_for(&topic.id).role,
-                generic.role,
-                "{} falls through to the generic scene, so its opener's role is dropped at turn 1",
-                topic.id
-            );
         }
+        for id in ["restaurant-order", "booking-a-cab", "job-interview", "doctor-clinic", "asking-directions", "market-bargaining", "campus-visitors", "b2-pitch"] {
+            assert!(topics::find(id).unwrap().plays_a_role(), "{id}");
+        }
+    }
+
+    #[test]
+    fn a_free_conversation_names_its_topic_the_way_ella_would() {
+        // "My family" is the learner's family, not Ella's.
+        let prompt = ella_system_prompt("Asha", "a0-my-family", "My family", &Pitch::at("A0"));
+        assert!(prompt.contains("Keep the conversation on family:"));
+        assert!(prompt.contains("ask your family question again"));
+        assert!(!prompt.contains("My family"));
+        assert!(prompt.contains("say who is in their family and tell you their names"));
+        // A label the catalogue no longer has is named as it was saved.
+        let unknown = ella_system_prompt("Asha", "no-such-topic-id", "Old talk", &Pitch::at("A2"));
+        assert!(unknown.contains("Keep the conversation on Old talk:"));
+        // The desktop's own seven are named by their labels, as before.
+        let cab = ella_system_prompt("Asha", "booking-a-cab", "Booking a cab", &Pitch::at("A1"));
+        assert!(cab.contains("Keep the conversation on Booking a cab:"));
+    }
+
+    #[test]
+    fn a_debate_lets_the_learner_make_the_case() {
+        let prompt = ella_system_prompt("Asha", "b1-phones-in-school", "Phones in school", &Pitch::at("B1"));
+        assert!(prompt.contains("let them make the case"));
+        assert!(prompt.contains("never tell them which side is right"));
+        assert!(prompt.contains("argue for or against phones in school"));
     }
 
     #[test]
@@ -6372,13 +6314,9 @@ mod ledger_tests {
         // Nothing state-tracks a free conversation's invented price or
         // symptom the way `LedgerSpec` does for a chore, so the one thing
         // stopping a dish or a fare from changing value mid-conversation is
-        // this instruction. Street food is the fallback scene and invents
-        // nothing of its own, so it is exempt the same way the "every topic
-        // has a scene of its own" test above exempts it.
-        for topic in crate::domain::topics() {
-            if topic.id == "street-food" {
-                continue;
-            }
+        // this instruction. Ella as herself invents nothing of her own, so
+        // only a topic that makes her somebody is held to it.
+        for topic in topics::all().iter().filter(|topic| topic.plays_a_role()) {
             let scene = scene_for(&topic.id);
             assert!(
                 scene.owns.contains("keep it the same"),
@@ -6396,10 +6334,7 @@ mod ledger_tests {
         // for. Prose ("say it is ninety rupees"), never a labelled
         // transcript ("Ella: ...") — this is a voice app, and a model that
         // picks up a speaker-label habit would say the label out loud too.
-        for topic in crate::domain::topics() {
-            if topic.id == "street-food" {
-                continue;
-            }
+        for topic in topics::all().iter().filter(|topic| topic.plays_a_role()) {
             let scene = scene_for(&topic.id);
             assert!(
                 scene.owns.contains("For example"),

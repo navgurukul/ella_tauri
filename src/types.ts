@@ -62,13 +62,19 @@ export interface LearnerProgress {
   spoken_answers: number;
 }
 
+/** A topic as its cards print it, from `shared/topics.json`. */
 export interface Topic {
   id: string;
   label: string;
-  prompt: string;
-  emoji: string;
-  /** Palette hint from the backend; the home bento uses `Tone` from below. */
-  color: string;
+  /** `role_play`, `vocab`, `grammar`, `real_life`, `culture`, `debate` or `fluency`. */
+  kind: string;
+  minutes: number;
+  /** The card's mono line: "ROLE-PLAY · ~5 MIN", or a cadence of its own. */
+  meta: string;
+  /** The "Today's talk" card's line about it. */
+  blurb: string;
+  /** What Ella says first, after greeting the learner; the tall card quotes it. */
+  opener: string;
 }
 
 export interface Message {
@@ -117,7 +123,12 @@ export interface AppSnapshot {
   /** Whoever is saved on this laptop, signed in or not; null on a laptop
    * nobody has used yet. */
   saved_learner?: LearnerProfile | null;
+  /** Every topic written for the learner's level, in the order Home offers
+   * them: today's talk first. */
   topics: Topic[];
+  /** The talk Home will lead with tomorrow, which the recap suggests; null
+   * when signed out. */
+  tomorrow_topic?: Topic | null;
   /** The signed-in learner's five newest talks, newest first. Empty when
    * signed out. */
   recent_sessions: SessionListItem[];
@@ -453,24 +464,14 @@ export interface EllaBridge {
  * Presentation layer
  *
  * The Ella Desktop design shows framing the Rust backend does not model
- * yet: per-topic category and duration, badges, and a cast of talk
- * partners. Everything below is derived from `AppSnapshot` where the data
- * exists (the streak and badges from the learner's `progress`) and filled
- * from the editorial tables in `lib/presentation.ts` where it does not.
+ * yet: badges, and a cast of talk partners. Everything below is derived from
+ * `AppSnapshot` where the data exists (the streak and badges from the
+ * learner's `progress`) and filled from the editorial tables in
+ * `lib/presentation.ts` where it does not.
  * ------------------------------------------------------------------ */
 
-export type TopicCategory = "role-play" | "vocabulary" | "grammar" | "fluency";
-
-export type Tone = "violet" | "pink" | "green" | "orange" | "ink";
-
-export interface TopicPresentation {
-  category: TopicCategory;
-  minutes: number;
-  /** Longer line used by the "Today's talk" card. */
-  blurb: string;
-  /** Something the other side of the scene might say, printed on the tall topic card. */
-  sample: string;
-}
+/** A topic card's colour. */
+export type Tone = "violet" | "pink" | "green" | "orange" | "ink" | "blue";
 
 export type StreakDayState = "done" | "today" | "future";
 

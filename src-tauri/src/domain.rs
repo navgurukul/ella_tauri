@@ -101,13 +101,21 @@ pub struct LearnerProgress {
     pub spoken_answers: u32,
 }
 
+/// A topic as the window shows it, from `shared/topics.json` (`crate::topics`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Topic {
     pub id: String,
     pub label: String,
-    pub prompt: String,
-    pub emoji: String,
-    pub color: String,
+    /// `role_play`, `vocab`, `grammar`, `real_life`, `culture`, `debate` or
+    /// `fluency`.
+    pub kind: String,
+    pub minutes: u8,
+    /// The card's mono line: "ROLE-PLAY · ~5 MIN", or a cadence of its own.
+    pub meta: String,
+    /// The "Today's talk" card's line about it.
+    pub blurb: String,
+    /// What Ella says first, after greeting the learner; the tall card quotes it.
+    pub opener: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -186,7 +194,12 @@ pub struct AppSnapshot {
     /// Whoever is saved on this laptop, signed in or not, so "Log in" can
     /// welcome them back by name. `None` only on a fresh laptop.
     pub saved_learner: Option<LearnerProfile>,
+    /// Every topic written for the learner's level, in the order Home offers
+    /// them: today's talk first (`topics::offered`).
     pub topics: Vec<Topic>,
+    /// The talk Home will lead with tomorrow, which the recap suggests.
+    /// `None` when signed out.
+    pub tomorrow_topic: Option<Topic>,
     /// The five newest sessions; empty when signed out.
     pub recent_sessions: Vec<SessionListItem>,
     /// The learner's lifetime figures; all zero when signed out.
@@ -615,80 +628,9 @@ pub struct TutorRequest {
     pub placement: Option<PlacementBrief>,
 }
 
+/// Every topic, in the catalogue's order.
 pub fn topics() -> Vec<Topic> {
-    vec![
-        Topic {
-            id: "street-food".into(),
-            label: "Street food stories".into(),
-            prompt: "Describe tastes, smells and your favourite stall.".into(),
-            emoji: "\u{1F35B}".into(),
-            color: "violet".into(),
-        },
-        Topic {
-            id: "restaurant-order".into(),
-            label: "Ordering at a restaurant".into(),
-            prompt: "Order a meal, ask about the menu, and settle the bill.".into(),
-            emoji: "\u{1F37D}".into(),
-            color: "pink".into(),
-        },
-        Topic {
-            id: "booking-a-cab".into(),
-            label: "Booking a cab".into(),
-            prompt: "Give an address, agree a fare, and ask how long it takes.".into(),
-            emoji: "\u{1F695}".into(),
-            color: "green".into(),
-        },
-        Topic {
-            id: "job-interview".into(),
-            label: "A job interview".into(),
-            prompt: "Introduce yourself and answer questions about your work.".into(),
-            emoji: "\u{1F4BC}".into(),
-            color: "lilac".into(),
-        },
-        Topic {
-            id: "doctor-clinic".into(),
-            label: "At the doctor's clinic".into(),
-            prompt: "Explain how you feel and understand what to do next.".into(),
-            emoji: "\u{1FA7A}".into(),
-            color: "violet".into(),
-        },
-        Topic {
-            id: "asking-directions".into(),
-            label: "Asking for directions".into(),
-            prompt: "Find your way and repeat the directions back.".into(),
-            emoji: "\u{1F5FA}".into(),
-            color: "ink".into(),
-        },
-        Topic {
-            id: "market-bargaining".into(),
-            label: "Bargaining at the market".into(),
-            prompt: "Ask the price, bargain kindly, and agree a deal.".into(),
-            emoji: "\u{1F6D2}".into(),
-            color: "orange".into(),
-        },
-    ]
-}
-
-/// Onboarding promises that "Ella picks topics that fit your age", so the
-/// grown-up scenarios sink below the everyday ones for younger learners. They
-/// are ordered, not removed: a 12-year-old can still choose an interview, it
-/// simply stops being what Ella leads with.
-pub fn topics_for_age(age: Option<u8>) -> Vec<Topic> {
-    let mut all = topics();
-    let Some(age) = age else {
-        return all;
-    };
-    // Stable sort, so the authored order survives inside each group.
-    all.sort_by_key(|topic| u8::from(min_age(&topic.id) > age));
-    all
-}
-
-fn min_age(topic_id: &str) -> u8 {
-    match topic_id {
-        "job-interview" => 14,
-        "market-bargaining" => 10,
-        _ => 0,
-    }
+    crate::topics::all().iter().map(|topic| topic.topic()).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -696,8 +638,9 @@ fn min_age(topic_id: &str) -> u8 {
 //
 // Everything the learner talks to is a `Character`; a `Chore` is a character
 // plus a goal plus a way to tell whether the learner got it. The catalog lives
-// here as constants, the way `topics()` does, so adding a chore is a pull
-// request rather than a migration. Only *state* goes to SQLite.
+// here as constants, the way the topics live in `shared/topics.json`, so adding
+// a chore is a pull request rather than a migration. Only *state* goes to
+// SQLite.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1040,9 +983,9 @@ pub fn find_character(id: &str) -> Option<Character> {
     characters().into_iter().find(|character| character.id == id)
 }
 
-/// Chores a learner should be offered, ordered. Filters on age the way
-/// `topics_for_age` sorts rather than removes where it can, then ranks on how
-/// many of the learner's interests a chore touches, then by ladder position.
+/// Chores a learner should be offered, ordered. Filters on age, where
+/// `topics::offered` sorts rather than removes, then ranks on how many of the
+/// learner's interests a chore touches, then by ladder position.
 pub fn catalog_for(age: Option<u8>, interests: &[String]) -> Vec<Chore> {
     let mut all: Vec<Chore> = chores()
         .into_iter()

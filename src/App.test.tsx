@@ -4,7 +4,23 @@ import App from "./App";
 import { bridge } from "./lib/bridge";
 import { levelsAt } from "./lib/curriculum";
 import { dayKey } from "./lib/days";
+import { dayNumber, offeredTopics } from "./lib/topics";
 import type { Assessment, EllaBridge, PhonemeSpan, SpeechSegment, TurnResult } from "./types";
+
+/**
+ * Noon on the first day from October 2026 on which a new learner, at Step 1 of
+ * A2, is offered Street food stories as today's talk. Home turns its topics
+ * one place a day, and the preview's scripted replies know street food, so
+ * every test here runs on that day.
+ */
+function streetFoodDay(): Date {
+  const day = new Date(2026, 9, 1, 12);
+  while (offeredTopics("A2", [], dayNumber(day))[0].id !== "street-food") day.setDate(day.getDate() + 1);
+  return day;
+}
+
+beforeEach(() => vi.setSystemTime(streetFoodDay()));
+afterEach(() => vi.useRealTimers());
 
 /** Read the current conversation prompt without coupling tests to its markup. */
 function promptText(): string {
@@ -483,8 +499,12 @@ describe("Ella learner flow", () => {
     expect(screen.queryByRole("region", { name: "One fix" })).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Streak" })).toHaveTextContent("1 day streak. New streak");
 
+    // Tomorrow's talk is Home's first tomorrow, with this talk moved back.
+    const tomorrow = (await bridge.bootstrap()).tomorrow_topic;
+    expect(tomorrow).toBeTruthy();
+    expect(tomorrow?.id).not.toBe(topics[0].id);
     const foot = document.querySelector(".recap__foot") as HTMLElement;
-    expect(foot).toHaveTextContent(`Tomorrow${topics[1].label}Day 2`);
+    await waitFor(() => expect(foot).toHaveTextContent(`Tomorrow${tomorrow?.label}Day 2`));
     fireEvent.click(screen.getByRole("button", { name: "Done" }));
     await screen.findByText("Namaste, Asha!");
   });
@@ -541,25 +561,56 @@ describe("Ella learner flow", () => {
     expect(screen.queryByText(/poha this morning/)).not.toBeInTheDocument();
   });
 
-  it("leads with today's talk, shows four more topics, and the rest behind View all", async () => {
+  it("leads with today's talk, shows four more topics, and every one at the level behind View all", async () => {
     await onboard("Riya");
+    const { topics } = await bridge.bootstrap();
+    // Every talk written for Step 1 of A2, where a new learner starts.
+    expect(topics).toHaveLength(17);
+    expect(topics[0].label).toBe("Street food stories");
     expect(screen.getByText("Today’s talk").nextElementSibling).toHaveTextContent("Street food stories");
-    for (const label of [
-      "Ordering at a restaurant",
-      "Booking a cab",
-      "A job interview",
-      "At the doctor's clinic",
-    ]) {
-      expect(screen.getByText(label)).toBeInTheDocument();
+    expect(document.querySelector(".today__blurb")).toHaveTextContent(topics[0].blurb);
+    for (const topic of topics.slice(1, 5)) {
+      const card = screen.getByRole("button", { name: new RegExp(topic.label) });
+      expect(card).toHaveTextContent(topic.meta);
     }
-    expect(screen.queryByText("Asking for directions")).not.toBeInTheDocument();
+    // The tall card quotes how Ella will open the talk.
+    expect(document.querySelector(".topic--tall .topic__bubble")).toHaveTextContent(topics[1].opener);
+    expect(screen.queryByText(topics[5].label)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "View all" }));
-    for (const label of ["Asking for directions", "Bargaining at the market", "Booking a cab"]) {
-      expect(screen.getByText(label)).toBeInTheDocument();
-    }
-    fireEvent.click(screen.getByRole("button", { name: "Show fewer" }));
-    expect(screen.queryByText("Asking for directions")).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "All topics" })).toBeInTheDocument();
+    expect(screen.getByText("Every talk at your level. Pick any one to start.")).toBeInTheDocument();
+    const cards = Array.from(document.querySelectorAll(".bento .topic"));
+    expect(cards.map((card) => card.querySelector(".topic__title")?.textContent)).toEqual(
+      topics.map((topic) => topic.label),
+    );
+    // Today's talk leads, as the tall card quoting Ella's opener.
+    expect(cards[0]).toHaveClass("topic--tall");
+    expect(cards[0]).toHaveTextContent(topics[0].opener);
+    // Home stays lit in the sidebar, and Back goes there.
+    expect(screen.getByRole("button", { name: "Home" })).toHaveAttribute("aria-current", "page");
+    fireEvent.click(screen.getByRole("button", { name: "Back to Home" }));
+    expect(await screen.findByText("Namaste, Riya!")).toBeInTheDocument();
+  });
+
+  it("starts any topic picked on All topics", async () => {
+    await onboard("Riya");
+    fireEvent.click(screen.getByRole("button", { name: "View all" }));
+    await screen.findByRole("heading", { name: "All topics" });
+    fireEvent.click(screen.getByRole("button", { name: /a funny thing that happened/i }));
+    await screen.findByText("End talk");
+    expect(document.querySelector(".talk-head .pill")).toHaveTextContent("A funny thing that happened");
+    expect(promptText()).toBe("Hi Riya! Tell me about a time something funny happened. What were you doing?");
+  });
+
+  it("offers a learner the topics of their own level", async () => {
+    seedLearner({ level_code: "A0", step: 2, placed: true });
+    render(<App />);
+    await screen.findByText("Namaste, Asha!");
+    const { topics } = await bridge.bootstrap();
+    expect(topics).toHaveLength(12);
+    expect(topics.every((topic) => topic.id.startsWith("a0-"))).toBe(true);
+    expect(screen.getByText("Today’s talk").nextElementSibling).toHaveTextContent(topics[0].label);
   });
 
   it("works the microphone with Space, as the hint under it says", async () => {
@@ -618,7 +669,7 @@ describe("Ella talk partners", () => {
     await openTalkPartners("Aarav", "14");
     fireEvent.click(screen.getByRole("button", { name: /explain what is wrong/i }));
     await screen.findByText("End talk");
-    expect(document.querySelector(".talk-head .pill")).toHaveTextContent("At the doctor's clinic");
+    expect(document.querySelector(".talk-head .pill")).toHaveTextContent("Talking to the doctor");
     expect(promptText()).toMatch(/I am the doctor here/i);
     expect(document.querySelector(".talk-partner .figure--doctor")).toBeInTheDocument();
     expect(document.querySelector(".ella--conversation")).not.toBeInTheDocument();
@@ -627,7 +678,8 @@ describe("Ella talk partners", () => {
 
   it("leaves the same doctor's talk to Ella when Home starts it", async () => {
     await onboard("Aarav");
-    fireEvent.click(screen.getByRole("button", { name: /at the doctor's clinic/i }));
+    fireEvent.click(screen.getByRole("button", { name: "View all" }));
+    fireEvent.click(await screen.findByRole("button", { name: /talking to the doctor/i }));
     await screen.findByText("End talk");
     expect(promptText()).toMatch(/I am the doctor here/i);
     expect(document.querySelector(".ella--conversation")).toBeInTheDocument();

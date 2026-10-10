@@ -8,15 +8,15 @@
  *                          badges are earned, when, and the goes at each — all
  *                          read off the learner's whole history, which the
  *                          backend sums up in `AppSnapshot.progress`.
- * Placeholder (marked):    per-topic category, duration, blurb and sample
- *                          line; the talk partners' names and blurbs, and the
- *                          one goal with nothing behind it yet; the badges'
+ * Placeholder (marked):    the talk partners' names and blurbs, and the one
+ *                          goal with nothing behind it yet; the badges'
  *                          names, colours and lines.
  *
  * When the backend grows these fields, delete the matching constant and read
  * the snapshot instead — the component API does not have to change.
  */
 import { addDays, dayKey } from "./days";
+import { catalogueTopic } from "./topics";
 import type {
   AppSnapshot,
   BadgeGlyph,
@@ -32,82 +32,7 @@ import type {
   Streak,
   StreakDay,
   TalkTally,
-  TopicPresentation,
 } from "../types";
-
-/**
- * PLACEHOLDER — category, duration, the blurb and the sample line are editorial
- * metadata about each topic. Every topic carries a sample because the card that
- * prints one is decided by position, so any topic can land in it.
- */
-export const TOPIC_PRESENTATION: Record<string, TopicPresentation> = {
-  "street-food": {
-    category: "fluency",
-    minutes: 6,
-    blurb: "Describe tastes, smells and your favourite stall. About 6 minutes of talking.",
-    sample: "What did you eat?",
-  },
-  "restaurant-order": {
-    category: "role-play",
-    minutes: 5,
-    blurb: "Order a meal, ask what is in it, and settle the bill.",
-    sample: "What would you like?",
-  },
-  "booking-a-cab": {
-    category: "vocabulary",
-    minutes: 4,
-    blurb: "Give an address, agree a fare, and ask how long it takes.",
-    sample: "Where to, madam?",
-  },
-  "job-interview": {
-    category: "role-play",
-    minutes: 6,
-    blurb: "Introduce yourself and answer questions about your work.",
-    sample: "Tell me about yourself.",
-  },
-  "doctor-clinic": {
-    category: "vocabulary",
-    minutes: 5,
-    blurb: "Explain how you feel and understand what to do next.",
-    sample: "How are you feeling?",
-  },
-  "asking-directions": {
-    category: "grammar",
-    minutes: 4,
-    blurb: "Find your way, then repeat the directions back.",
-    sample: "Where is the bus stop?",
-  },
-  "market-bargaining": {
-    category: "fluency",
-    minutes: 5,
-    blurb: "Ask the price, bargain kindly, and agree a deal.",
-    sample: "What's your best price?",
-  },
-};
-
-const FALLBACK_PRESENTATION: TopicPresentation = {
-  category: "fluency",
-  minutes: 5,
-  blurb: "A short, friendly conversation to keep your English moving.",
-  sample: "Shall we talk?",
-};
-
-export function topicPresentation(topicId: string): TopicPresentation {
-  return TOPIC_PRESENTATION[topicId] ?? FALLBACK_PRESENTATION;
-}
-
-export const CATEGORY_LABEL: Record<TopicPresentation["category"], string> = {
-  "role-play": "ROLE-PLAY",
-  vocabulary: "VOCABULARY",
-  grammar: "GRAMMAR",
-  fluency: "FLUENCY",
-};
-
-/** `ROLE-PLAY · ~5 MIN`, the mono micro-label on every topic card. */
-export function topicMeta(topicId: string): string {
-  const presentation = topicPresentation(topicId);
-  return `${CATEGORY_LABEL[presentation.category]} · ~${presentation.minutes} MIN`;
-}
 
 /**
  * The talk partners. Three goals are real chores from `chores()` in the Rust
@@ -496,7 +421,8 @@ const BADGES: BadgeRule[] = [
 export function learnerBadges(snapshot: AppSnapshot, today = new Date()): LearnerBadge[] {
   const facts: BadgeFacts = { progress: snapshot.progress, run: streak(snapshot.progress, today).days };
   const offered = castFor(snapshot.learner?.age);
-  const bargaining = snapshot.topics.find((topic) => topic.id === BARGAIN_TOPIC);
+  // Whatever level Home is offering, the free talk is there to be had.
+  const bargaining = catalogueTopic(BARGAIN_TOPIC);
   const badges: LearnerBadge[] = [];
   for (const rule of BADGES) {
     const reading = rule.read(facts);
@@ -535,7 +461,7 @@ export function learnerBadges(snapshot: AppSnapshot, today = new Date()): Learne
           place: bargaining.label,
           line: "Home",
           partner: null,
-          minutes: topicPresentation(BARGAIN_TOPIC).minutes,
+          minutes: bargaining.minutes,
           start: { kind: "topic", topicId: BARGAIN_TOPIC },
         });
       }
@@ -618,8 +544,8 @@ export function badgePercent(badge: LearnerBadge): number {
 }
 
 /**
- * The topic the "Today's talk" card offers. The backend already orders topics
- * for the learner's age, so its first entry is the opener.
+ * The topic the "Today's talk" card offers. The backend orders the topics for
+ * the learner's level, the day and their latest talks, so its first is the one.
  */
 export function recommendedTopicId(snapshot: AppSnapshot): string {
   return snapshot.topics[0]?.id ?? "street-food";
@@ -705,8 +631,11 @@ export function streakRecap(before: LearnerProgress, answered: boolean, today = 
   };
 }
 
-/** The topic the recap suggests for tomorrow: the first Ella offers that is
- * not the one just talked about. */
+/** The talk the recap suggests for tomorrow: the one Home will lead with then,
+ * which the backend works out with the talk just finished moved back. Until
+ * its figures with that talk in arrive, the first Ella offers that is not it. */
 export function nextTopicLabel(snapshot: AppSnapshot, finishedTopicId: string | null): string | null {
+  const tomorrow = snapshot.tomorrow_topic;
+  if (tomorrow && tomorrow.id !== finishedTopicId) return tomorrow.label;
   return snapshot.topics.find((topic) => topic.id !== finishedTopicId)?.label ?? null;
 }

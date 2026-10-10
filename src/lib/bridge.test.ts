@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createBrowserBridge, type StorageLike } from "./bridge";
+import { dayNumber, offeredTopics } from "./topics";
 import type { EllaBridge } from "../types";
 
 function memoryStorage(): StorageLike {
@@ -96,6 +97,29 @@ describe("browser proof-of-concept bridge", () => {
     });
 
     await expect(bridge.startChore("haggle-with-a-dragon")).rejects.toThrow(/no chore called/i);
+  });
+
+  it("offers the topics of the learner's level, the ones talked about moved back", async () => {
+    const bridge = createBrowserBridge(memoryStorage());
+    await bridge.saveLearner("Asha", 14);
+    const today = dayNumber(new Date());
+    const home = await bridge.bootstrap();
+    // Everyone starts at A2 until a placement says otherwise.
+    expect(home.topics).toEqual(offeredTopics("A2", [], today, 14));
+    expect(home.tomorrow_topic).toEqual(offeredTopics("A2", [], today + 1, 14)[0]);
+
+    await talk(bridge, ["I ate vada pav"], home.topics[0].id);
+    // Opened and left without a word: not talked about.
+    await bridge.startSession(home.topics[1].id);
+    const after = await bridge.bootstrap();
+    expect(after.topics).toEqual(offeredTopics("A2", [home.topics[0].id], today, 14));
+    expect(after.topics.at(-1)).toEqual(home.topics[0]);
+    expect(after.tomorrow_topic?.id).not.toBe(home.topics[0].id);
+
+    // Any topic can be talked about, whatever level it is written for.
+    const family = await bridge.startSession("a0-my-family");
+    expect(family.messages[0].content).toBe("Hi Asha! Who is in your family? Tell me their names!");
+    await expect(bridge.startSession("no-such-topic")).rejects.toThrow(/available topics/);
   });
 
   it("does not allow turns after a conversation ends", async () => {
