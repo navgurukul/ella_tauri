@@ -22,7 +22,7 @@ use chrono::NaiveDate;
 
 use crate::{
     curriculum::{self, Position, Skill, Strand},
-    domain::{Confidence, SkillGrowth},
+    domain::{Confidence, SkillGrowth, SkillStanding},
 };
 
 /// A demonstration below this is not counted at all.
@@ -111,6 +111,22 @@ pub fn passed(skill: &Skill, progress: &SkillProgress) -> bool {
     match skill.strand {
         Strand::Grammar => bucket(progress) != Bucket::Locked,
         Strand::Vocabulary | Strand::Fluency => bucket(progress) == Bucket::Owned,
+    }
+}
+
+/// Where a skill stands on a level's page. `passed` is whether it has done
+/// what its step asks, or sits in a step behind the learner; `aimed`, whether
+/// a talk the learner spoke in aimed at it. Shown means seen in a talk at
+/// least once, but not yet as its step asks.
+pub fn standing(passed: bool, progress: &SkillProgress, aimed: bool) -> SkillStanding {
+    if passed {
+        SkillStanding::Done
+    } else if progress.sightings > 0 {
+        SkillStanding::Shown
+    } else if aimed {
+        SkillStanding::Practising
+    } else {
+        SkillStanding::NotStarted
     }
 }
 
@@ -452,6 +468,25 @@ mod tests {
         assert!(passed(grammar, &emerging));
         assert!(!passed(vocabulary, &emerging));
         assert!(passed(vocabulary, &owned("x")));
+    }
+
+    #[test]
+    fn a_skill_stands_done_shown_practising_or_not_started() {
+        // Shown once: short of what passing asks of vocabulary or fluency.
+        let seen = SkillProgress {
+            mastery: 0.38,
+            sightings: 1,
+            topics: vec!["cab".into()],
+            ..at("x")
+        };
+        assert_eq!(standing(true, &at("x"), false), SkillStanding::Done, "a step behind the learner");
+        assert_eq!(standing(true, &owned("x"), true), SkillStanding::Done);
+        assert_eq!(standing(false, &seen, true), SkillStanding::Shown);
+        assert_eq!(standing(false, &seen, false), SkillStanding::Shown, "shown in a talk aimed elsewhere");
+        assert_eq!(standing(false, &at("x"), true), SkillStanding::Practising);
+        // A talk that aimed at it and missed it changes nothing but its misses.
+        assert_eq!(standing(false, &SkillProgress { misses: 2, ..at("x") }, true), SkillStanding::Practising);
+        assert_eq!(standing(false, &at("x"), false), SkillStanding::NotStarted);
     }
 
     #[test]

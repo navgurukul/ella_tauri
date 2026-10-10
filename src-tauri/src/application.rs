@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local, Utc};
 use std::{
     cell::Cell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     thread,
     time::Instant,
@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::{
     curriculum::{self, Position},
     domain::{
-        find_character, find_chore, topics, topics_for_age, Advance, AppSnapshot, Assessment,
+        chores, find_character, find_chore, topics, topics_for_age, Advance, AppSnapshot, Assessment,
         ChoreContext, ChoreRecap, Fix, Focus, LedgerTurn, AudioPayload, LedgerView, Learner, LearnerProfile,
         LearnerProgress, LevelSkillView, LevelState, LevelView, Message, PhonemeSpan, Pitch,
         PlacementBrief, PlacementReading, Readiness, Scorable, Session, SessionSummary,
@@ -1853,6 +1853,10 @@ impl AppService {
     /// and the rest are locked. A step behind them is one they finished, so its
     /// skills have passed; any other skill shows what it has been scored, since
     /// a strong learner can pass one before they reach its step.
+    ///
+    /// Each skill also says what a level's page tells the learner about it:
+    /// where it stands (`progress::standing`), and the titles of the talks it
+    /// showed in.
     pub fn levels(&self) -> EllaResult<Vec<LevelView>> {
         if self.database.signed_in_learner()?.is_none() {
             return Err(EllaError::Conflict("Tell Ella your name first.".into()));
@@ -1874,6 +1878,8 @@ impl AppService {
         }
         let known = progress::by_key(&self.database.skill_progress(&ahead)?);
         let percent = progress::level_percent(&position, &known);
+        let aimed: HashSet<String> = self.database.aimed_skills()?.into_iter().collect();
+        let titles = talk_titles();
 
         let mut levels = Vec::new();
         for (index, level) in curriculum::levels().iter().enumerate() {
@@ -1895,10 +1901,18 @@ impl AppService {
                         .get(&key)
                         .cloned()
                         .unwrap_or_else(|| SkillProgress::fresh(&key));
+                    let passed = behind(index, step.number) || progress::passed(skill, &record);
                     skills.push(LevelSkillView {
                         label: skill.label.clone(),
                         text: skill.text.clone(),
-                        passed: behind(index, step.number) || progress::passed(skill, &record),
+                        passed,
+                        standing: progress::standing(passed, &record, aimed.contains(&key)),
+                        // By the titles the learner knows the talks by.
+                        topics: record
+                            .topics
+                            .iter()
+                            .filter_map(|id| titles.get(id).cloned())
+                            .collect(),
                     });
                 }
                 steps.push(StepView {
@@ -1923,6 +1937,16 @@ impl AppService {
         }
         Ok(levels)
     }
+}
+
+/// What the learner knows each talk as, by the id its skills keep: a topic's
+/// label, or a talk partner's goal, since a chore is scored as a talk is.
+fn talk_titles() -> HashMap<String, String> {
+    topics()
+        .into_iter()
+        .map(|topic| (topic.id, topic.label))
+        .chain(chores().into_iter().map(|chore| (chore.id, chore.title)))
+        .collect()
 }
 
 /// A stored place the curriculum still has, its step kept inside its level;
@@ -3581,6 +3605,92 @@ mod curriculum_flow_tests {
         for code in ["\"A0\"", "\"A2\"", "\"B1\"", "\"C1\""] {
             assert!(!json.contains(code), "{code} leaked");
         }
+    }
+
+    /// Keeps these skills' progress, as a talk's assessment does.
+    fn give(service: &AppService, skills: Vec<SkillProgress>) {
+        let session = service.start_placement().unwrap();
+        service.complete_session(&session.id).unwrap();
+        service
+            .database
+            .commit_assessment(&session.id, |_| {
+                Ok(AssessmentWrite {
+                    skills,
+                    position: None,
+                    placed: false,
+                    assessment: "null".into(),
+                })
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn each_skill_on_the_level_map_says_where_it_stands_and_the_talks_it_showed_in() {
+        use crate::{curriculum::Strand, domain::SkillStanding::*};
+        let service = demo();
+        place_at(&service, "A1", 2);
+        // A talk the learner spoke in, and one they left without a word.
+        let spoken = service.start_session("street-food").unwrap();
+        service.send_text_turn(&spoken.id, "Yesterday I watched a film").unwrap();
+        service.complete_session(&spoken.id).unwrap();
+        let aimed = service.database.session_curriculum(&spoken.id).unwrap().target_skill.unwrap();
+        let silent = service.start_session("booking-a-cab").unwrap();
+        service.complete_session(&silent.id).unwrap();
+        let left = service.database.session_curriculum(&silent.id).unwrap().target_skill.unwrap();
+        assert_ne!(left, aimed, "the last aim is held back");
+
+        // Of the step's other two, one passed on two topics (a third since
+        // retired), and one a talk partner's goal showed once, which is short
+        // of what passing asks of vocabulary or fluency.
+        let step = progress::step_skills(&Position::new("A1", 2));
+        let rest: Vec<&progress::Placed> =
+            step.iter().filter(|placed| placed.key != aimed && placed.key != left).collect();
+        let once = rest.iter().find(|placed| placed.skill.strand != Strand::Grammar).unwrap();
+        let owned = rest.iter().find(|placed| placed.key != once.key).unwrap();
+        give(
+            &service,
+            vec![
+                SkillProgress {
+                    mastery: 0.8,
+                    sightings: 2,
+                    topics: vec!["street-food".into(), "a-topic-since-retired".into(), "booking-a-cab".into()],
+                    ..SkillProgress::fresh(&owned.key)
+                },
+                SkillProgress {
+                    mastery: 0.38,
+                    sightings: 1,
+                    topics: vec!["market-cloth-price".into()],
+                    ..SkillProgress::fresh(&once.key)
+                },
+            ],
+        );
+
+        let levels = service.levels().unwrap();
+        let skill = |key: &str| {
+            let (level, step, skill) = curriculum::skill_at(key).unwrap();
+            let index = curriculum::level_index(&level.code).unwrap();
+            levels[index].steps[usize::from(step.number) - 1]
+                .skills
+                .iter()
+                .find(|view| view.label == skill.label)
+                .unwrap()
+                .clone()
+        };
+        let owned = skill(&owned.key);
+        assert_eq!((owned.passed, owned.standing), (true, Done));
+        assert_eq!(owned.topics, ["Street food stories", "Booking a cab"]);
+        let once = skill(&once.key);
+        assert_eq!((once.passed, once.standing), (false, Shown));
+        assert_eq!(once.topics, ["Talk a stall price down"]);
+        assert_eq!(skill(&aimed).standing, Practising);
+        assert_eq!(skill(&left).standing, NotStarted, "a talk left without a word practised nothing");
+        assert!(skill(&left).topics.is_empty());
+        // Behind the learner, everything is done; above them, nothing started.
+        assert!(levels[1].steps[0].skills.iter().all(|view| view.standing == Done));
+        assert!(levels[2].steps[0].skills.iter().all(|view| view.standing == NotStarted));
+        let json = serde_json::to_string(&levels[1].steps[1]).unwrap();
+        assert!(json.contains(r#""standing":"not_started""#), "{json}");
+        assert!(json.contains(r#""topics":["Talk a stall price down"]"#), "{json}");
     }
 
     /// The whole flow against a real model: a placement chat that the model

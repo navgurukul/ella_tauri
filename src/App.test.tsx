@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { bridge } from "./lib/bridge";
+import { levelsAt } from "./lib/curriculum";
 import { dayKey } from "./lib/days";
 import type { Assessment, EllaBridge, PhonemeSpan, SpeechSegment, TurnResult } from "./types";
 
@@ -26,6 +27,18 @@ async function onboard(name: string, age = "14") {
   expect(document.querySelector('[data-screen="onboarding-placement"] .ella--conversation')).toBeInTheDocument();
   fireEvent.click(skipPlacement);
   await screen.findByText(`Namaste, ${name}!`);
+}
+
+/** A learner saved on the laptop and signed in, wherever on the ladder the
+ * test needs them, as the preview keeps them. */
+function seedLearner(place: { level_code: string; step: number; placed: boolean }) {
+  window.localStorage.setItem(
+    "ella-desktop-state",
+    JSON.stringify({
+      learner: { name: "Asha", age: 16, level_name: "", created_at: "2026-10-01T10:00:00Z", ...place },
+      sessions: [],
+    }),
+  );
 }
 
 /** Onboard, then open Talk partners from the sidebar. */
@@ -1074,24 +1087,135 @@ describe("Ella levels", () => {
     const path = await screen.findByRole("list", { name: "Levels" });
     expect(path.querySelectorAll(".level-stop")).toHaveLength(6);
     expect(path.querySelector(".level-stop.is-current")).toHaveTextContent("You’re here · 0% to level 4");
-    expect(path.querySelector(".level-stop.is-current")).toHaveTextContent("0 of 20 skills filled");
+    expect(path.querySelector(".level-stop.is-current")).toHaveTextContent("Step 1 of 5 · 0 of 4 skills");
     const page = screen.getByRole("region", { name: "Level 3: Finding My Voice" });
-    expect(page).toHaveTextContent("Fill every bar to reach level 4.");
-    expect(page.querySelectorAll(".level-step")).toHaveLength(5);
-    expect(page.querySelector(".level-step.is-yours")).toHaveTextContent("Your step");
-    // What the bar's segments stand for, in words, for a screen reader.
-    expect(page.querySelector(".level-step.is-yours")).toHaveTextContent(", 0 of 4 skills");
-    expect(page.querySelector(".level-step.is-yours ul")?.children).toHaveLength(4);
-    expect(page.querySelector(".level-step.is-yours ul")).toHaveTextContent("(still to show)");
-    expect(page.querySelector(".level-step.is-yours .level-step__bar")?.children).toHaveLength(4);
+    expect(page).toHaveTextContent("Step 1 of 5 on the way to level 4.");
+    // The step the learner is on is a card of its skills, none started yet.
+    const here = within(page).getByRole("region", { name: "Step 1 · You’re here Finding better words" });
+    const cards = here.querySelectorAll(".skill-card");
+    expect([...cards].map((card) => card.querySelector(".skill-card__name")?.textContent)).toEqual([
+      "Describing words",
+      "Idioms",
+      "Present perfect",
+      "Rephrasing",
+    ]);
+    expect([...cards].every((card) => card.textContent?.includes("Not started"))).toBe(true);
+    expect(here.querySelectorAll(".skill-circles i.is-filled")).toHaveLength(0);
+    // What each skill is, in the curriculum's words, for a screen reader.
+    expect(cards[0]).toHaveTextContent("I can use a wider range of descriptive words");
+    // The steps ahead say when they open, and nothing opens them yet.
+    expect([...page.querySelectorAll(".step-row.is-locked")].map((row) => row.textContent)).toEqual([
+      "Talking about the past with more precisionStep 2 · Opens after Step 1",
+      "Expressing opinions with depthStep 3 · Opens after Step 2",
+      "Speaking for longer without losing the threadStep 4 · Opens after Step 3",
+      "Handling unpredictable conversationsStep 5 · Opens after Step 4",
+    ]);
+    expect(within(page).queryByRole("button", { expanded: false })).not.toBeInTheDocument();
+    expect(page).toHaveTextContent("The first circle fills when you use a skill in a talk.");
     // The badges the design files at this level, still to earn.
     expect(page).toHaveTextContent("Badges at level 3");
     expect(page).toHaveTextContent("Bargainer");
     expect(page).toHaveTextContent("Deposit back");
 
-    // Another level's page is a press away.
+    // Another level's page is a press away: every step done, each opening on
+    // its skills.
     fireEvent.click(screen.getByRole("button", { name: /Pre-Beginner/ }));
-    expect(screen.getByRole("region", { name: "Level 1: Pre-Beginner" })).toHaveTextContent("You’ve already passed this level.");
+    const first = screen.getByRole("region", { name: "Level 1: Pre-Beginner" });
+    expect(first).toHaveTextContent("You’ve already passed this level.");
+    expect(first).toHaveTextContent("All done");
+    const steps = within(first).getAllByRole("button", { expanded: false });
+    expect(steps.map((step) => step.textContent)).toEqual([
+      "First wordsStep 1 · Done",
+      "I am and I have gotStep 2 · Done",
+      "I like and I don’t likeStep 3 · Done",
+      "I canStep 4 · Done",
+      "What is happening?Step 5 · Done",
+    ]);
+    // And a level above theirs is a step at a time, from the level below.
+    fireEvent.click(screen.getByRole("button", { name: /Speaking Freely/ }));
+    const next = screen.getByRole("region", { name: "Level 4: Speaking Freely" });
+    expect(next).toHaveTextContent("Not started");
+    expect(next.querySelector(".step-row")).toHaveTextContent("Step 1 · Opens after level 3");
+    expect(next.querySelectorAll(".step-row.is-locked")).toHaveLength(5);
+  });
+
+  it("shows where each skill of the learner's step stands, and opens a finished step on its skills", async () => {
+    seedLearner({ level_code: "A2", step: 3, placed: true });
+    const ladder = levelsAt({ level: "A2", step: 3 });
+    const [phrases, conditional, modals, reasons] = ladder[2].steps[2].skills;
+    Object.assign(phrases, { standing: "shown", topics: ["Street food stories", "Booking a cab"] });
+    Object.assign(conditional, {
+      passed: true,
+      standing: "done",
+      topics: ["Booking a cab", "Talk a stall price down"],
+    });
+    Object.assign(modals, { standing: "practising" });
+    Object.assign(reasons, { standing: "shown", topics: ["Street food stories"] });
+    const levels = vi.spyOn(bridge, "levels").mockResolvedValue(ladder);
+    try {
+      render(<App />);
+      fireEvent.click(await screen.findByRole("button", { name: /See all levels/ }));
+      const path = await screen.findByRole("list", { name: "Levels" });
+      // One of the four has passed, which is what moves the level's bar.
+      expect(path.querySelector(".level-stop.is-current")).toHaveTextContent("Step 3 of 5 · 1 of 4 skills");
+      const page = screen.getByRole("region", { name: "Level 3: Finding My Voice" });
+      expect(page).toHaveTextContent("Step 3 of 5 on the way to level 4.");
+
+      const here = within(page).getByRole("region", { name: /^Step 3 · You’re here/ });
+      const card = (name: string) => within(here).getByText(name).closest(".skill-card") as HTMLElement;
+      // Shown in talks on two topics, but not yet as strongly as passing asks.
+      expect(card("Opinion phrases")).toHaveTextContent("Shown in Street food stories, Booking a cab");
+      expect(card("Opinion phrases")).toHaveTextContent("Almost there");
+      expect(card("Opinion phrases")).toHaveTextContent("Use it again in your talks.");
+      // Shown on one topic: a new one is what it needs next.
+      expect(card("Reason and example")).toHaveTextContent("Almost there");
+      expect(card("Reason and example")).toHaveTextContent("Use it again in a talk on a new topic.");
+      expect(card("Reason and example").querySelectorAll(".is-filled")).toHaveLength(1);
+      expect(card("Reason and example").querySelectorAll(".is-next")).toHaveLength(1);
+      expect(card("First conditional")).toHaveTextContent("Done");
+      expect(card("First conditional").querySelectorAll(".skill-circles.is-done .is-filled")).toHaveLength(2);
+      expect(card("Modal verbs")).toHaveTextContent("Practising");
+      expect(card("Modal verbs")).toHaveTextContent("Keep using it in your talks.");
+      expect(card("Modal verbs").querySelectorAll(".is-filled")).toHaveLength(0);
+      expect(card("Modal verbs").querySelectorAll(".is-next")).toHaveLength(1);
+
+      // The steps behind are rows that open on their skills, and close again.
+      const done = within(page).getAllByRole("button", { expanded: false });
+      expect(done.map((row) => row.textContent)).toEqual([
+        "Finding better wordsStep 1 · Done",
+        "Talking about the past with more precisionStep 2 · Done",
+      ]);
+      const skills = document.getElementById(done[0].getAttribute("aria-controls") ?? "") as HTMLElement;
+      expect(skills).not.toBeVisible();
+      fireEvent.click(done[0]);
+      expect(done[0]).toHaveAttribute("aria-expanded", "true");
+      expect(skills).toBeVisible();
+      expect(skills).toHaveAccessibleName("Skills of step 1");
+      expect([...skills.querySelectorAll("li.is-passed")].map((chip) => chip.textContent)).toEqual([
+        "Describing words",
+        "Idioms",
+        "Present perfect",
+        "Rephrasing",
+      ]);
+      fireEvent.click(done[0]);
+      expect(skills).not.toBeVisible();
+      expect([...page.querySelectorAll(".step-row.is-locked .step-row__note")].map((note) => note.textContent)).toEqual([
+        "Step 4 · Opens after Step 3",
+        "Step 5 · Opens after Step 4",
+      ]);
+    } finally {
+      levels.mockRestore();
+    }
+  });
+
+  it("says when the learner's level is the last one", async () => {
+    seedLearner({ level_code: "C1", step: 2, placed: true });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /See all levels/ }));
+    await screen.findByRole("list", { name: "Levels" });
+    const page = screen.getByRole("region", { name: "Level 6: Fluent" });
+    expect(page).toHaveTextContent("Step 2 of 5, the last level.");
+    expect(within(page).getByRole("region", { name: /^Step 2 · You’re here/ })).toHaveTextContent("Grammar as craft");
   });
 
   it("asks what a talk did as its last turn arrives, while Ella says goodbye, and only once", async () => {

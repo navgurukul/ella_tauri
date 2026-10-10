@@ -2978,12 +2978,14 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 /* Each level's colour by its place on the ladder, as Ella Mobile v7 draws
    them: `--lv` for the level, `--lv-deep` for type on its wash, `--lv-tint`
    for the wash. Custom properties rather than backgrounds, because the
-   `tone-*` classes already paint the topic cards. */
+   `tone-*` classes already paint the topic cards. `--lv-deep` is Ella
+   Mobile's label shade, dark enough to read as small type at 4.5:1 on white
+   and on the wash alike. */
 .ladder-green { --lv: var(--green); --lv-deep: #3f7a00; --lv-tint: #e7f4d6; }
 .ladder-violet { --lv: var(--violet); --lv-deep: var(--violet-deep); --lv-tint: var(--lilac); }
-.ladder-blue { --lv: #5b7def; --lv-deep: #3d5fcf; --lv-tint: #e4ecfb; }
-.ladder-orange { --lv: var(--orange); --lv-deep: #c25c00; --lv-tint: #ffe9d4; }
-.ladder-pink { --lv: var(--pink); --lv-deep: var(--pink-deep); --lv-tint: #ffe3ee; }
+.ladder-blue { --lv: #5b7def; --lv-deep: #3f5fd0; --lv-tint: #e4ecfb; }
+.ladder-orange { --lv: var(--orange); --lv-deep: #a34d00; --lv-tint: #ffe9d4; }
+.ladder-pink { --lv: var(--pink); --lv-deep: #c4005a; --lv-tint: #ffe3ee; }
 .ladder-ink { --lv: var(--ink); --lv-deep: var(--ink); --lv-tint: #e6e8e0; }
 
 /* MY LEVEL: purple wherever it appears, as v7 draws it. */
@@ -3173,7 +3175,7 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 .anytime-stop__text small { display: block; margin-top: 2px; font-size: 13px; font-weight: 700; color: var(--ink-60); }
 
 /* A level's page: its number huge in its colour on its wash, its goal, its
-   steps as bars with a segment per skill, and the badges filed under it. */
+   steps and their skills, and the badges filed under it. */
 .level-page {
   min-width: 0;
   border: 1.5px solid var(--ink-10);
@@ -3247,29 +3249,153 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   border-radius: 50%;
   background: var(--lv);
 }
-.level-steps { display: flex; flex-direction: column; gap: 14px; margin: 14px 0 0; padding: 0; list-style: none; }
-.level-step { display: grid; grid-template-columns: minmax(0, 1fr) 150px; align-items: center; gap: 14px; }
-.level-step__title { font-size: 14.5px; font-weight: 600; line-height: 1.25; }
-.level-step__here {
-  display: inline-block;
-  margin-left: 8px;
-  padding: 1px 8px;
-  border-radius: var(--r-pill);
-  background: var(--lv-tint);
-  color: var(--lv-deep);
-  font-size: 11px;
-  font-weight: 700;
-  vertical-align: 1px;
-  white-space: nowrap;
+/* A level's skills, from Ella Mobile's final design (2a) of "Ella Level
+   Skills Options": steps as short rows, and the step the learner is on as a
+   card of its skills, each with two circles. */
+.level-skills { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+
+/* A white card of short step rows, with a hairline between each. */
+.step-rows {
+  margin: 0;
+  padding: 0 14px;
+  border: 1.5px solid var(--ink-10);
+  border-radius: var(--r-tile);
+  background: var(--white);
+  list-style: none;
 }
-.level-step__bar { display: flex; gap: 4px; }
-.level-step__bar i { flex: 1; height: 10px; border-radius: 3px; background: var(--ink-07); }
-.level-page.is-done .level-step__bar i,
-.level-page.is-current .level-step__bar i { background: var(--lv-tint); }
-/* After the washes above, and as specific as them, so a passed skill fills
-   on every level's page. */
-.level-page .level-step__bar i.is-passed { background: var(--lv); }
-.level-page__note { margin: 12px 0 0; font-size: 13px; font-weight: 500; color: var(--ink-62); }
+.step-row + .step-row { border-top: 1.5px solid var(--ink-07); }
+.step-row__face {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+button.step-row__face { cursor: pointer; }
+.step-row__mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: rgba(38, 38, 38, 0.06);
+  color: var(--ink-45);
+}
+.step-row.is-done .step-row__mark { background: var(--green); color: var(--white); }
+.step-row.is-done .step-row__mark .check-glyph { stroke-width: 3.4; }
+.step-row__text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.step-row__title { font-size: 14.5px; font-weight: 700; line-height: 1.2; }
+.step-row.is-locked .step-row__title { color: var(--ink-70); }
+.step-row__note { font-size: 12px; font-weight: 600; color: rgba(38, 38, 38, 0.66); }
+.step-row.is-done .step-row__note { color: #3f7a00; }
+.step-row__chevron { display: flex; flex: none; transition: transform 200ms ease; }
+.step-row__chevron svg { fill: none; stroke: var(--ink-40); stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+.step-row.is-open .step-row__chevron { transform: rotate(180deg); }
+button.step-row__face:hover .step-row__chevron svg { stroke: var(--ink); }
+/* A done step's skills, once its row is opened. */
+.skill-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0 0 12px 42px; list-style: none; }
+.skill-chips[hidden] { display: none; }
+.skill-chips li {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: var(--r-pill);
+  background: rgba(38, 38, 38, 0.06);
+  color: rgba(38, 38, 38, 0.66);
+  font-size: 12px;
+  font-weight: 700;
+}
+.skill-chips li.is-passed { background: #e7f4d6; color: #3f7a00; }
+.skill-chips .check-glyph { stroke-width: 3.6; }
+
+/* The step the learner is on, in their level's wash. */
+.step-now { padding: 12px; border-radius: var(--r-card); background: var(--lv-tint); }
+.step-now__eyebrow { padding: 4px 6px 0; font-size: 10.5px; color: var(--lv-deep); }
+.step-now__title { margin: 4px 6px 12px; font-size: 22px; line-height: 1.05; }
+/* Two to a row, as the design draws them. Four to a row would fit where
+   the page is one column, but leave each too narrow for its topics. */
+.skill-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.skill-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  padding: 12px 12px 14px;
+  border-radius: 18px;
+  background: var(--white);
+}
+.skill-card__top { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; }
+/* The design has room for "Food, School" on one line; the topics' own titles
+   are longer, so they may take two before they are cut short. */
+.skill-card__topics {
+  display: -webkit-box;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--lv-deep);
+  overflow-wrap: anywhere;
+}
+.skill-card.is-done .skill-card__topics { color: #3f7a00; }
+.skill-card__name { margin-top: 10px; font-size: 17px; line-height: 1.1; }
+.skill-card__state { margin-top: 6px; font-size: 12.5px; font-weight: 700; color: rgba(38, 38, 38, 0.66); }
+.skill-card.is-done .skill-card__state { color: #3f7a00; }
+.skill-card.is-shown .skill-card__state { color: var(--lv-deep); }
+.skill-card.is-practising .skill-card__state { color: var(--ink); }
+.skill-card__hint { margin-top: 2px; font-size: 12px; font-weight: 500; line-height: 1.35; color: var(--ink-72); }
+
+/* A skill's two circles: filled with a tick once earned, green once it has
+   passed; dashed while still to fill, in the level's colour for the next one
+   once the skill is under way. */
+.skill-circles { display: inline-flex; flex: none; gap: 4px; }
+.skill-circles i {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 2px dashed rgba(38, 38, 38, 0.25);
+  border-radius: 50%;
+  color: var(--white);
+}
+.skill-circles i.is-next { border-color: var(--lv); }
+.skill-circles i.is-filled { border: none; background: var(--lv); }
+.skill-circles.is-done i.is-filled { background: var(--green); }
+/* What the circles mean, under the steps. */
+.skill-legend {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 2px 0 0;
+  padding: 0 14px;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: rgba(38, 38, 38, 0.68);
+}
+.skill-circles--legend { gap: 3px; }
+.skill-circles--legend i { width: 18px; height: 18px; }
+.skill-circles--legend .check-glyph { stroke-width: 4; }
 .level-page__col .badge-list { margin-top: 8px; }
 .level-page__none {
   margin: 14px 0 0;

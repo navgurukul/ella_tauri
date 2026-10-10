@@ -304,6 +304,25 @@ impl Database {
         Ok(targets)
     }
 
+    /// Every skill a talk the learner spoke in has aimed at, each once: what
+    /// they have practised, whether or not it showed. A talk opened and left
+    /// without a word practised nothing.
+    pub fn aimed_skills(&self) -> EllaResult<Vec<String>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT DISTINCT target_skill FROM sessions
+             WHERE target_skill IS NOT NULL
+               AND EXISTS (SELECT 1 FROM messages
+                           WHERE messages.session_id = sessions.id
+                             AND messages.speaker = 'learner')
+             ORDER BY target_skill",
+        )?;
+        let aimed = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(aimed)
+    }
+
     pub fn session_curriculum(&self, session_id: &str) -> EllaResult<SessionCurriculum> {
         self.connection()?
             .query_row(
