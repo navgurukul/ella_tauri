@@ -90,8 +90,8 @@ design's window chrome — title bar and traffic lights — is left to the OS.
   with a track of all six levels; and the badges, those earned latest first and
   three to earn next. "Where to earn more" and MY LEVEL open **Levels and
   badges**: the path of levels with the anytime badges beneath it, and the
-  picked one's page — its goal, its five steps as bars with a segment per
-  skill, and the badges filed under it. Where the design writes a CEFR code
+  picked one's page — its goal, its five steps and where each of their skills
+  stands, and the badges filed under it. Where the design writes a CEFR code
   ("A2", "to B1"), the window writes the level's number, as Ella Mobile does.
 - **Badges** are read off the learner's history, in
   [`src/lib/presentation.ts`](src/lib/presentation.ts) (`learnerBadges`): Hello,
@@ -186,6 +186,18 @@ number on the ladder, 1 to 6.
   or after Step 5 to Step 1 of the next level. If every skill left has missed
   twice running, the next step's skills join in. See
   [`progress.rs`](src-tauri/src/progress.rs).
+- **A level's page** shows where each skill stands, as Ella Mobile's does (the
+  final design, 2a, of "Ella Level Skills Options"). On the learner's own
+  level, the steps behind them are short rows that open on their skills, and
+  the steps ahead short rows that say when they open. The step they are on is
+  a card of its skills, each with two circles, the talks it showed in, and
+  where it stands (`progress::standing`): Done; Almost there, shown in a talk
+  but not yet as passing asks; Practising, aimed at by a talk the learner spoke
+  in; or Not started. The first circle fills once a skill shows in a talk, the
+  second once it passes, and a hint says what it needs next. Other levels are
+  rows too, done ones opening on their skills. Ella Mobile's card for the skill
+  Ella is teaching is left out: the laptop has no lessons, and a talk's aim is
+  never told to the model, so she teaches no one skill.
 - **The recap** (the Ella Desktop Recap design) follows every talk across the
   whole window: Ella cheering, or for a chore the talk partner with whether the
   goal was met, its badge and their last line; then Ella's notes — what went

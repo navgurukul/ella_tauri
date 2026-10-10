@@ -18,6 +18,19 @@ export function Glyph({ glyph, size, color }: { glyph: BadgeGlyph; size: number;
   );
 }
 
+/** A step not reached yet: Ella Mobile's padlock, filled. */
+export function Lock({ size = 13 }: { size?: number }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true" focusable="false">
+      <path
+        d="M7 10V7.5a5 5 0 0110 0V10h.5c.8 0 1.5.7 1.5 1.5v8c0 .8-.7 1.5-1.5 1.5h-11c-.8 0-1.5-.7-1.5-1.5v-8c0-.8.7-1.5 1.5-1.5zm2.2 0h5.6V7.5a2.8 2.8 0 00-5.6 0z"
+        fill="currentColor"
+        fillRule="evenodd"
+      />
+    </svg>
+  );
+}
+
 /** The tick the design draws for anything done. */
 export function Check({ size = 14 }: { size?: number }) {
   return (

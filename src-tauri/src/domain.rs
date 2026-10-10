@@ -317,6 +317,25 @@ pub struct LevelSkillView {
     /// "I can …", word for word.
     pub text: String,
     pub passed: bool,
+    /// Where it stands, as a level's page words it.
+    pub standing: SkillStanding,
+    /// The titles of the talks it showed in, in the order they came:
+    /// "Booking a cab".
+    pub topics: Vec<String>,
+}
+
+/// How far a skill has come, short of the numbers.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillStanding {
+    /// Passed, as its step asks, or in a step behind the learner.
+    Done,
+    /// Shown in a talk, not yet enough to pass.
+    Shown,
+    /// A talk the learner spoke in aimed at it, and it has not shown yet.
+    Practising,
+    /// Neither.
+    NotStarted,
 }
 
 /// What a talk's instructions say about the learner: the level to pitch Ella's

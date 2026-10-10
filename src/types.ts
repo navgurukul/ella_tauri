@@ -202,7 +202,19 @@ export interface LevelSkill {
   /** "I can …", word for word from the curriculum. */
   text: string;
   passed: boolean;
+  /** Where it stands, as a level's page words it. */
+  standing: SkillStanding;
+  /** The titles of the talks it showed in, in the order they came:
+   * "Booking a cab". */
+  topics: string[];
 }
+
+/**
+ * How far a skill has come, short of the numbers: passed (or in a step behind
+ * the learner), shown in a talk but not yet enough, aimed at by a talk the
+ * learner spoke in, or none of these. Mirrors `SkillStanding` in domain.rs.
+ */
+export type SkillStanding = "done" | "shown" | "practising" | "not_started";
 
 export interface LevelStep {
   number: number;

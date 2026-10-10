@@ -54,7 +54,8 @@ export function standingAt(position: Position, placed: boolean): Standing {
 
 /**
  * The level map for a learner at `position` with no skill scored, as the
- * backend draws it: every skill of a step behind them passed, none ahead.
+ * backend draws it: every skill of a step behind them passed, none ahead, and
+ * none shown in a talk or aimed at by one, since no model scores the preview's.
  */
 export function levelsAt(position: Position): LevelView[] {
   const current = Math.max(0, levelIndex(position.level));
@@ -71,11 +72,16 @@ export function levelsAt(position: Position): LevelView[] {
         number: step.number,
         title: step.title,
         focus: step.focus,
-        skills: step.skills.map((skill) => ({
-          label: skill.label,
-          text: skill.text,
-          passed: index < current || (index === current && step.number < position.step),
-        })),
+        skills: step.skills.map((skill) => {
+          const passed = index < current || (index === current && step.number < position.step);
+          return {
+            label: skill.label,
+            text: skill.text,
+            passed,
+            standing: passed ? ("done" as const) : ("not_started" as const),
+            topics: [],
+          };
+        }),
       })),
     };
   });
