@@ -278,6 +278,10 @@ ELLA_LLM_BASE_URL=http://127.0.0.1:39091/v1 \
 cargo test --manifest-path src-tauri/Cargo.toml --lib live_model -- --ignored --nocapture
 ```
 
+A test build leaves the cloud alone unless asked: add `ELLA_CLOUD=on` to run
+the same flow against the model over the internet
+([Over the internet](#over-the-internet)).
+
 ## Run the complete local voice POC
 
 macOS development host:
@@ -408,6 +412,10 @@ Environment overrides:
   `--slot-save-path` keeps its saved slots, so Ella can use them too; the
   development scripts start theirs with `engines/models/llm-slots` and set it
 - `ELLA_CANARY_MODEL`, `ELLA_STT_THREADS`, `ELLA_CANARY_VERIFY_SHA256`
+- `ELLA_CLOUD=off`, which keeps the laptop to its own language model even when
+  it is online (and benches it: `chore-bench` uses the cloud otherwise);
+  `ELLA_CLOUD_URL`, another proxy than Ella Desktop's; and
+  `ELLA_CLOUD_TOKEN_FILE`: see [Over the internet](#over-the-internet)
 
 ## Timing telemetry
 
@@ -762,18 +770,125 @@ free port, readiness poll, killed on exit. The development scripts are
 unchanged: setting `ELLA_LLM_BASE_URL` means someone else owns the server, and
 Ella will not start a second one.
 
+## Over the internet
+
+Whenever a laptop is online, Ella asks a language model on the internet instead
+of her own, with her own behind it for every request. There is nothing to
+switch on and nothing to see: offline, or when the cloud does not answer in
+time, the same request goes to the laptop's model, as every request did before.
+
+```text
+reply, placement check, judges ──► cloud up? ──yes──► Ella Desktop's proxy ──► DeepSeek
+                                       │                 │ no first word in time, refused,
+                                       no ◄──────────────┘ out of reach
+                                       ▼
+                             llama-server, exactly as without it
+```
+
+- **Only the language model.** Speech recognition and Ella's voice stay on the
+  laptop: DeepSeek has neither, and on a laptop the model is where the wait is.
+  On the Windows test laptop Canary held up a turn for about 0.2 s and the
+  model for 2-9 s, and a recap for 23-130 s.
+- **No key on the laptop.** The repository and the installers are public, so a
+  provider's key in either would be anyone's. The laptop asks the `ella-desktop`
+  Edge Function in the Supabase project *Ella Desktop*
+  ([`supabase/functions/ella-desktop`](supabase/functions/ella-desktop)), which
+  holds the key. It gives each install a token once
+  (`models/cloud/install-token` beside the weights), and forwards only what Ella
+  sends — messages, `max_tokens`, temperature, JSON or not — to
+  `deepseek-flash` with thinking off: a model that reasons before it answers
+  starts talking seconds later. Every request is counted against the install
+  (40 a minute, 800 a day) and every install against the day's spend ($5),
+  all set with the function's `ELLA_DESKTOP_LIMITS` secret.
+- **Up or down.** Whether the cloud answers is found out by asking the proxy's
+  `/healthz` and from the requests themselves, never from what the computer
+  says about its network: a school's Wi-Fi that wants a sign-in first looks
+  connected. A request it fails sends the requests after it to the laptop for
+  30 s, doubled each time it is found still down, up to 5 minutes; a minute when
+  it says it is busy, 5 minutes when it has no key, no balance or no budget
+  left today. Each change is an `ella_cloud` line in the telemetry.
+- **A reply** goes to the cloud while it is up, and its sentences go to Piper as
+  they arrive, as the local model's do. With no first word in 5 s, or a refusal,
+  the same turn goes to the laptop's model, and the time lost is counted in the
+  turn's times. A reply cut off partway is written again by the laptop's model,
+  and what Piper had of it no longer matches, so it is dropped and the new reply
+  said afresh (`PendingSpeech::matching`).
+- **Judges** in the cloud wait for nothing: DeepSeek answers many requests at
+  once, so they skip `ModelQueue`, the talk open or not. DeepSeek holds an answer
+  to JSON but not to a schema, so the correction's one line per answer is
+  checked by `read_corrections` rather than enforced; an answer that cannot be
+  read is asked for again, then asked of the laptop.
+- **The laptop stays ready.** Warm-ups, kept slots and errands go on as without
+  the cloud, so a request the cloud fails finds the local model as warm as ever.
+- **Measured** from a Mac in India through the proxy, on 2026-10-10, with
+  Ella's own prompts: 25 placement replies had their first word after 0.97 s
+  (median; 1.06 s at the 90th percentile, 1.28 s at worst) and were written
+  whole after 1.17 s; in the live end-to-end tests 2 replies of about 20 took
+  4.5-5.5 s. Each judge answered in 1.0-1.8 s, every answer readable JSON (20
+  of 20), against 23-130 s for a recap on the Windows test laptop. Ella's turn
+  notes, system messages placed late in the conversation, are read where they
+  stand: the closing note was obeyed 15 times in 15, and DeepSeek's cache kept
+  the conversation before them (640 of 871 prompt tokens).
+- **Figures said aloud.** The cloud's talk partners write prices as they are
+  said — "five hundred fifty", "five fifty", "one thousand two hundred" — where
+  the laptop's model wrote "Rs 550". `extract_figure` reads them too: a figure
+  spelled in hundreds or thousands counts without its unit, "five fifty" is
+  550, and a figure just after "not" or "never" ("not four hundred") is not an
+  offer. On the bench the market and deposit ledgers then moved as the
+  characters said (600 → 550 → 475 → 450 → 420; 500 → 1500 → … → 3000), where
+  before every spelled figure was missed. The cloud's stall owner bargains
+  harder than the laptop's: in two runs the scripted learner got him to 450 and
+  420, not 400.
+- **Replies run to 80 tokens** in the cloud, against the laptop's 50: a talk
+  partner's longer sentences ran out mid-sentence at 50. A reply that still runs
+  out is cut back to its last whole sentence (`whole_sentences`).
+- **Telemetry** marks what the cloud did: `backend: "cloud"` on a turn's
+  `llm_runs` and an assessment's `judges`, with `failed` (`unanswered` or `cut`)
+  on a try that gave no reply, and `cloud_fallback` or `cloud_cut` in the turn's
+  `notes`. `telemetry:report` groups turns the cloud answered, and recaps it
+  judged, apart from the laptop's, and says how fast its first word came, how
+  much of its prompts DeepSeek had cached, and what its failures cost.
+
+The proxy is deployed from this repository:
+
+```bash
+supabase db push --linked          # its tables, in supabase/migrations/
+supabase functions deploy ella-desktop --project-ref xoeydvvslyvslvpaajmi --no-verify-jwt --use-api
+cd supabase/functions/ella-desktop && deno task test
+```
+
+Its DeepSeek key is a Supabase secret, set by whoever holds it and never
+written anywhere else:
+
+```bash
+read -s KEY && supabase secrets set --project-ref xoeydvvslyvslvpaajmi DEEPSEEK_API_KEY="$KEY"; unset KEY
+```
+
 ## Where a learner's data is kept
 
 The learner's profile, talks and answers are kept in one SQLite database,
 `ella.sqlite3`, in the app's data folder
 (`~/Library/Application Support/org.navgurukul.ella.desktop/` on macOS,
-`%APPDATA%\org.navgurukul.ella.desktop\` on Windows). None of it leaves the
-laptop, and nothing in the app deletes it: "Log out" only signs out. While Ella
+`%APPDATA%\org.navgurukul.ella.desktop\` on Windows). The database never leaves
+the laptop, and nothing in the app deletes it: "Log out" only signs out. While Ella
 runs, the newest writes sit in `ella.sqlite3-wal` beside it, and quitting folds
 them into `ella.sqlite3`; to back up or move a tester's data, quit Ella and copy
 every `ella.sqlite3*` file together. Every saved turn is synced to the drive
 before Ella moves on (`synchronous = FULL`, plus `fullfsync` on macOS), so it
 survives a crash, a force-quit or a battery that dies.
+
+What Ella's replies and recaps are written from does leave it, whenever the
+laptop is online ([Over the internet](#over-the-internet)). Each request to the
+cloud carries what the model needs to answer, and nothing else: Ella's
+instructions, which name the learner (and give their age, in the placement
+chat), and the talk so far as the speech recognizer heard it, or the learner's
+answers for a recap. It goes over HTTPS to Ella Desktop's proxy on Supabase
+(Mumbai), which keeps none of it, only how many requests and tokens each install
+used, under an install token that names nobody; and from there to DeepSeek,
+whose privacy policy says it stores what it is sent in China and may use it to
+improve its models. Recordings never leave the laptop, nor do the database, the
+avatar, the progress and badges, or the telemetry. A laptop set to
+`ELLA_CLOUD=off` sends none of it.
 
 `models/llm-slots/` beside it holds llama.cpp's saved slots: the evaluated
 instructions of the last six talks' topics, chores and placement chat, and of
@@ -800,8 +915,9 @@ all the same. The browser preview keeps its own, separate copy in the browser's
 local storage, and reads what older previews left there the same way.
 
 Once the models are downloaded on the first launch, Ella needs no internet: the
-speech, language and voice engines all run on the laptop, and the update check
-gives up quietly when offline. If the models cannot be refreshed — no internet
+speech, language and voice engines all run on the laptop, the language model
+over the internet is only ever asked first, and the update check gives up
+quietly when offline. If the models cannot be refreshed — no internet
 after an update that names a newer model, or a lost download record — Ella
 loads the weights already on disk and tries again on the next launch.
 

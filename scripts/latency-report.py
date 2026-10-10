@@ -98,14 +98,32 @@ def local(event):
 
 
 def group_of(event):
-    """The day, and the build where the event names it."""
+    """The day, and the build where the event names it; `cloud` after it for a
+    turn the cloud answered, or a recap the cloud judged, so neither is
+    counted in with what the laptop did itself."""
     day = event.get("timestamp", "?")[:10]
     version = event.get("app_version")
-    return f"{day} {version}" if version else day
+    group = f"{day} {version}" if version else day
+    return f"{group} cloud" if by_cloud(event) else group
 
 
 def runs(event):
     return event.get("llm_runs") or []
+
+
+def local_runs(event):
+    """The generations the laptop's own model wrote: only they say how fast
+    the computer is."""
+    return [run for run in runs(event) if not run.get("backend")]
+
+
+def by_cloud(event):
+    """Whether the cloud wrote the reply the learner heard, or judged the whole recap."""
+    if event.get("event") == "ella_assessment":
+        judges = [judge for judge in event.get("judges", []) if judge.get("status") == "ok"]
+        return bool(judges) and all(judge.get("backend") == "cloud" for judge in judges)
+    written = [run for run in runs(event) if not run.get("failed")]
+    return bool(written) and written[-1].get("backend") == "cloud"
 
 
 def prompt_rate(run):
@@ -177,10 +195,21 @@ def detail_summary(days):
             print("\nWhy, for builds that say (rates are medians; 'others' is CPU busy with something besides Ella):")
             printed = True
         ok = [e for e in events if e.get("status") == "ok"]
-        all_runs = [run for e in ok for run in runs(e)]
+        all_runs = [run for e in ok for run in local_runs(e)]
         prompt = [rate for rate in map(prompt_rate, all_runs) if rate]
         write = [rate for rate in map(write_rate, all_runs) if rate]
-        evaluated = [runs(e)[0].get("prompt_evaluated") for e in ok if runs(e) and runs(e)[0].get("prompt_evaluated") is not None]
+        evaluated = [
+            local_runs(e)[0].get("prompt_evaluated")
+            for e in ok
+            if local_runs(e) and local_runs(e)[0].get("prompt_evaluated") is not None
+        ]
+        cloud_runs = [run for e in ok for run in runs(e) if run.get("backend") == "cloud"]
+        cloud_ok = [run for run in cloud_runs if not run.get("failed")]
+        cloud_failed = Counter(run["failed"] for run in cloud_runs if run.get("failed"))
+        cloud_ttft = [run["ttft_ms"] for run in cloud_ok if run.get("ttft_ms") is not None]
+        cloud_wasted = [run["ms"] for run in cloud_runs if run.get("failed") and run.get("ms") is not None]
+        cloud_prompt = sum(run.get("prompt_tokens") or 0 for run in cloud_ok)
+        cloud_cached = sum((run.get("prompt_tokens") or 0) - (run.get("prompt_evaluated") or 0) for run in cloud_ok)
         rewrites = sum(1 for e in ok if any(run.get("why") == "rewrite" for run in runs(e)))
         on_clock = sum(1 for e in ok if e.get("tts_path") == "on_clock")
         firsts = [e for e in ok if e.get("turn") == 1 and e.get("llm_ttft_ms") is not None]
@@ -204,10 +233,19 @@ def detail_summary(days):
         notes = Counter(note for e in ok for note in e.get("notes") or [])
 
         print(f"{day}  ({len(events)} turns)")
-        print(
-            f"  model    reads {fmt(median(prompt))} tok/s (slowest {fmt(min(prompt) if prompt else None)}), "
-            f"writes {fmt(median(write))} tok/s; evaluates {fmt(median(evaluated))} prompt tokens a turn"
-        )
+        if cloud_runs:
+            print(
+                f"  cloud    wrote {len(cloud_ok)} runs, first word {fmt(median(cloud_ttft))} ms "
+                f"(slowest {fmt(max(cloud_ttft) if cloud_ttft else None)}); "
+                f"{cloud_cached * 100 // cloud_prompt if cloud_prompt else 0}% of its prompt tokens cached; "
+                f"failed {', '.join(f'{why} {n}' for why, n in cloud_failed.most_common()) or 'never'}"
+                + (f", costing {fmt(median(cloud_wasted))} ms each (median)" if cloud_wasted else "")
+            )
+        if all_runs:
+            print(
+                f"  model    reads {fmt(median(prompt))} tok/s (slowest {fmt(min(prompt) if prompt else None)}), "
+                f"writes {fmt(median(write))} tok/s; evaluates {fmt(median(evaluated))} prompt tokens a turn"
+            )
         print(
             f"  replies  rewritten {rewrites}/{len(ok)}, said on the clock {on_clock}/{len(ok)}; "
             f"first replies {len(firsts)}, cold (ttft >= 5 s) {len(cold)}"
