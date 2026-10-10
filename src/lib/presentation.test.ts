@@ -19,7 +19,15 @@ import {
   talkTotals,
   weeklyDigest,
 } from "./presentation";
-import type { AppSnapshot, ChoreRecap, DayActivity, FinishedTalk, LearnerBadge, LearnerProgress } from "../types";
+import { catalogueTopic } from "./topics";
+import type { AppSnapshot, ChoreRecap, DayActivity, FinishedTalk, LearnerBadge, LearnerProgress, Topic } from "../types";
+
+/** A topic as the backend sends it. */
+function topic(id: string): Topic {
+  const found = catalogueTopic(id);
+  if (!found) throw new Error(`no ${id} topic`);
+  return found;
+}
 
 /** Friday morning on whatever clock the tests run on. */
 const today = new Date(2026, 8, 25, 10);
@@ -54,10 +62,8 @@ function ended(topic_id: string, daysAgo: number, goal_met = false): FinishedTal
 function badgesOf(progress: LearnerProgress, age: number | null = 14): LearnerBadge[] {
   const snapshot = {
     learner: { name: "Asha", age, level_name: "", created_at: "" },
-    topics: [
-      { id: "street-food", label: "Street food stories", prompt: "", emoji: "", color: "" },
-      { id: "market-bargaining", label: "Bargaining at the market", prompt: "", emoji: "", color: "" },
-    ],
+    // Home at A0, which offers no bargaining: the badge's talk is still there.
+    topics: [topic("a0-my-family"), topic("a0-animals")],
     recent_sessions: [],
     progress,
   } as unknown as AppSnapshot;
@@ -361,14 +367,17 @@ describe("the recap", () => {
     expect([castName("stall-owner"), castName("landlord")]).toEqual(["Bippo", "Grumble"]);
   });
 
-  it("suggests a different topic for tomorrow", () => {
+  it("suggests the talk Home will lead with tomorrow", () => {
     const snapshot = {
-      topics: [
-        { id: "street-food", label: "Street food", prompt: "", emoji: "", color: "" },
-        { id: "booking-a-cab", label: "Booking a cab", prompt: "", emoji: "", color: "" },
-      ],
+      topics: [topic("street-food"), topic("booking-a-cab")],
+      tomorrow_topic: topic("a2-cricket"),
     } as unknown as AppSnapshot;
-    expect(nextTopicLabel(snapshot, "street-food")).toBe("Booking a cab");
-    expect(nextTopicLabel(snapshot, "market-cloth-price")).toBe("Street food");
+    expect(nextTopicLabel(snapshot, "street-food")).toBe("Cricket and sport in India");
+    expect(nextTopicLabel(snapshot, "market-cloth-price")).toBe("Cricket and sport in India");
+    // Until the backend's figures with the finished talk in them arrive,
+    // tomorrow's talk may still be that talk: then the next one Ella offers.
+    expect(nextTopicLabel(snapshot, "a2-cricket")).toBe("Street food stories");
+    const before = { ...snapshot, tomorrow_topic: null } as AppSnapshot;
+    expect(nextTopicLabel(before, "street-food")).toBe("Booking a cab");
   });
 });

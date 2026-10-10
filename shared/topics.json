@@ -1,0 +1,1212 @@
+{
+  "_source": "Ella Mobile's topics (supabase/functions/ella/catalog.ts and topics.ts, as of f7c564a): the design's eleven, then twelve for each level, word for word, except that the desktop's seven keep their ids, openers and scenes, and an opener that would follow the greeting badly is the desktop's own. Each topic's subject and scene are the desktop's, for the instructions its language model is given (src-tauri/src/infrastructure/engines.rs). Read by the Rust backend (src-tauri/src/topics.rs) and the browser preview (src/lib/topics.ts).",
+  "defaults": {
+    "greeting": "Hi {name}!",
+    "role": "yourself, sitting with them over a cup of chai",
+    "owns": "You are here to listen to their story, so let them do the telling and keep your own memories short."
+  },
+  "topics": [
+    {
+      "id": "campus-visitors",
+      "label": "Welcoming campus visitors",
+      "kind": "role_play",
+      "minutes": 5,
+      "meta": "ROLE-PLAY · ~5 MIN",
+      "blurb": "Visitors reach the Pune campus today — practise the tour before they arrive.",
+      "opener": "Imagine I'm a visitor at your gate. Welcome me and show me around!",
+      "levels": ["A1", "A2"],
+      "scene": {
+        "role": "a visitor who has just arrived at the gate of their campus",
+        "owns": "You are new here and know nothing about this campus, so you ask about what they show you and react to it. Say yourself who you are and why you have come, picking an ordinary visitor — a teacher from another town, a parent, a student thinking of joining — and once you have said who you are in this conversation, keep it the same later on instead of becoming somebody else next time. For example, if they ask who you are, say you are a teacher from Nagpur visiting for the day, then ask what you should see first. Never tell them what is on the campus, where things are, or how life there works: those are theirs to tell you, not yours.",
+        "draw_out": "welcome you, show you around their campus, and tell you what happens in each place"
+      }
+    },
+    {
+      "id": "sunday-vegetable-turn",
+      "label": "Sunday vegetable turn",
+      "subject": "buying vegetables at the Sunday market",
+      "kind": "real_life",
+      "minutes": 5,
+      "meta": "REAL LIFE · SUNDAY",
+      "blurb": "Practise asking about vegetables, quantities and prices.",
+      "opener": "You are buying vegetables on Sunday. Ask me for the best price.",
+      "levels": ["A1"],
+      "scene": {
+        "role": "the vegetable seller at the Sunday market they are buying from",
+        "owns": "You know your vegetables and your prices. Name your price yourself, in rupees a kilo, for ordinary vegetables — onions, tomatoes, potatoes, okra — priced the way a local Sunday market would. Once you have named a price in this conversation, keep it the same later on instead of naming a different one next time. For example, if they ask how much the tomatoes are, say they are forty rupees a kilo and ask how many kilos they need. Never ask them what the price should be, what you are selling, what it all comes to, or how much they want to pay: naming a price and adding up the bill are yours to do, not theirs.",
+        "draw_out": "ask you about your vegetables, say how much they need, and get your best price"
+      }
+    },
+    {
+      "id": "doctor-clinic",
+      "label": "Talking to the doctor",
+      "kind": "role_play",
+      "minutes": 5,
+      "meta": "ROLE-PLAY · ~5 MIN",
+      "blurb": "Describe how you feel and answer a doctor's questions.",
+      "opener": "I am the doctor here. Please sit down and tell me, how have you been feeling?",
+      "levels": ["A2"],
+      "scene": {
+        "role": "the doctor at the clinic they have walked into",
+        "owns": "You are the one with the medical knowledge. Say what is wrong and what they should do yourself, using an ordinary complaint like a fever, a cough, or a stomach ache and a plain everyday remedy — rest, water, a common tablet — never anything serious or frightening. Once you have named what is wrong in this conversation, keep it the same later on instead of naming something different next time. For example, if they describe a headache, say it sounds like a mild fever and tell them to rest and drink water, then ask how long they have felt this way. Never ask them what their illness is, what medicine to take, or how long it will last: those are yours to answer, not theirs.",
+        "draw_out": "explain how they feel and understand what you tell them to do"
+      }
+    },
+    {
+      "id": "gbu",
+      "label": "Sharing your GBU",
+      "subject": "GBU and campus life",
+      "kind": "culture",
+      "minutes": 4,
+      "meta": "CULTURE · ~4 MIN",
+      "blurb": "Tell a visitor what makes GBU and campus life special.",
+      "opener": "What is one thing every new visitor should know about GBU?",
+      "levels": ["A2"],
+      "scene": {
+        "draw_out": "tell you what makes GBU and campus life special"
+      }
+    },
+    {
+      "id": "debate",
+      "label": "Debate: take a stand",
+      "subject": "four-day college weeks",
+      "kind": "debate",
+      "minutes": 7,
+      "meta": "DEBATE · ~7 MIN",
+      "blurb": "Choose a side, explain why and respond to another view.",
+      "opener": "Should students have a four-day college week? Take a side.",
+      "levels": ["B1"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "pick a side on a four-day college week, say why, and answer the other view you put to them"
+      }
+    },
+    {
+      "id": "street-food",
+      "label": "Street food stories",
+      "kind": "fluency",
+      "minutes": 6,
+      "meta": "FLUENCY · ~6 MIN",
+      "blurb": "Describe tastes, smells and your favourite stall. About 6 minutes of talking.",
+      "opener": "Tell me about the tastiest thing you ate this week. Where did you find it?",
+      "levels": ["A2"],
+      "scene": {
+        "draw_out": "describe tastes and smells and tell you about a stall they love"
+      }
+    },
+    {
+      "id": "restaurant-order",
+      "label": "Ordering at a restaurant",
+      "kind": "role_play",
+      "minutes": 5,
+      "meta": "ROLE-PLAY · ~5 MIN",
+      "blurb": "You are at the counter and I am taking your order. Ready?",
+      "opener": "We are at a restaurant and I am your waiter. What would you like to order today?",
+      "levels": ["A1"],
+      "scene": {
+        "role": "the waiter at the restaurant they have just sat down in",
+        "owns": "You know the menu, the dishes and what everything costs. Say what a dish is and what it costs yourself, picking ordinary Indian dishes and rupee prices as you go — a dosa, a biryani, a butter chicken, priced the way a modest local restaurant would. Once you have named a dish or a price in this conversation, keep it the same later on instead of naming a different one next time. For example, if they ask for a burger, say it is ninety rupees and ask what they would like to drink. Never ask them what is on the menu, what a dish costs, or what the bill comes to: those are yours to answer, not theirs.",
+        "draw_out": "order a meal, ask you about the menu, and settle the bill with you"
+      }
+    },
+    {
+      "id": "booking-a-cab",
+      "label": "Booking a cab",
+      "kind": "vocab",
+      "minutes": 4,
+      "meta": "VOCAB · ~4 MIN",
+      "blurb": "Names for places, directions and fares.",
+      "opener": "I am the cab driver. Where would you like to go, and where should I pick you up?",
+      "levels": ["A1"],
+      "scene": {
+        "role": "the cab driver they have just flagged down",
+        "owns": "You know the roads, the fares and how long a trip takes. Name your fare yourself, in rupees, and say yourself how long the trip will take — pick an ordinary local fare and a plausible number of minutes for wherever they say they are going. Once you have named a fare or a time in this conversation, keep it the same later on instead of naming a different one next time. For example, if they say they are going to the railway station, name a fare like sixty rupees and say it will take about fifteen minutes. Never ask them how much the fare should be, how much they want to pay, how far it is, or how long it takes: those are yours to answer, not theirs.",
+        "draw_out": "tell you where to pick them up, say where they are going, and agree your fare"
+      }
+    },
+    {
+      "id": "job-interview",
+      "label": "A job interview",
+      "kind": "role_play",
+      "minutes": 6,
+      "meta": "ROLE-PLAY · ~6 MIN",
+      "blurb": "I will be the interviewer. Tell me about yourself.",
+      "greeting": "Hello {name}!",
+      "opener": "Thank you for coming in. To start, could you tell me a little about yourself?",
+      "levels": ["B1", "B2"],
+      "min_age": 14,
+      "scene": {
+        "role": "the interviewer meeting them for a first interview",
+        "owns": "You know the job and what you are looking for. Ask them about their work yourself. If they ask what the role is or what it pays, answer with an ordinary job an Indian employer might advertise — a shop assistant, a delivery rider, an office assistant — and a plausible monthly salary in rupees. Once you have named a role or a salary in this conversation, keep it the same later on instead of naming something different next time. For example, if they ask what the role is, say you need a shop assistant for evening shifts and ask what shop experience they have. Never ask them what the job is, what it pays, or what you are looking for: those are yours to answer, not theirs.",
+        "draw_out": "introduce themselves and answer your questions about their work"
+      }
+    },
+    {
+      "id": "asking-directions",
+      "label": "Asking for directions",
+      "kind": "grammar",
+      "minutes": 4,
+      "meta": "GRAMMAR · ~4 MIN",
+      "blurb": "Prepositions and polite questions.",
+      "opener": "You look a little lost. Where are you trying to go? I know this area well.",
+      "levels": ["A1"],
+      "scene": {
+        "role": "a friendly local they have stopped on the street",
+        "owns": "You know this area well. Give the directions yourself, street by street, naming ordinary landmarks as you go — a market, a temple, a bus stop, a signal — the way a local actually would. Once you have named a landmark or a turn in this conversation, keep it the same later on instead of naming something different next time. For example, if they ask the way to the bus stand, tell them to walk straight past the temple and turn left at the market, then ask if that makes sense. Never ask them which way it is, how far it is, or how long it takes to get there: those are yours to answer, not theirs.",
+        "draw_out": "say where they are trying to get to, and repeat your directions back to you"
+      }
+    },
+    {
+      "id": "market-bargaining",
+      "label": "Bargaining at the market",
+      "kind": "fluency",
+      "minutes": 5,
+      "meta": "FLUENCY · ~5 MIN",
+      "blurb": "Numbers, prices and standing your ground.",
+      "opener": "Come, come, best prices here. What are you looking for today?",
+      "levels": ["A2"],
+      "min_age": 10,
+      "scene": {
+        "role": "the shopkeeper at the stall they are standing in front of",
+        "owns": "You know your stock and your prices. Name your price yourself, in rupees, for ordinary market goods — cloth, vegetables, fruit, a snack — priced the way a local stall would. Once you have named a price in this conversation, keep it the same later on instead of naming a different one next time. For example, if they ask the price of a shirt, say it is two hundred rupees and ask how many they would like. Never ask them what the price should be or how much they want to pay: naming a price is yours to do, not theirs.",
+        "draw_out": "ask you the price, bargain with you, and agree a deal"
+      }
+    },
+    {
+      "id": "a0-about-me",
+      "label": "All about me",
+      "subject": "age and school",
+      "kind": "fluency",
+      "minutes": 3,
+      "meta": "FLUENCY · ~3 MIN",
+      "blurb": "Say your name, your age and where you study.",
+      "opener": "Tell me about yourself. How old are you?",
+      "levels": ["A0"],
+      "scene": {
+        "draw_out": "tell you how old they are and where they study"
+      }
+    },
+    {
+      "id": "a0-my-family",
+      "label": "My family",
+      "subject": "family",
+      "kind": "fluency",
+      "minutes": 3,
+      "meta": "FLUENCY · ~3 MIN",
+      "blurb": "Say who is in your family.",
+      "opener": "Who is in your family? Tell me their names!",
+      "levels": ["A0"],
+      "scene": {
+        "draw_out": "say who is in their family and tell you their names"
+      }
+    },
+    {
+      "id": "a0-colours",
+      "label": "Colours around me",
+      "subject": "colours",
+      "kind": "vocab",
+      "minutes": 3,
+      "meta": "VOCAB · ~3 MIN",
+      "blurb": "Name the colours you can see right now.",
+      "opener": "Look around you. What colours can you see?",
+      "levels": ["A0"],
+      "scene": {
+        "draw_out": "name the colours they can see around them"
+      }
+    },
+    {
+      "id": "a0-school-bag",
+      "label": "My school bag",
+      "subject": "school bags",
+      "kind": "vocab",
+      "minutes": 3,
+      "meta": "VOCAB · ~3 MIN",
+      "blurb": "Name the things in your bag.",
+      "opener": "What have you got in your bag today?",
+      "levels": ["A0"],
+      "scene": {
+        "draw_out": "name the things in their school bag"
+      }
+    },
+    {
+      "id": "a0-animals",
+      "label": "Animals I know",
+      "subject": "animals",
+      "kind": "vocab",
+      "minutes": 3,
+      "meta": "VOCAB · ~3 MIN",
+      "blurb": "Name animals and say which ones you like.",
+      "opener": "Which animal do you like best?",
+      "levels": ["A0"],
+      "scene": {
+        "draw_out": "name animals and say which ones they like"
+      }
+    },
+    {
+      "id": "a0-food-i-like",
+      "label": "Food I like",
+      "subject": "food",
+      "kind": "fluency",
+      "minutes": 3,
+      "meta": "FLUENCY · ~3 MIN",
+      "blurb": "Say what you like to eat, and what you don't.",
+      "opener": "What food do you like to eat?",
+      "levels": ["A0"],
+      "scene": {
+        "draw_out": "say what food they like to eat, and what they do not"
+      }
+    },
+    {
+      "id": "a0-i-can",
+      "label": "Things I can do",
+      "subject": "things they can do",
+      "kind": "grammar",
+      "minutes": 3,
+      "meta": "GRAMMAR · ~3 MIN",
+      "blurb": "Say what you can do: run, sing, draw, swim.",
+      "opener": "Tell me something you can do. Can you swim, or sing?",
+      "levels": ["A0"],
+      "scene": {
+        "draw_out": "say what they can do, like run, sing, draw or swim"
+      }
+    },
+    {
+      "id": "a0-my-room",
+      "label": "My room",
+      "subject": "rooms",
+      "kind": "grammar",
+      "minutes": 3,
+      "meta": "GRAMMAR · ~3 MIN",
+      "blurb": "Say where things are: on, in, under, next to.",
+      "opener": "Is your bed next to the window?",
+      "levels": ["A0"],
+      "scene": {
+        "draw_out": "say where things are in their room, using on, in, under and next to"
+      }
+    },
+    {
+      "id": "a0-right-now",
+      "label": "Right now",
+      "subject": "what is happening right now",
+      "kind": "grammar",
+      "minutes": 3,
+      "meta": "GRAMMAR · ~3 MIN",
+      "blurb": "Say what you and the people near you are doing now.",
+      "opener": "What are you doing right now?",
+      "levels": ["A0"],
+      "scene": {
+        "draw_out": "say what they and the people near them are doing right now"
+      }
+    },
+    {
+      "id": "a0-counting",
+      "label": "Count with me",
+      "subject": "counting",
+      "kind": "vocab",
+      "minutes": 3,
+      "meta": "VOCAB · ~3 MIN",
+      "blurb": "Count things around you, from one to ten.",
+      "opener": "How many windows are in your room? Let us count!",
+      "levels": ["A0"],
+      "scene": {
+        "draw_out": "count the things around them, from one to ten"
+      }
+    },
+    {
+      "id": "a0-my-clothes",
+      "label": "What I am wearing",
+      "subject": "clothes",
+      "kind": "vocab",
+      "minutes": 3,
+      "meta": "VOCAB · ~3 MIN",
+      "blurb": "Name your clothes and their colours.",
+      "opener": "What are you wearing today, and what colour is it?",
+      "levels": ["A0"],
+      "scene": {
+        "draw_out": "name the clothes they are wearing and their colours"
+      }
+    },
+    {
+      "id": "a0-my-school",
+      "label": "My school",
+      "subject": "school",
+      "kind": "fluency",
+      "minutes": 3,
+      "meta": "FLUENCY · ~3 MIN",
+      "blurb": "Say the name of your school and what is there.",
+      "opener": "Tell me about your school. Is it big or small?",
+      "levels": ["A0"],
+      "scene": {
+        "draw_out": "tell you the name of their school and what is there"
+      }
+    },
+    {
+      "id": "a1-best-friend",
+      "label": "My best friend",
+      "subject": "best friends",
+      "kind": "fluency",
+      "minutes": 4,
+      "meta": "FLUENCY · ~4 MIN",
+      "blurb": "Describe your best friend: how they look and what they are like.",
+      "opener": "Tell me about your best friend. What do they look like?",
+      "levels": ["A1"],
+      "scene": {
+        "draw_out": "describe their best friend: how they look and what they are like"
+      }
+    },
+    {
+      "id": "a1-my-town",
+      "label": "My town or village",
+      "subject": "towns and villages",
+      "kind": "fluency",
+      "minutes": 4,
+      "meta": "FLUENCY · ~4 MIN",
+      "blurb": "Describe the place where you live.",
+      "opener": "Is the place where you live busy or quiet?",
+      "levels": ["A1"],
+      "scene": {
+        "draw_out": "describe the place where they live"
+      }
+    },
+    {
+      "id": "a1-yesterday",
+      "label": "Yesterday",
+      "subject": "yesterday",
+      "kind": "grammar",
+      "minutes": 4,
+      "meta": "GRAMMAR · ~4 MIN",
+      "blurb": "Say what you did yesterday, from morning to night.",
+      "opener": "What did you do yesterday? Tell me about your morning first.",
+      "levels": ["A1"],
+      "scene": {
+        "draw_out": "say what they did yesterday, from morning to night"
+      }
+    },
+    {
+      "id": "a1-last-weekend",
+      "label": "Last weekend",
+      "subject": "last weekend",
+      "kind": "fluency",
+      "minutes": 4,
+      "meta": "FLUENCY · ~4 MIN",
+      "blurb": "Tell Ella about your last weekend.",
+      "opener": "Where did you go last weekend?",
+      "levels": ["A1"],
+      "scene": {
+        "draw_out": "tell you about their last weekend"
+      }
+    },
+    {
+      "id": "a1-hobbies",
+      "label": "My hobbies",
+      "subject": "hobbies",
+      "kind": "fluency",
+      "minutes": 4,
+      "meta": "FLUENCY · ~4 MIN",
+      "blurb": "Talk about what you do in your free time, and why.",
+      "opener": "What do you like to do in your free time?",
+      "levels": ["A1"],
+      "scene": {
+        "draw_out": "say what they do in their free time, and why"
+      }
+    },
+    {
+      "id": "a1-shopping",
+      "label": "Shopping",
+      "subject": "shopping",
+      "kind": "real_life",
+      "minutes": 4,
+      "meta": "REAL LIFE · ~4 MIN",
+      "blurb": "Talk about what you buy, where, and how often.",
+      "opener": "Where do you usually go shopping, and what do you buy?",
+      "levels": ["A1"],
+      "scene": {
+        "draw_out": "tell you what they buy, where, and how often"
+      }
+    },
+    {
+      "id": "a1-weather",
+      "label": "The weather",
+      "subject": "weather",
+      "kind": "vocab",
+      "minutes": 4,
+      "meta": "VOCAB · ~4 MIN",
+      "blurb": "Describe today's weather and your favourite season.",
+      "opener": "What is the weather like today where you are?",
+      "levels": ["A1"],
+      "scene": {
+        "draw_out": "describe today's weather and their favourite season"
+      }
+    },
+    {
+      "id": "a1-festival",
+      "label": "A festival I love",
+      "subject": "festivals",
+      "kind": "culture",
+      "minutes": 4,
+      "meta": "CULTURE · ~4 MIN",
+      "blurb": "Describe a festival you celebrate and what you do.",
+      "opener": "Which festival do you like best, and what do you do on that day?",
+      "levels": ["A1"],
+      "scene": {
+        "draw_out": "describe a festival they celebrate and what they do"
+      }
+    },
+    {
+      "id": "a1-holiday-plans",
+      "label": "My holiday plans",
+      "subject": "holiday plans",
+      "kind": "grammar",
+      "minutes": 4,
+      "meta": "GRAMMAR · ~4 MIN",
+      "blurb": "Say what you are going to do in the holidays.",
+      "opener": "What are you going to do in the next holidays?",
+      "levels": ["A1"],
+      "scene": {
+        "draw_out": "say what they are going to do in the holidays"
+      }
+    },
+    {
+      "id": "a1-daily-routine",
+      "label": "My daily routine",
+      "subject": "daily routines",
+      "kind": "fluency",
+      "minutes": 4,
+      "meta": "FLUENCY · ~4 MIN",
+      "blurb": "Say what you usually do every day, and when.",
+      "opener": "What time do you usually get up in the morning?",
+      "levels": ["A1"],
+      "scene": {
+        "draw_out": "say what they usually do every day, and when"
+      }
+    },
+    {
+      "id": "a1-favourite-meal",
+      "label": "My favourite meal",
+      "subject": "favourite meals",
+      "kind": "fluency",
+      "minutes": 4,
+      "meta": "FLUENCY · ~4 MIN",
+      "blurb": "Say what you love to eat and why.",
+      "opener": "What is your favourite meal, and why do you like it so much?",
+      "levels": ["A1"],
+      "scene": {
+        "draw_out": "say what they love to eat and why"
+      }
+    },
+    {
+      "id": "a1-a-trip",
+      "label": "A trip I took",
+      "subject": "trips",
+      "kind": "fluency",
+      "minutes": 4,
+      "meta": "FLUENCY · ~4 MIN",
+      "blurb": "Tell the story of a trip: first, then, after that.",
+      "opener": "Tell me about a trip you took. Where did you go first?",
+      "levels": ["A1"],
+      "scene": {
+        "draw_out": "tell you the story of a trip they took: first, then, after that"
+      }
+    },
+    {
+      "id": "a2-when-i-was-little",
+      "label": "When I was little",
+      "subject": "childhood",
+      "kind": "grammar",
+      "minutes": 5,
+      "meta": "GRAMMAR · ~5 MIN",
+      "blurb": "Talk about what you used to do as a child.",
+      "opener": "What games did you use to play when you were little?",
+      "levels": ["A2"],
+      "scene": {
+        "draw_out": "tell you what they used to do as a child"
+      }
+    },
+    {
+      "id": "a2-funny-moment",
+      "label": "A funny thing that happened",
+      "subject": "funny moments",
+      "kind": "fluency",
+      "minutes": 5,
+      "meta": "FLUENCY · ~5 MIN",
+      "blurb": "Tell a funny story: what was happening, and what happened next.",
+      "opener": "Tell me about a time something funny happened. What were you doing?",
+      "levels": ["A2"],
+      "scene": {
+        "draw_out": "tell you a funny story: what was happening, and what happened next"
+      }
+    },
+    {
+      "id": "a2-ambitions",
+      "label": "My ambitions",
+      "subject": "ambitions",
+      "kind": "fluency",
+      "minutes": 5,
+      "meta": "FLUENCY · ~5 MIN",
+      "blurb": "Talk about your dreams for the future, and why they matter to you.",
+      "opener": "What would you like to do after school, and why?",
+      "levels": ["A2"],
+      "scene": {
+        "draw_out": "talk about their dreams for the future, and why they matter to them"
+      }
+    },
+    {
+      "id": "a2-school-then-now",
+      "label": "School then and now",
+      "subject": "school then and now",
+      "kind": "culture",
+      "minutes": 5,
+      "meta": "CULTURE · ~5 MIN",
+      "blurb": "Compare school today with what your parents remember.",
+      "opener": "How is your school different from your parents' school?",
+      "levels": ["A2"],
+      "scene": {
+        "draw_out": "compare school today with what their parents remember"
+      }
+    },
+    {
+      "id": "a2-social-media",
+      "label": "Social media",
+      "subject": "social media",
+      "kind": "debate",
+      "minutes": 5,
+      "meta": "DEBATE · ~5 MIN",
+      "blurb": "Share how you use social media, and whether it is good for you.",
+      "opener": "How much time do you spend on social media each day?",
+      "levels": ["A2"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "share how they use social media, and whether it is good for them"
+      }
+    },
+    {
+      "id": "a2-cricket",
+      "label": "Cricket and sport in India",
+      "subject": "cricket and sport in India",
+      "kind": "culture",
+      "minutes": 5,
+      "meta": "CULTURE · ~5 MIN",
+      "blurb": "Talk about cricket or another sport, and why people love it.",
+      "opener": "Why do you think cricket is so popular in India?",
+      "levels": ["A2"],
+      "scene": {
+        "draw_out": "talk about cricket or another sport, and why people love it"
+      }
+    },
+    {
+      "id": "a2-city-or-village",
+      "label": "City life or village life",
+      "subject": "city life and village life",
+      "kind": "debate",
+      "minutes": 5,
+      "meta": "DEBATE · ~5 MIN",
+      "blurb": "Pick city or village life and give reasons with examples.",
+      "opener": "Would you prefer to live in a big city or a quiet village?",
+      "levels": ["A2"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "pick city or village life and give their reasons with examples"
+      }
+    },
+    {
+      "id": "a2-someone-i-admire",
+      "label": "A person I admire",
+      "subject": "role models",
+      "kind": "fluency",
+      "minutes": 5,
+      "meta": "FLUENCY · ~5 MIN",
+      "blurb": "Describe someone you look up to, and what you have learned from them.",
+      "opener": "Who is a person you really admire, and what have you learned from them?",
+      "levels": ["A2"],
+      "scene": {
+        "draw_out": "describe someone they look up to, and what they have learned from them"
+      }
+    },
+    {
+      "id": "a2-healthy-habits",
+      "label": "Healthy habits",
+      "subject": "healthy habits",
+      "kind": "real_life",
+      "minutes": 5,
+      "meta": "REAL LIFE · ~5 MIN",
+      "blurb": "Talk about what you should and could do to stay healthy.",
+      "opener": "What do you do to stay healthy, and what should you do more?",
+      "levels": ["A2"],
+      "scene": {
+        "draw_out": "talk about what they should and could do to stay healthy"
+      }
+    },
+    {
+      "id": "a2-no-phone-day",
+      "label": "A day without my phone",
+      "subject": "life without phones",
+      "kind": "debate",
+      "minutes": 5,
+      "meta": "DEBATE · ~5 MIN",
+      "blurb": "Imagine a day with no phone: what will change?",
+      "opener": "If your phone stops working for a day, what will you do?",
+      "levels": ["A2"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "imagine a day with no phone and say what would change"
+      }
+    },
+    {
+      "id": "a2-problem-solved",
+      "label": "A problem I solved",
+      "subject": "solving problems",
+      "kind": "fluency",
+      "minutes": 5,
+      "meta": "FLUENCY · ~5 MIN",
+      "blurb": "Tell how you solved a problem, from start to end.",
+      "opener": "Tell me about a problem you solved. What was the problem?",
+      "levels": ["A2"],
+      "scene": {
+        "draw_out": "tell you how they solved a problem, from start to end"
+      }
+    },
+    {
+      "id": "a2-favourite-place",
+      "label": "My favourite place",
+      "subject": "favourite places",
+      "kind": "fluency",
+      "minutes": 5,
+      "meta": "FLUENCY · ~5 MIN",
+      "blurb": "Describe a place you love, with details that bring it to life.",
+      "opener": "What is your favourite place, and what makes it special?",
+      "levels": ["A2"],
+      "scene": {
+        "draw_out": "describe a place they love, with details that bring it to life"
+      }
+    },
+    {
+      "id": "b1-traditions",
+      "label": "Culture and traditions",
+      "subject": "culture and traditions",
+      "kind": "culture",
+      "minutes": 6,
+      "meta": "CULTURE · ~6 MIN",
+      "blurb": "Talk about a tradition you would keep, and one you would change.",
+      "opener": "Which tradition in your family would you never give up, and why?",
+      "levels": ["B1"],
+      "scene": {
+        "draw_out": "talk about a tradition they would keep, and one they would change"
+      }
+    },
+    {
+      "id": "b1-gender-equality",
+      "label": "Gender equality",
+      "subject": "gender equality",
+      "kind": "debate",
+      "minutes": 6,
+      "meta": "DEBATE · ~6 MIN",
+      "blurb": "Discuss whether boys and girls get the same chances, with examples.",
+      "opener": "Do you think girls and boys get the same chances in your town?",
+      "levels": ["B1"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "discuss whether boys and girls get the same chances, with examples"
+      }
+    },
+    {
+      "id": "b1-ai-everyday",
+      "label": "AI in daily life",
+      "subject": "AI in daily life",
+      "kind": "debate",
+      "minutes": 6,
+      "meta": "DEBATE · ~6 MIN",
+      "blurb": "Talk about how AI helps you, or worries you.",
+      "opener": "Where have you seen AI being used, and does it help people or worry you?",
+      "levels": ["B1"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "talk about how AI helps them, or worries them"
+      }
+    },
+    {
+      "id": "b1-climate",
+      "label": "Climate change",
+      "subject": "climate change",
+      "kind": "debate",
+      "minutes": 6,
+      "meta": "DEBATE · ~6 MIN",
+      "blurb": "Explain what climate change means where you live, and what could be done.",
+      "opener": "The weather is changing in many places. What could be done about it where you live?",
+      "levels": ["B1"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "explain what climate change means where they live, and what could be done"
+      }
+    },
+    {
+      "id": "b1-online-or-classroom",
+      "label": "Online or classroom learning",
+      "subject": "online and classroom learning",
+      "kind": "debate",
+      "minutes": 6,
+      "meta": "DEBATE · ~6 MIN",
+      "blurb": "Compare learning online with learning in a classroom.",
+      "opener": "Would you rather learn online or in a classroom, and why?",
+      "levels": ["B1"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "compare learning online with learning in a classroom"
+      }
+    },
+    {
+      "id": "b1-phones-in-school",
+      "label": "Phones in school",
+      "subject": "phones in school",
+      "kind": "debate",
+      "minutes": 6,
+      "meta": "DEBATE · ~6 MIN",
+      "blurb": "Argue for or against phones in school, and answer the other side.",
+      "opener": "Should students be allowed to use phones in school? Make your case.",
+      "levels": ["B1"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "argue for or against phones in school, and answer the other side"
+      }
+    },
+    {
+      "id": "b1-in-the-news",
+      "label": "A story in the news",
+      "subject": "news stories",
+      "kind": "fluency",
+      "minutes": 6,
+      "meta": "FLUENCY · ~6 MIN",
+      "blurb": "Retell a news story: what happened, and what people said about it.",
+      "opener": "Tell me about something you heard in the news recently. What did people say about it?",
+      "levels": ["B1"],
+      "scene": {
+        "draw_out": "retell a news story: what happened, and what people said about it"
+      }
+    },
+    {
+      "id": "b1-change-one-thing",
+      "label": "If I could change one thing",
+      "subject": "changing one thing",
+      "kind": "grammar",
+      "minutes": 6,
+      "meta": "GRAMMAR · ~6 MIN",
+      "blurb": "Imagine changing one thing about your town or school.",
+      "opener": "If you could change one thing about your town, what would it be?",
+      "levels": ["B1"],
+      "scene": {
+        "draw_out": "imagine changing one thing about their town or school, and say what would happen"
+      }
+    },
+    {
+      "id": "b1-future-jobs",
+      "label": "Jobs of the future",
+      "subject": "jobs of the future",
+      "kind": "fluency",
+      "minutes": 6,
+      "meta": "FLUENCY · ~6 MIN",
+      "blurb": "Talk about the jobs that might exist in twenty years.",
+      "opener": "What jobs do you think will be common in twenty years?",
+      "levels": ["B1"],
+      "scene": {
+        "draw_out": "talk about the jobs that might exist in twenty years"
+      }
+    },
+    {
+      "id": "b1-saving-money",
+      "label": "Money and saving",
+      "subject": "money and saving",
+      "kind": "real_life",
+      "minutes": 6,
+      "meta": "REAL LIFE · ~6 MIN",
+      "blurb": "Talk about saving, spending, and a money decision you made.",
+      "opener": "Are you better at saving money or spending it? Tell me about a time you had to decide.",
+      "levels": ["B1"],
+      "scene": {
+        "draw_out": "talk about saving, spending, and a money decision they made"
+      }
+    },
+    {
+      "id": "b1-stress",
+      "label": "Handling stress",
+      "subject": "stress",
+      "kind": "real_life",
+      "minutes": 6,
+      "meta": "REAL LIFE · ~6 MIN",
+      "blurb": "Share what causes stress and what helps you deal with it.",
+      "opener": "What makes you feel stressed, and what helps you calm down?",
+      "levels": ["B1"],
+      "scene": {
+        "draw_out": "share what causes them stress and what helps them deal with it"
+      }
+    },
+    {
+      "id": "b1-visit-india",
+      "label": "Tourism in India",
+      "subject": "tourism in India",
+      "kind": "culture",
+      "minutes": 6,
+      "meta": "CULTURE · ~6 MIN",
+      "blurb": "Recommend a place in India to a visitor, and explain why.",
+      "opener": "If a friend from abroad visited India, where would you take them?",
+      "levels": ["B1"],
+      "scene": {
+        "draw_out": "recommend a place in India to a visitor, and explain why"
+      }
+    },
+    {
+      "id": "b2-luck-or-effort",
+      "label": "Luck or hard work",
+      "subject": "luck and hard work",
+      "kind": "debate",
+      "minutes": 7,
+      "meta": "DEBATE · ~7 MIN",
+      "blurb": "Weigh how much success comes from luck, and how much from effort.",
+      "opener": "Is success mostly about luck, or mostly about hard work?",
+      "levels": ["B2"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "weigh how much success comes from luck, and how much from effort"
+      }
+    },
+    {
+      "id": "b2-ai-ethics",
+      "label": "The ethics of AI",
+      "subject": "AI ethics",
+      "kind": "debate",
+      "minutes": 7,
+      "meta": "DEBATE · ~7 MIN",
+      "blurb": "Discuss who should answer for it when AI gets things wrong.",
+      "opener": "When an AI makes a harmful mistake, who should be held responsible?",
+      "levels": ["B2"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "discuss who should answer for it when AI gets things wrong"
+      }
+    },
+    {
+      "id": "b2-fast-fashion",
+      "label": "Fast fashion",
+      "subject": "fast fashion",
+      "kind": "debate",
+      "minutes": 7,
+      "meta": "DEBATE · ~7 MIN",
+      "blurb": "Discuss the real cost of cheap clothes.",
+      "opener": "Cheap clothes cost someone something. Who do you think pays the real price?",
+      "levels": ["B2"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "discuss the real cost of cheap clothes"
+      }
+    },
+    {
+      "id": "b2-growing-cities",
+      "label": "Growing cities",
+      "subject": "growing cities",
+      "kind": "culture",
+      "minutes": 7,
+      "meta": "CULTURE · ~7 MIN",
+      "blurb": "Talk about how cities are changing, and what is being gained or lost.",
+      "opener": "Cities in India are growing fast. What is being gained, and what is being lost?",
+      "levels": ["B2"],
+      "scene": {
+        "draw_out": "talk about how cities are changing, and what is being gained or lost"
+      }
+    },
+    {
+      "id": "b2-leadership",
+      "label": "What makes a leader",
+      "subject": "leadership",
+      "kind": "fluency",
+      "minutes": 7,
+      "meta": "FLUENCY · ~7 MIN",
+      "blurb": "Describe a good leader, and a decision they should have made differently.",
+      "opener": "Think of a leader you know of. What should they have done differently?",
+      "levels": ["B2"],
+      "scene": {
+        "draw_out": "describe a good leader, and a decision a leader should have made differently"
+      }
+    },
+    {
+      "id": "b2-privacy",
+      "label": "Privacy online",
+      "subject": "online privacy",
+      "kind": "debate",
+      "minutes": 7,
+      "meta": "DEBATE · ~7 MIN",
+      "blurb": "Discuss how much of our lives companies should be allowed to see.",
+      "opener": "How much should apps be allowed to know about us?",
+      "levels": ["B2"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "discuss how much of our lives companies should be allowed to see"
+      }
+    },
+    {
+      "id": "b2-failure",
+      "label": "The value of failure",
+      "subject": "failure",
+      "kind": "fluency",
+      "minutes": 7,
+      "meta": "FLUENCY · ~7 MIN",
+      "blurb": "Tell a story about failing, and what it taught you.",
+      "opener": "What is a failure that ended up teaching you something important?",
+      "levels": ["B2"],
+      "scene": {
+        "draw_out": "tell you a story about failing, and what it taught them"
+      }
+    },
+    {
+      "id": "b2-work-life",
+      "label": "Work and life",
+      "subject": "work-life balance",
+      "kind": "real_life",
+      "minutes": 7,
+      "meta": "REAL LIFE · ~7 MIN",
+      "blurb": "Discuss what a healthy balance between work and life looks like.",
+      "opener": "What does a good balance between work and the rest of life look like to you?",
+      "levels": ["B2"],
+      "scene": {
+        "draw_out": "discuss what a healthy balance between work and life looks like"
+      }
+    },
+    {
+      "id": "b2-free-college",
+      "label": "Should college be free?",
+      "subject": "free college",
+      "kind": "debate",
+      "minutes": 7,
+      "meta": "DEBATE · ~7 MIN",
+      "blurb": "Argue whether higher education should be free, and who should pay.",
+      "opener": "Should college education be free for everyone, and if so, who should pay?",
+      "levels": ["B2"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "argue whether college should be free, and who should pay"
+      }
+    },
+    {
+      "id": "b2-saving-languages",
+      "label": "Saving languages",
+      "subject": "saving languages",
+      "kind": "culture",
+      "minutes": 7,
+      "meta": "CULTURE · ~7 MIN",
+      "blurb": "Discuss why languages disappear, and whether we should save them.",
+      "opener": "Many Indian languages are spoken by fewer people each year. Should we try to save them?",
+      "levels": ["B2"],
+      "scene": {
+        "draw_out": "discuss why languages disappear, and whether we should save them"
+      }
+    },
+    {
+      "id": "b2-pitch",
+      "label": "Pitch your idea",
+      "subject": "pitching an idea",
+      "kind": "role_play",
+      "minutes": 7,
+      "meta": "ROLE-PLAY · ~7 MIN",
+      "blurb": "Present an idea formally to a panel, then handle their questions.",
+      "greeting": "Good morning, {name}.",
+      "opener": "You have two minutes to pitch your idea to our panel. What have you brought us?",
+      "levels": ["B2"],
+      "scene": {
+        "role": "the chair of a panel they are pitching an idea to",
+        "owns": "You speak for the panel, and you decide what it asks. Ask the questions a careful panel would — who the idea is for, what it costs, why it would work — and say yourself what the panel likes or doubts. Once you have named a doubt or a sum of money in this conversation, keep it the same later on instead of naming a different one next time. For example, if they say their idea needs money, ask how they would spend fifty thousand rupees and what it would buy. Never ask them what the panel thinks or what it wants to hear: those are yours to answer, not theirs.",
+        "draw_out": "present their idea to your panel and answer your questions about it"
+      }
+    },
+    {
+      "id": "b2-humour",
+      "label": "What makes us laugh",
+      "subject": "humour",
+      "kind": "culture",
+      "minutes": 7,
+      "meta": "CULTURE · ~7 MIN",
+      "blurb": "Talk about humour: what is funny, and when a joke goes too far.",
+      "opener": "What kind of humour makes you laugh, and when does a joke go too far?",
+      "levels": ["B2"],
+      "scene": {
+        "draw_out": "talk about humour: what is funny, and when a joke goes too far"
+      }
+    },
+    {
+      "id": "c1-language-identity",
+      "label": "Language and identity",
+      "subject": "language and identity",
+      "kind": "culture",
+      "minutes": 8,
+      "meta": "CULTURE · ~8 MIN",
+      "blurb": "Explore how the languages you speak shape who you are.",
+      "opener": "Do you feel like a slightly different person in each language you speak?",
+      "levels": ["C1"],
+      "scene": {
+        "draw_out": "explore how the languages they speak shape who they are"
+      }
+    },
+    {
+      "id": "c1-art-limits",
+      "label": "Art and its limits",
+      "subject": "art and censorship",
+      "kind": "debate",
+      "minutes": 8,
+      "meta": "DEBATE · ~8 MIN",
+      "blurb": "Debate whether art should ever be censored.",
+      "opener": "Should art ever be censored, or should artists be free to offend?",
+      "levels": ["C1"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "debate whether art should ever be censored"
+      }
+    },
+    {
+      "id": "c1-future-of-work",
+      "label": "The future of work",
+      "subject": "automation and work",
+      "kind": "debate",
+      "minutes": 8,
+      "meta": "DEBATE · ~8 MIN",
+      "blurb": "Discuss how automation could reshape work, and where people find meaning.",
+      "opener": "If machines do most of our work one day, where will people find meaning?",
+      "levels": ["C1"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "discuss how automation could reshape work, and where people would find meaning"
+      }
+    },
+    {
+      "id": "c1-story-that-changed-me",
+      "label": "A story that changed me",
+      "subject": "life-changing stories",
+      "kind": "fluency",
+      "minutes": 8,
+      "meta": "FLUENCY · ~8 MIN",
+      "blurb": "Talk about a book or film that changed how you see the world.",
+      "opener": "Which book or film changed the way you see the world, and how?",
+      "levels": ["C1"],
+      "scene": {
+        "draw_out": "talk about a book or film that changed how they see the world"
+      }
+    },
+    {
+      "id": "c1-progress-tradition",
+      "label": "Progress and tradition",
+      "subject": "progress and tradition",
+      "kind": "debate",
+      "minutes": 8,
+      "meta": "DEBATE · ~8 MIN",
+      "blurb": "Debate when progress should give way to tradition, and when it should not.",
+      "opener": "When progress and tradition collide, which should give way?",
+      "levels": ["C1"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "debate when progress should give way to tradition, and when it should not"
+      }
+    },
+    {
+      "id": "c1-farewell-speech",
+      "label": "A farewell speech",
+      "subject": "Priya's farewell",
+      "kind": "role_play",
+      "minutes": 8,
+      "meta": "ROLE-PLAY · ~8 MIN",
+      "blurb": "Give a warm, witty speech at a friend's farewell.",
+      "opener": "Everyone is here for Priya's farewell. Would you like to say a few words?",
+      "levels": ["C1"],
+      "scene": {
+        "role": "a friend who is hosting Priya's farewell party",
+        "owns": "You know the party and Priya's plans: where she is moving, what she will do there, and who has come to see her off. Say these yourself when they ask, picking ordinary details — a new job in another city, friends from college and work — and once you have named one in this conversation, keep it the same later on instead of naming something different next time. Their memories of Priya are theirs to tell. For example, if they ask where Priya is going, say she is moving to Pune for a new job at a bank, then ask what they will miss about her. Never ask them where Priya is going, what she will do there, or who is at the party: those are yours to answer, not theirs.",
+        "draw_out": "give a warm, witty speech at Priya's farewell, with a memory or two of her"
+      }
+    },
+    {
+      "id": "c1-negotiation",
+      "label": "Negotiate a partnership",
+      "subject": "partnership terms",
+      "kind": "role_play",
+      "minutes": 8,
+      "meta": "ROLE-PLAY · ~8 MIN",
+      "blurb": "Negotiate terms with a partner who wants more than you can give.",
+      "greeting": "Hello {name}!",
+      "opener": "We like your proposal, but frankly the numbers don't work for us. What can you offer?",
+      "levels": ["C1"],
+      "scene": {
+        "role": "a business partner negotiating a deal with them",
+        "owns": "You know your own company's numbers and what you need from this deal. Say yourself what you want — a bigger share, a lower price, a longer contract — in plain figures such as rupees or percentages, and once you have named a figure in this conversation, keep it the same later on unless they give you a good reason to move. For example, if they offer you ten percent of the profits, say you need twenty percent to make it work and ask what they can do. Never ask them what your company needs or what figure you want: those are yours to answer, not theirs.",
+        "draw_out": "make you an offer and negotiate terms that work for both of you"
+      }
+    },
+    {
+      "id": "c1-proverb",
+      "label": "What a proverb means",
+      "subject": "proverbs",
+      "kind": "culture",
+      "minutes": 8,
+      "meta": "CULTURE · ~8 MIN",
+      "blurb": "Unpack a proverb you grew up with, and whether it still holds true.",
+      "opener": "Pick a proverb you grew up with. Does it still hold true today?",
+      "levels": ["C1"],
+      "scene": {
+        "draw_out": "unpack a proverb they grew up with, and say whether it still holds true"
+      }
+    },
+    {
+      "id": "c1-globalisation",
+      "label": "Globalisation",
+      "subject": "globalisation",
+      "kind": "debate",
+      "minutes": 8,
+      "meta": "DEBATE · ~8 MIN",
+      "blurb": "Weigh what the world gains and loses as cultures blend.",
+      "opener": "As cultures blend, what does the world gain, and what does it lose?",
+      "levels": ["C1"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "weigh what the world gains and loses as cultures blend"
+      }
+    },
+    {
+      "id": "c1-legacy",
+      "label": "Legacy",
+      "subject": "legacy",
+      "kind": "fluency",
+      "minutes": 8,
+      "meta": "FLUENCY · ~8 MIN",
+      "blurb": "Reflect on what you would like to be remembered for.",
+      "opener": "Fifty years from now, what would you like people to say about you?",
+      "levels": ["C1"],
+      "scene": {
+        "draw_out": "reflect on what they would like to be remembered for"
+      }
+    },
+    {
+      "id": "c1-science-limits",
+      "label": "Science and its limits",
+      "subject": "limits on science",
+      "kind": "debate",
+      "minutes": 8,
+      "meta": "DEBATE · ~8 MIN",
+      "blurb": "Discuss whether science should have limits, such as editing genes.",
+      "opener": "Should scientists be allowed to edit human genes to prevent disease?",
+      "levels": ["C1"],
+      "scene": {
+        "owns": "You are here to hear what they think and why, so let them make the case. Once they have given a reason, put the other side to them in one short sentence of your own and ask how they would answer it, but never tell them which side is right.",
+        "draw_out": "discuss whether science should have limits, such as editing genes"
+      }
+    },
+    {
+      "id": "c1-chair-a-panel",
+      "label": "Chair a panel",
+      "subject": "city transport",
+      "kind": "role_play",
+      "minutes": 8,
+      "meta": "ROLE-PLAY · ~8 MIN",
+      "blurb": "Chair a lively discussion: bring voices in and keep it on track.",
+      "opener": "You are chairing today's panel on city transport. Would you open the discussion for us?",
+      "levels": ["C1"],
+      "scene": {
+        "role": "the speakers on a panel about city transport that they are chairing",
+        "owns": "You speak for the panel. One speaker thinks the city needs more buses and safer footpaths; another thinks it needs wider roads and a metro. Give a speaker's view yourself when they bring someone in, in a sentence or two, and once a speaker has said something in this conversation, keep it the same later on instead of changing their view next time. For example, if they ask the first speaker to begin, say that one bus takes forty cars off the road and ask who they would like to hear next. Never ask them what the speakers think, or to answer the panel's questions for them: they chair, and you speak.",
+        "draw_out": "open the discussion, bring the speakers in, and keep the panel on track"
+      }
+    }
+  ]
+}

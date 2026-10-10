@@ -78,6 +78,22 @@ design's window chrome — title bar and traffic lights — is left to the OS.
   the level map behind it), plus the conversation, its recap, and **Levels and
   badges**. A conversation and its recap hide the sidebar and fill the window;
   Space works the microphone.
+- **Home** offers Ella Mobile's topics, from
+  [`shared/topics.json`](shared/topics.json): the design's eleven and twelve for
+  each level, of which a learner is offered those written for their level
+  (`topics::offered`, which the browser preview mirrors in
+  [`src/lib/topics.ts`](src/lib/topics.ts)). Today's talk leads, with four more
+  under it. As on the phone, the order turns one place a day, so Home holds
+  still through a day, and a topic just talked about drops to the back; the
+  recap's "Tomorrow" is the talk Home will lead with then. A learner too young
+  for the interview or the bargaining talk meets them last. "View all" opens
+  **All topics**: every talk at their level, as a bento of Home's own cards,
+  drawn at random but the same for the same list. A badge or a talk partner can
+  open any topic, whatever level it is written for. Each topic also carries what
+  the language model is told about it: the scene Ella plays, and the topic's
+  name in her instructions where its title is the learner's ("family" for "My
+  family"). The desktop's own seven topics from before keep their ids and their
+  measured scenes.
 - Talk partners are real where the backend is: Bippo's and Grumble's goals start
   the chores in `chores()` through `start_chore`, which plays the character and
   keeps the score. Dr Wobble's goal opens the doctor topic, and Zig's debate has
@@ -117,9 +133,8 @@ design's window chrome — title bar and traffic lights — is left to the OS.
   yet it asks for a name and goes straight in. "Let's start" after a log out
   is the same learner onboarding again: `save_learner` signs them in and their
   history stays theirs.
-- The design shows framing the Rust backend does not model yet — per-topic
-  category and duration, a mentor lesson, the badges' names and colours, the
-  cast's names. All of it is resolved in
+- The design shows framing the Rust backend does not model yet — a mentor
+  lesson, the badges' names and colours, the cast's names. All of it is resolved in
   [`src/lib/presentation.ts`](src/lib/presentation.ts), which derives what it can
   from `AppSnapshot` and marks the rest `PLACEHOLDER`. The streak, the week
   strip, talks, answers and time spoken, and every badge all come from

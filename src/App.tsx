@@ -10,10 +10,12 @@ import { SetupScreen } from "./components/SetupScreen";
 import { Sidebar, type NavKey } from "./components/Sidebar";
 import { SummaryScreen } from "./components/SummaryScreen";
 import { TalkScreen } from "./components/TalkScreen";
+import { TopicsScreen } from "./components/TopicsScreen";
 import { avatarColorFor, forgetLegacyAvatarColor, legacyAvatarColor } from "./lib/avatar";
 import { bridge } from "./lib/bridge";
 import { chorePartner, nextTopicLabel, recommendedTopicId, streak } from "./lib/presentation";
 import { useSetup } from "./lib/setup";
+import { catalogueTopic } from "./lib/topics";
 import {
   downloadUpdateInBackground,
   installExitsTheApp,
@@ -57,6 +59,7 @@ interface Assessing {
 type Screen =
   | "onboarding"
   | "home"
+  | "topics"
   | "cast"
   | "profile"
   | "levels"
@@ -68,6 +71,7 @@ type Screen =
 /** Which nav item each screen that shows the sidebar lights up. */
 const NAV_FOR: Partial<Record<Screen, NavKey | null>> = {
   home: "home",
+  topics: "home",
   cast: "cast",
   profile: null,
   levels: null,
@@ -258,11 +262,13 @@ export default function App() {
     });
   }
 
-  /** Starts a topic by id; a null id means "whatever Ella recommends". */
+  /** Starts a topic by id; a null id means "whatever Ella recommends". A badge
+   * or a partner may name a topic written for another level than the
+   * learner's, which is the same talk wherever they stand. */
   async function handleStartTopic(topicId: string | null, partner: CastId | null = null) {
     if (!snapshot) return;
     const wanted = topicId ?? recommendedTopicId(snapshot);
-    const topic = snapshot.topics.find((candidate) => candidate.id === wanted);
+    const topic = snapshot.topics.find((candidate) => candidate.id === wanted) ?? catalogueTopic(wanted);
     if (topic) await handleStart(topic, partner);
   }
 
@@ -510,6 +516,15 @@ export default function App() {
             onStart={(topic) => void handleStart(topic)}
             onResume={(sessionId) => void handleResume(sessionId)}
             onLevels={openLevels}
+            onAllTopics={() => setScreen("topics")}
+          />
+        )}
+        {screen === "topics" && (
+          <TopicsScreen
+            topics={snapshot.topics}
+            busy={busy}
+            onBack={() => setScreen("home")}
+            onStart={(topic) => void handleStart(topic)}
           />
         )}
         {screen === "cast" && (

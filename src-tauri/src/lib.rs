@@ -9,6 +9,7 @@ pub mod notes;
 pub mod progress;
 mod setup;
 mod telemetry;
+pub mod topics;
 mod window_fit;
 
 use std::sync::Arc;

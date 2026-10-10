@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::{
     curriculum::{self, Position},
     domain::{
-        chores, find_character, find_chore, topics, topics_for_age, Advance, AppSnapshot, Assessment,
+        chores, find_character, find_chore, topics, Advance, AppSnapshot, Assessment,
         ChoreContext, ChoreRecap, Fix, Focus, LedgerTurn, AudioPayload, LedgerView, Learner, LearnerProfile,
         LearnerProgress, LevelSkillView, LevelState, LevelView, Message, PhonemeSpan, Pitch,
         PlacementBrief, PlacementReading, Readiness, Scorable, Session, SessionSummary,
@@ -243,13 +243,15 @@ impl AppService {
         } else {
             (Vec::new(), LearnerProgress::default(), None)
         };
+        let (topics, tomorrow_topic) = self.offering(learner.as_ref())?;
         if let Some(learner) = &learner {
-            if let Err(error) = self.prepare_next_talk(learner, recent_sessions.is_empty()) {
+            if let Err(error) = self.prepare_next_talk(learner, recent_sessions.is_empty(), topics.first()) {
                 eprintln!("[engines] could not tell what to get ready next: {error}");
             }
         }
         Ok(AppSnapshot {
-            topics: topics_for_age(learner.as_ref().and_then(|learner| learner.age)),
+            topics,
+            tomorrow_topic,
             learner,
             saved_learner,
             recent_sessions,
@@ -259,19 +261,41 @@ impl AppService {
         })
     }
 
+    /// The topics Home offers: every one written for the learner's level, in
+    /// the order it lays them out today, and the one it will lead with
+    /// tomorrow. Signed out, nobody's talks move anything, so they are what a
+    /// new learner at the curriculum's start is offered.
+    fn offering(&self, learner: Option<&Learner>) -> EllaResult<(Vec<Topic>, Option<Topic>)> {
+        let today = crate::topics::today();
+        let Some(learner) = learner else {
+            let start = curriculum::start();
+            let topics = crate::topics::offered(&start.level, &[], today, None)
+                .into_iter()
+                .map(|topic| topic.topic())
+                .collect();
+            return Ok((topics, None));
+        };
+        let (position, _) = self.placement()?;
+        let recent = self.database.recent_topics(crate::topics::RECENT_TOPICS)?;
+        let offered = |day| crate::topics::offered(&position.level, &recent, day, learner.age);
+        let topics = offered(today).into_iter().map(|topic| topic.topic()).collect();
+        let tomorrow = offered(today + 1).first().map(|topic| topic.topic());
+        Ok((topics, tomorrow))
+    }
+
     /// Has the engine get the talk the learner will most likely open next
     /// ready, while they look at the window: the placement chat for someone
     /// who has not talked to Ella yet, since onboarding ends in it, and
-    /// otherwise Home's "Today's talk", the first topic offered them. The
-    /// window reads Home again after onboarding saves the learner, after a log
-    /// in, and after every talk, and each time asks for this; once it is ready,
-    /// asking again costs a look at a file.
+    /// otherwise Home's "Today's talk", `today`, the first topic offered them.
+    /// The window reads Home again after onboarding saves the learner, after a
+    /// log in, and after every talk, and each time asks for this; once it is
+    /// ready, asking again costs a look at a file.
     ///
     /// The recap after that talk is got ready next: the judges it asks, at the
     /// learner's step. Their instructions are the same until the step changes,
     /// so this is model work once a step, done while the learner reads the
     /// recap that moved them on.
-    fn prepare_next_talk(&self, learner: &Learner, never_talked: bool) -> EllaResult<()> {
+    fn prepare_next_talk(&self, learner: &Learner, never_talked: bool, today: Option<&Topic>) -> EllaResult<()> {
         let (next, recap) = if never_talked && !self.database.placed()? {
             let next = NextTalk::Placement {
                 learner_name: learner.name.clone(),
@@ -279,7 +303,7 @@ impl AppService {
             };
             (next, NextRecap::Placement)
         } else {
-            let Some(topic) = topics_for_age(learner.age).into_iter().next() else {
+            let Some(topic) = today else {
                 return Ok(());
             };
             let (position, _) = self.placement()?;
@@ -288,8 +312,8 @@ impl AppService {
             };
             let next = NextTalk::Topic {
                 learner_name: learner.name.clone(),
-                topic_id: topic.id,
-                topic_label: topic.label,
+                topic_id: topic.id.clone(),
+                topic_label: topic.label.clone(),
                 level: position.level,
             };
             (next, recap)
@@ -2159,10 +2183,11 @@ fn finish_turn(outcome: EllaResult<TurnResult>, trace: LatencyTrace) -> EllaResu
     }
 }
 
+/// Any topic in the catalogue, not only those written for the learner's level:
+/// a badge's talk, or Dr Wobble's, is the same talk at every level.
 fn find_topic(id: &str) -> EllaResult<Topic> {
-    topics()
-        .into_iter()
-        .find(|topic| topic.id == id)
+    crate::topics::find(id)
+        .map(|topic| topic.topic())
         .ok_or_else(|| EllaError::Validation("Choose one of the available topics.".into()))
 }
 
@@ -2200,20 +2225,58 @@ mod tests {
         AppService::new(Database::in_memory().unwrap(), Box::new(DemoEngine))
     }
 
-    #[test]
-    fn young_learners_are_offered_everyday_topics_first() {
-        let grown_up = topics_for_age(Some(30));
-        assert_eq!(grown_up[0].id, "street-food");
-        assert!(grown_up.iter().any(|topic| topic.id == "job-interview"));
+    /// Home's topics for a learner at `level` today, as the window is sent them.
+    fn offered_at(level: &str, recent: &[String], age: Option<u8>) -> Vec<Topic> {
+        crate::topics::offered(level, recent, crate::topics::today(), age)
+            .into_iter()
+            .map(|topic| topic.topic())
+            .collect()
+    }
 
-        let child = topics_for_age(Some(8));
-        // Nothing is taken away, but the grown-up scenarios sink to the bottom.
-        assert_eq!(child.len(), grown_up.len());
-        let interview = child.iter().position(|t| t.id == "job-interview").unwrap();
-        let bargaining = child.iter().position(|t| t.id == "market-bargaining").unwrap();
-        assert!(interview >= child.len() - 2);
-        assert!(bargaining >= child.len() - 2);
-        assert_eq!(child[0].id, "street-food");
+    #[test]
+    fn home_offers_the_learners_level_and_moves_a_talked_about_topic_back() {
+        let service = service();
+        service.save_learner("Meera", Some(14)).unwrap();
+        let start = curriculum::start().level;
+        let home = service.bootstrap().unwrap();
+        assert_eq!(home.topics, offered_at(&start, &[], Some(14)));
+        assert!(home.topics.len() >= 12, "every talk at the level, for View all");
+        let tomorrow = crate::topics::offered(&start, &[], crate::topics::today() + 1, Some(14));
+        assert_eq!(home.tomorrow_topic, Some(tomorrow[0].topic()));
+
+        // Today's talk, talked about, goes to the back, and tomorrow's talk
+        // is worked out with it there.
+        let today = home.topics[0].clone();
+        answered_talk(&service, &today.id);
+        let after = service.bootstrap().unwrap();
+        assert_ne!(after.topics[0], today);
+        assert_eq!(after.topics.last(), Some(&today));
+        assert_eq!(after.topics.len(), home.topics.len());
+        assert_ne!(after.tomorrow_topic, Some(today));
+
+        // A placement chat is not a topic, and moves nothing.
+        let placement = service.start_placement().unwrap();
+        service.complete_session(&placement.id).unwrap();
+        assert_eq!(service.bootstrap().unwrap().topics, after.topics);
+    }
+
+    #[test]
+    fn any_topic_in_the_catalogue_can_be_talked_about_at_any_level() {
+        // Starting at A2, the interview is written for B1 and B2, and "My
+        // family" for A0, yet a badge or a partner can still open them.
+        let service = service();
+        service.save_learner("Meera", Some(14)).unwrap();
+        let offered = service.bootstrap().unwrap().topics;
+        assert!(!offered.iter().any(|topic| topic.id == "job-interview"));
+        let interview = service.start_session("job-interview").unwrap();
+        assert_eq!(interview.topic_label, "A job interview");
+        assert_eq!(
+            interview.messages[0].content,
+            "Hello Meera! Thank you for coming in. To start, could you tell me a little about yourself?"
+        );
+        let family = service.start_session("a0-my-family").unwrap();
+        assert_eq!(family.messages[0].content, "Hi Meera! Who is in your family? Tell me their names!");
+        assert!(matches!(service.start_session("no-such-topic"), Err(EllaError::Validation(_))));
     }
 
     #[test]
@@ -2366,7 +2429,8 @@ mod tests {
             profile("Asha", Some("#FF8800")),
             "the welcome-back step still knows who to greet"
         );
-        assert_eq!(signed_out.topics, topics_for_age(None));
+        assert_eq!(signed_out.topics, offered_at(&curriculum::start().level, &[], None));
+        assert_eq!(signed_out.tomorrow_topic, None);
         assert_eq!(service.bootstrap().unwrap(), signed_out, "and so does the next launch");
         // Logging out deleted nothing.
         assert_eq!(service.get_session(&talk).unwrap().messages.len(), 3);
@@ -2426,7 +2490,10 @@ mod tests {
         // A new age is taken, and the topics follow it.
         let younger = service.save_learner("Asha Rao", Some(8)).unwrap();
         assert_eq!(younger.age, Some(8));
-        assert_eq!(service.bootstrap().unwrap().topics, topics_for_age(Some(8)));
+        let recent = vec!["booking-a-cab".to_string(), "street-food".to_string()];
+        let topics = service.bootstrap().unwrap().topics;
+        assert_eq!(topics, offered_at(&curriculum::start().level, &recent, Some(8)));
+        assert_eq!(topics.last().map(|topic| topic.id.as_str()), Some("market-bargaining"));
     }
 
     #[test]
@@ -2581,6 +2648,7 @@ mod tests {
             "recent_sessions",
             "saved_learner",
             "standing",
+            "tomorrow_topic",
             "topics",
         ];
         let service = service();
@@ -2613,6 +2681,12 @@ mod tests {
             vec!["age", "avatar_color", "created_at", "level_name", "name"],
             "no `id`: there is only ever one learner"
         );
+        assert_eq!(
+            keys(&snapshot["topics"][0]),
+            vec!["blurb", "id", "kind", "label", "meta", "minutes", "opener"],
+            "a topic as its cards print it"
+        );
+        assert_eq!(keys(&snapshot["tomorrow_topic"]), keys(&snapshot["topics"][0]));
         assert_eq!(snapshot["learner"]["name"], "Asha");
         assert_eq!(snapshot["learner"]["age"], 14);
         assert_eq!(snapshot["learner"]["avatar_color"], "#7C5CFF");
@@ -2969,8 +3043,7 @@ mod curriculum_flow_tests {
         // stand at.
         let skipped = service.start_placement().unwrap();
         service.complete_session(&skipped.id).unwrap();
-        service.bootstrap().unwrap();
-        let today = topics_for_age(Some(14)).remove(0);
+        let today = service.bootstrap().unwrap().topics.remove(0);
         let todays_talk = NextTalk::Topic {
             learner_name: "Asha".into(),
             topic_id: today.id.clone(),
@@ -2979,17 +3052,18 @@ mod curriculum_flow_tests {
         };
         assert_eq!(heard.lock().unwrap().prepared.last(), Some(&todays_talk));
 
-        // Placed, at the level the placement found.
+        // Placed, at the level the placement found, whose topics are its own.
         let placement = service.start_placement().unwrap();
         answer_placement(&service, &placement.id);
         service.assess_session(&placement.id).unwrap();
-        service.bootstrap().unwrap();
+        let b1 = service.bootstrap().unwrap().topics.remove(0);
+        assert!(crate::topics::find(&b1.id).unwrap().levels.contains(&"B1".to_string()));
         assert_eq!(
             heard.lock().unwrap().prepared.last(),
             Some(&NextTalk::Topic {
                 learner_name: "Asha".into(),
-                topic_id: today.id,
-                topic_label: today.label,
+                topic_id: b1.id,
+                topic_label: b1.label,
                 level: "B1".into(),
             })
         );

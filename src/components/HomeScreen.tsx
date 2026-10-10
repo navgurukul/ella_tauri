@@ -1,4 +1,4 @@
-import { useState } from "react";
+import type { CSSProperties } from "react";
 import { EllaMascot } from "./EllaMascot";
 import { LevelCard } from "./LevelCard";
 import { FlameGlyph } from "./Sidebar";
@@ -7,8 +7,6 @@ import {
   spokenAmount,
   spokenTimeKnown,
   streak,
-  topicMeta,
-  topicPresentation,
   unfinishedSession,
   weeklyDigest,
 } from "../lib/presentation";
@@ -16,15 +14,12 @@ import type { AppSnapshot, Tone, Topic } from "../types";
 
 /** The four cards under "More topics": one tall, two small, one wide, each in
  * its own colour. Topics fill them in the order the backend offers them. */
-const SLOTS: Array<{ slot: "tall" | "small" | "wide"; tone: Tone }> = [
+const SLOTS: Array<{ slot: TopicSlot; tone: Tone }> = [
   { slot: "tall", tone: "green" },
   { slot: "small", tone: "pink" },
   { slot: "small", tone: "orange" },
   { slot: "wide", tone: "ink" },
 ];
-
-/** "View all" lays every other topic out evenly, cycling these colours. */
-const ALL_TONES: Tone[] = ["green", "pink", "orange", "ink", "violet"];
 
 export function HomeScreen({
   snapshot,
@@ -33,6 +28,7 @@ export function HomeScreen({
   onStart,
   onResume,
   onLevels,
+  onAllTopics,
 }: {
   snapshot: AppSnapshot;
   busy: boolean;
@@ -42,8 +38,9 @@ export function HomeScreen({
   onStart: (topic: Topic) => void;
   onResume: (sessionId: string) => void;
   onLevels: () => void;
+  /** "View all": every topic at the learner's level, on a page of its own. */
+  onAllTopics: () => void;
 }) {
-  const [showAll, setShowAll] = useState(false);
   const name = snapshot.learner?.name ?? "friend";
   const digest = weeklyDigest(snapshot.progress);
   const run = streak(snapshot.progress);
@@ -55,7 +52,7 @@ export function HomeScreen({
   const featured =
     snapshot.topics.find((topic) => topic.id === recommended) ?? snapshot.topics[0];
   const others = snapshot.topics.filter((topic) => topic.id !== featured?.id);
-  const shown = showAll ? others : others.slice(0, SLOTS.length);
+  const shown = others.slice(0, SLOTS.length);
 
   const unfinished = unfinishedSession(snapshot);
 
@@ -80,7 +77,7 @@ export function HomeScreen({
                 <div className="today__text">
                   <p className="eyebrow">Today&rsquo;s talk</p>
                   <h2 className="today__title">{featured.label}</h2>
-                  <p className="today__blurb">{topicPresentation(featured.id).blurb}</p>
+                  <p className="today__blurb">{featured.blurb}</p>
                 </div>
                 <button className="btn btn--violet btn--talk" disabled={busy} onClick={() => onStart(featured)}>
                   <MicGlyph size={17} />
@@ -93,19 +90,19 @@ export function HomeScreen({
           <div className="section-head">
             <h3>More topics</h3>
             {others.length > SLOTS.length && (
-              <button className="section-head__link" onClick={() => setShowAll((all) => !all)}>
-                {showAll ? "Show fewer" : "View all"}
+              <button className="section-head__link" onClick={onAllTopics}>
+                View all
               </button>
             )}
           </div>
 
-          <div className={`topics ${showAll ? "topics--all" : ""}`.trim()}>
+          <div className="topics">
             {shown.map((topic, index) => (
               <TopicCard
                 key={topic.id}
                 topic={topic}
-                slot={showAll ? "even" : SLOTS[index].slot}
-                tone={showAll ? ALL_TONES[index % ALL_TONES.length] : SLOTS[index].tone}
+                slot={SLOTS[index].slot}
+                tone={SLOTS[index].tone}
                 disabled={busy}
                 onStart={onStart}
               />
@@ -202,30 +199,40 @@ function WeekSpoken({ spokenMs, answers, known }: { spokenMs: number; answers: n
   );
 }
 
-function TopicCard({
+/** A topic card's shape: Home's tall card quotes Ella's opener, a small one
+ * stacks its title over its meta line, and a wide one sets them side by side. */
+export type TopicSlot = "tall" | "small" | "wide";
+
+export function TopicCard({
   topic,
   slot,
   tone,
   disabled,
   onStart,
+  style,
 }: {
   topic: Topic;
-  slot: "tall" | "small" | "wide" | "even";
+  slot: TopicSlot;
   tone: Tone;
   disabled: boolean;
   onStart: (topic: Topic) => void;
+  /** Where "All topics" places it in its grid. */
+  style?: CSSProperties;
 }) {
   return (
     <button
       className={`topic topic--${slot} tone-${tone}`}
       disabled={disabled}
       onClick={() => onStart(topic)}
+      style={style}
     >
       <span className="topic__title">{topic.label}</span>
       {slot === "tall" && (
-        <span className="mono topic__bubble">{topicPresentation(topic.id).sample}</span>
+        <span className="mono topic__bubble">
+          <span className="topic__quote">{topic.opener}</span>
+        </span>
       )}
-      <span className="mono topic__meta">{topicMeta(topic.id)}</span>
+      <span className="mono topic__meta">{topic.meta}</span>
     </button>
   );
 }

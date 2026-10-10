@@ -13,6 +13,7 @@ import {
 } from "./curriculum";
 import { dayKey } from "./days";
 import { tooShort, wentWell } from "./notes";
+import { catalogueTopic, dayNumber, offeredTopics, openingFor, RECENT_TOPICS } from "./topics";
 import type {
   AppSnapshot,
   Assessment,
@@ -26,7 +27,6 @@ import type {
   SessionSummary,
   SpeechSegment,
   SpokenLine,
-  Topic,
   TurnResult,
   VoiceStreamFinishInput,
   VoiceTurnInput,
@@ -45,58 +45,6 @@ const PLACEMENT_QUESTIONS = [
   "Wonderful. What would you like to do there first?",
 ];
 const PLACEMENT_WRAP = "Thank you, I really enjoyed hearing about that!";
-
-const topics: Topic[] = [
-  {
-    id: "street-food",
-    label: "Street food stories",
-    prompt: "Describe tastes, smells and your favourite stall.",
-    emoji: "🍛",
-    color: "violet",
-  },
-  {
-    id: "restaurant-order",
-    label: "Ordering at a restaurant",
-    prompt: "Order a meal, ask about the menu, and settle the bill.",
-    emoji: "🍽",
-    color: "pink",
-  },
-  {
-    id: "booking-a-cab",
-    label: "Booking a cab",
-    prompt: "Give an address, agree a fare, and ask how long it takes.",
-    emoji: "🚕",
-    color: "green",
-  },
-  {
-    id: "job-interview",
-    label: "A job interview",
-    prompt: "Introduce yourself and answer questions about your work.",
-    emoji: "💼",
-    color: "lilac",
-  },
-  {
-    id: "doctor-clinic",
-    label: "At the doctor's clinic",
-    prompt: "Explain how you feel and understand what to do next.",
-    emoji: "🩺",
-    color: "violet",
-  },
-  {
-    id: "asking-directions",
-    label: "Asking for directions",
-    prompt: "Find your way and repeat the directions back.",
-    emoji: "🗺",
-    color: "ink",
-  },
-  {
-    id: "market-bargaining",
-    label: "Bargaining at the market",
-    prompt: "Ask the price, bargain kindly, and agree a deal.",
-    emoji: "🛒",
-    color: "orange",
-  },
-];
 
 /**
  * Mirrors `chores()` and `chore_opening_for` in the Rust domain, as far as the
@@ -121,19 +69,20 @@ const chores: Array<{ id: string; title: string; opening: string }> = [
   },
 ];
 
-/** Mirrors `topics_for_age` in the Rust domain so the preview matches the app. */
-const MIN_AGE: Record<string, number> = { "job-interview": 14, "market-bargaining": 10 };
-
-function topicsForAge(age?: number | null): Topic[] {
-  if (age == null) return topics;
-  return topics
-    .map((topic, index) => ({ topic, index }))
-    .sort(
-      (left, right) =>
-        Number((MIN_AGE[left.topic.id] ?? 0) > age) - Number((MIN_AGE[right.topic.id] ?? 0) > age) ||
-        left.index - right.index,
-    )
-    .map((entry) => entry.topic);
+/**
+ * The topics the learner has talked about lately, each once, newest first:
+ * what Home moves back. Mirrors `Database::recent_topics`, sessions being
+ * stored in the order they started.
+ */
+function recentTopics(sessions: StoredSession[]): string[] {
+  const recent: string[] = [];
+  for (const session of [...sessions].reverse()) {
+    const spoke = session.messages.some((message) => message.speaker === "learner");
+    if (!spoke || session.topic_id === "placement" || recent.includes(session.topic_id)) continue;
+    recent.push(session.topic_id);
+    if (recent.length === RECENT_TOPICS) break;
+  }
+  return recent;
 }
 
 /** The learner as the preview keeps them: what the app sees, plus the
@@ -405,6 +354,18 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
     return learner;
   };
 
+  /** Home's topics, as `AppService::offering` works them out. */
+  const offering = (state: BrowserState, learner: StoredLearner | undefined) => {
+    const today = dayNumber(new Date());
+    if (!learner) return { topics: offeredTopics(START.level, [], today), tomorrow_topic: null };
+    const level = (positionOf(learner) ?? START).level;
+    const recent = recentTopics(state.sessions);
+    return {
+      topics: offeredTopics(level, recent, today, learner.age),
+      tomorrow_topic: offeredTopics(level, recent, today + 1, learner.age)[0] ?? null,
+    };
+  };
+
   const snapshot = (state: BrowserState): AppSnapshot => {
     const learner = signedIn(state);
     return {
@@ -413,7 +374,7 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
       saved_learner: state.learner
         ? { name: state.learner.name, avatar_color: state.learner.avatar_color ?? null }
         : null,
-      topics: topicsForAge(learner?.age),
+      ...offering(state, learner),
       // Signed out, the talks stay saved but none of them are on show.
       // Sessions are stored in the order they started.
       recent_sessions: learner
@@ -615,7 +576,7 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
     },
     async startSession(topicId) {
       const state = read();
-      const topic = topics.find((candidate) => candidate.id === topicId);
+      const topic = catalogueTopic(topicId);
       if (!topic) throw new Error("Choose one of the available topics.");
       const learner = talker(state);
       return openSession(state, topic.id, topic.label, openingFor(topic.id, learner.name));
@@ -728,25 +689,6 @@ export const bridge: EllaBridge = isTauriRuntime() ? new TauriBridge() : createB
 
 function answersIn(session: Session): string[] {
   return session.messages.filter((message) => message.speaker === "learner").map((message) => message.content);
-}
-
-function openingFor(topicId: string, name: string): string {
-  switch (topicId) {
-    case "restaurant-order":
-      return `Hi ${name}! We are at a restaurant and I am your waiter. What would you like to order today?`;
-    case "booking-a-cab":
-      return `Hi ${name}! I am the cab driver. Where would you like to go, and where should I pick you up?`;
-    case "job-interview":
-      return `Hello ${name}! Thank you for coming in. To start, could you tell me a little about yourself?`;
-    case "doctor-clinic":
-      return `Hi ${name}! I am the doctor here. Please sit down and tell me, how have you been feeling?`;
-    case "asking-directions":
-      return `Hi ${name}! You look a little lost. Where are you trying to go? I know this area well.`;
-    case "market-bargaining":
-      return `Hi ${name}! Come, come, best prices here. What are you looking for today?`;
-    default:
-      return `Hi ${name}! Tell me about the tastiest thing you ate this week. Where did you find it?`;
-  }
 }
 
 function demoReply(topicId: string, text: string, turn: number): string {
