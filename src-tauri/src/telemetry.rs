@@ -160,6 +160,9 @@ pub struct EngineDetails {
     pub stt_threads: i32,
     /// `resident`, Piper kept running between lines, or `one-shot`.
     pub piper: &'static str,
+    /// The proxy's host when the cloud language model is on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<String>,
     /// Why the server did not start.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -182,6 +185,24 @@ pub fn engine_ready(details: &EngineDetails) {
         header: Header::new("ella_engine", 1),
         since_launch_ms: elapsed_ms(launch().started),
         details,
+    });
+}
+
+/// The cloud language model came up, or went down and why, as an
+/// `ella_cloud` event: when a laptop was online for Ella, and what took it off.
+pub fn cloud_changed(up: bool, reason: &str) {
+    #[derive(Serialize)]
+    struct CloudEvent<'a> {
+        #[serde(flatten)]
+        header: Header,
+        up: bool,
+        #[serde(skip_serializing_if = "str::is_empty")]
+        reason: &'a str,
+    }
+    write_event(&CloudEvent {
+        header: Header::new("ella_cloud", 1),
+        up,
+        reason,
     });
 }
 
@@ -283,6 +304,14 @@ pub struct LlmRun {
     /// `reply`, or `rewrite` for a second generation asked for after the
     /// first got something wrong. `notes` says what.
     pub why: &'static str,
+    /// `cloud` when the proxy's model wrote it; left out for the local one.
+    #[serde(skip_serializing_if = "str::is_empty")]
+    pub backend: &'static str,
+    /// For a cloud run that gave no reply: `unanswered`, and the local model
+    /// was asked instead, or `cut`, broken off partway. Its `ms` is the time
+    /// it cost the turn.
+    #[serde(skip_serializing_if = "str::is_empty")]
+    pub failed: &'static str,
     /// How long the request waited for the talk's warm-up, or for a slot
     /// being saved, before it went. Part of `ttft_ms`.
     pub wait_ms: u64,
@@ -610,6 +639,9 @@ fn elapsed_ms(since: Instant) -> u64 {
 pub struct JudgeTiming {
     /// `score`, `correct` or `place`.
     pub judge: &'static str,
+    /// `cloud` when the proxy's model judged; left out for the local one.
+    #[serde(skip_serializing_if = "str::is_empty")]
+    pub backend: &'static str,
     /// `ok`, or `error` for an answer that never came or could not be read.
     pub status: &'static str,
     /// From asking to the model's first piece: what a talk, or a more urgent

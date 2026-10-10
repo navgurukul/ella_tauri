@@ -1,0 +1,17 @@
+{
+  "imports": {
+    "postgres": "npm:postgres@3.4.9",
+    "@std/assert": "jsr:@std/assert@1.0.19"
+  },
+  "compilerOptions": {
+    "strict": true
+  },
+  "tasks": {
+    "test": "deno test --allow-env --allow-net=127.0.0.1,localhost --allow-read=.,../../migrations",
+    "serve": "deno run --allow-env --allow-net index.ts",
+    "check": "deno check . && deno lint . && deno fmt --check ."
+  },
+  "fmt": {
+    "lineWidth": 100
+  }
+}

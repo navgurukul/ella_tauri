@@ -4039,6 +4039,8 @@ mod telemetry_tests {
         fn reply(&self, _: &TutorRequest) -> EllaResult<GeneratedReply> {
             telemetry::record_llm_run(LlmRun {
                 why: "reply",
+                backend: "",
+                failed: "",
                 wait_ms: 0,
                 errand: None,
                 ttft_ms: 1,

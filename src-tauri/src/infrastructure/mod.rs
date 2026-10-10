@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod cloud_llm;
 pub mod database;
 pub mod engine_manager;
 pub mod engines;

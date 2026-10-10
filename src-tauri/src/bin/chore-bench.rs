@@ -237,6 +237,15 @@ struct Options {
     max_turns: usize,
 }
 
+/// Text in, so speech recognition need not be ready: only a language model,
+/// the laptop's or the cloud's.
+fn has_a_model(status: &ella_tauri_lib::domain::EngineStatus) -> bool {
+    status
+        .components
+        .iter()
+        .any(|component| component.name.starts_with("Language model") && component.ready)
+}
+
 fn parse_options() -> Result<Options, String> {
     let mut options = Options {
         chore_id: "market-cloth-price".into(),
@@ -330,11 +339,11 @@ fn open_service(learner_name: &str) -> Result<AppService, String> {
             component.detail
         );
     }
-    if !status.ready {
+    if !has_a_model(&status) {
         return Err(
-            "engines are not ready. Start them with `npm run engines:local` and set \
+            "no language model is ready. Start them with `npm run engines:local` and set \
              ELLA_ENGINE_MODE=local ELLA_ENGINE_ROOT=$PWD/engines \
-             ELLA_LLM_BASE_URL=http://127.0.0.1:39091/v1"
+             ELLA_LLM_BASE_URL=http://127.0.0.1:39091/v1, or let it reach the internet (unset ELLA_CLOUD=off)"
                 .into(),
         );
     }
@@ -521,11 +530,11 @@ fn run(options: &Options) -> Result<(), String> {
             component.detail
         );
     }
-    if !status.ready {
+    if !has_a_model(&status) {
         return Err(
-            "engines are not ready. Start them with `npm run engines:local` and set \
+            "no language model is ready. Start them with `npm run engines:local` and set \
              ELLA_ENGINE_MODE=local ELLA_ENGINE_ROOT=$PWD/engines \
-             ELLA_LLM_BASE_URL=http://127.0.0.1:39091/v1"
+             ELLA_LLM_BASE_URL=http://127.0.0.1:39091/v1, or let it reach the internet (unset ELLA_CLOUD=off)"
                 .into(),
         );
     }

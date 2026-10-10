@@ -29,6 +29,7 @@ use crate::{
     error::{EllaError, EllaResult},
     infrastructure::{
         audio::raw_pcm_to_wav,
+        cloud_llm::{self, Ask, Asked, CloudLlm},
         engine_manager::LlamaServer,
         model_queue::{Errand, ErrandTurn, GiveWay, Held, ModelQueue, Step},
         speech_timing::{phoneme_spans, shifted, word_spans},
@@ -2470,15 +2471,46 @@ fn strip_bracket_tokens(text: &str) -> String {
 
 /// The figure the character named, scoped to the chore's unit.
 ///
-/// Every integer in the reply is a candidate. One adjacent to a unit word wins
+/// Every figure in the reply, in digits or spelled out, is a candidate. One adjacent to a unit word wins
 /// over one that is not, and among equals the last wins, because a reply that
 /// recites the old figure before naming a new one names the new one last. With
-/// no unit anywhere in the reply we return `None` rather than guess: a bare
-/// number in "twenty years in this market" is not an offer.
+/// no unit anywhere in the reply, only a figure spelled out in hundreds or
+/// thousands counts — said aloud, a price often goes without its unit, as in
+/// "I will say five hundred fifty" — and otherwise we return `None` rather
+/// than guess: a bare number in "twenty years in this market" is not an offer.
 fn extract_figure(text: &str, spec: &LedgerSpec) -> Option<i32> {
     let lower = text.to_lowercase();
+    let unit_named = mentions_alias(&lower, &spec.unit_aliases);
+    // In digits, or spelled out the way it is said aloud: Ella's cloud model
+    // writes "five hundred fifty" where the laptop's writes "Rs 550".
+    let mut figures = if unit_named { digit_figures(&lower) } else { Vec::new() };
+    figures.extend(
+        spelled_figures(&lower)
+            .into_iter()
+            .filter(|&(_, _, value)| unit_named || value >= 100),
+    );
+    figures.sort_by_key(|&(start, _, _)| start);
+    let mut best: Option<(bool, i32)> = None;
+    for (start, end, value) in figures {
+        // "I said four fifty, not four hundred": the figure refused is not
+        // the one named.
+        if negated(&lower[..start], &spec.unit_aliases) {
+            continue;
+        }
+        let adjacent = mentions_alias(around(&lower, start, end, 12), &spec.unit_aliases);
+        best = match best {
+            // Unit-adjacent beats not; otherwise later beats earlier.
+            Some((true, _)) if !adjacent => best,
+            _ => Some((adjacent, value)),
+        };
+    }
+    best.map(|(_, value)| value)
+}
+
+/// Every figure written in digits, with where it starts and ends.
+fn digit_figures(lower: &str) -> Vec<(usize, usize, i32)> {
     let bytes = lower.as_bytes();
-    let mut best: Option<(bool, usize, i32)> = None;
+    let mut figures = Vec::new();
     let mut index = 0usize;
     while index < bytes.len() {
         if !bytes[index].is_ascii_digit() {
@@ -2493,22 +2525,95 @@ fn extract_figure(text: &str, spec: &LedgerSpec) -> Option<i32> {
             }
             index += 1;
         }
-        let Ok(value) = digits.parse::<i32>() else {
-            continue;
-        };
-        let window_start = start.saturating_sub(12);
-        let window_end = (index + 12).min(bytes.len());
-        let window = &lower[window_start..window_end];
-        let adjacent = mentions_alias(window, &spec.unit_aliases);
-        let candidate = (adjacent, start, value);
-        best = match best {
-            // Unit-adjacent beats not; otherwise later beats earlier.
-            Some((was_adjacent, _, _)) if was_adjacent && !adjacent => best,
-            _ => Some(candidate),
-        };
+        if let Ok(value) = digits.parse::<i32>() {
+            figures.push((start, index, value));
+        }
     }
-    let (_, _, value) = best?;
-    mentions_alias(&lower, &spec.unit_aliases).then_some(value)
+    figures
+}
+
+/// Every figure spelled out — "five hundred fifty", "twelve hundred", "one
+/// thousand two hundred" — with where it starts and ends. Read as
+/// `spelled_number` reads a learner's.
+fn spelled_figures(lower: &str) -> Vec<(usize, usize, i32)> {
+    let mut figures = Vec::new();
+    let (mut total, mut part) = (0i64, 0i64);
+    let mut run: Option<(usize, usize)> = None;
+    let mut words = Vec::new();
+    let mut word_start = None;
+    for (index, c) in lower.char_indices().chain(std::iter::once((lower.len(), ' '))) {
+        match (c.is_alphabetic(), word_start) {
+            (true, None) => word_start = Some(index),
+            (false, Some(start)) => {
+                words.push((start, &lower[start..index]));
+                word_start = None;
+            }
+            _ => {}
+        }
+    }
+    for (start, word) in words {
+        let end = start + word.len();
+        let extend = |run: Option<(usize, usize)>| Some((run.map_or(start, |(from, _)| from), end));
+        match number_word(word) {
+            // "Five fifty", "four seventy five": how a price is said in India,
+            // the hundred left out.
+            Some(NumberWord::Value(value)) if (1..10).contains(&part) && value >= 20 && value % 10 == 0 => {
+                part = part * 100 + value;
+                run = extend(run);
+            }
+            Some(NumberWord::Value(value)) => {
+                part += value;
+                run = extend(run);
+            }
+            Some(NumberWord::Hundred) => {
+                part = part.max(1) * 100;
+                run = extend(run);
+            }
+            Some(NumberWord::Thousand) => {
+                total += part.max(1) * 1_000;
+                part = 0;
+                run = extend(run);
+            }
+            None if word == "and" && run.is_some() => {}
+            None => {
+                if let Some((from, to)) = run.take() {
+                    figures.extend(i32::try_from(total + part).ok().map(|value| (from, to, value)));
+                }
+                (total, part) = (0, 0);
+            }
+        }
+    }
+    if let Some((from, to)) = run {
+        figures.extend(i32::try_from(total + part).ok().map(|value| (from, to, value)));
+    }
+    figures
+}
+
+/// Whether the words just before a figure deny it: "not", "never", with the
+/// unit allowed between ("not Rs 400"). Punctuation ends the look back, so
+/// "No, five hundred" still names five hundred.
+fn negated(before: &str, aliases: &[String]) -> bool {
+    let tail = before.trim_end();
+    let mut words = tail.rsplit(|c: char| c.is_whitespace()).filter(|word| !word.is_empty());
+    let mut word = words.next();
+    if word.is_some_and(|word| aliases.iter().any(|alias| alias == word)) {
+        word = words.next();
+    }
+    word.is_some_and(|word| word == "not" || word == "never")
+}
+
+/// `text` from `reach` bytes before `start` to as many after `end`, widened to
+/// whole characters: a `’` or `₹` beside a figure is several bytes.
+fn around(text: &str, start: usize, end: usize, reach: usize) -> &str {
+    let mut from = start.saturating_sub(reach);
+    while !text.is_char_boundary(from) {
+        from -= 1;
+    }
+    let mut to = (end + reach).min(text.len());
+    while !text.is_char_boundary(to) {
+        to += 1;
+    }
+    &text[from..to]
 }
 
 /// The figure this turn settles on.
@@ -3657,6 +3762,45 @@ fn read_judge_in_pieces(
 /// has all it needs, and the rest is not waited for.
 type Settle<'a, T> = Option<&'a dyn Fn(&str) -> Option<T>>;
 
+/// The most a cloud reply may write. More than the laptop's 50: DeepSeek writes
+/// longer sentences than Ella's 3B model, and a talk partner's ran past 50
+/// tokens mid-sentence in the bench, while 30 more of its tokens cost about a
+/// third of a second. One that still runs out is cut back to its last whole
+/// sentence (`whole_sentences`).
+const CLOUD_REPLY_TOKENS: u32 = 80;
+
+/// `text` up to the end of its last whole sentence, or `None` when it has no
+/// sentence end at all.
+fn whole_sentences(text: &str) -> Option<String> {
+    let end = text
+        .char_indices()
+        .filter(|&(index, c)| {
+            matches!(c, '.' | '!' | '?')
+                && text[index + c.len_utf8()..].chars().next().map_or(true, |next| {
+                    next.is_whitespace() || matches!(next, '"' | '\u{201d}' | '\'' | '\u{2019}')
+                })
+        })
+        .map(|(index, c)| {
+            let after = index + c.len_utf8();
+            // A closing quote after the mark belongs to the sentence.
+            after + text[after..].chars().next().filter(|next| matches!(next, '"' | '\u{201d}' | '\'' | '\u{2019}')).map_or(0, char::len_utf8)
+        })
+        .last()?;
+    let whole = text[..end].trim();
+    (!whole.is_empty()).then(|| whole.to_owned())
+}
+
+/// What asking the cloud for a judge's answer took.
+#[derive(Debug, Clone, Default)]
+struct CloudJudgeRun {
+    attempts: u32,
+    /// From asking to the first word of the first answer.
+    first_word_ms: u64,
+    read_tokens: u64,
+    written_tokens: u64,
+    stopped_early: bool,
+}
+
 /// What came of an errand's streamed request.
 enum Answer<T> {
     /// The whole answer, how many prompt tokens the server read for it, and
@@ -3751,6 +3895,12 @@ pub struct LocalEngine {
     /// Puts a talk's requests ahead of everything else the model is asked to
     /// do: see `ModelQueue`.
     queue: Arc<ModelQueue>,
+    /// The language model over the internet, asked first whenever it
+    /// answers, with llama-server behind it for every request: see
+    /// `cloud_llm`. `None` when it is off (`ELLA_CLOUD=off`). Everything llama-server is given to keep it ready —
+    /// warm-ups, kept slots, errands — goes on as though it were not there,
+    /// so a request the cloud fails finds the local model as ready as ever.
+    cloud: Option<Arc<CloudLlm>>,
 }
 
 impl LocalEngine {
@@ -3801,6 +3951,9 @@ impl LocalEngine {
         if let Some(daemon) = &piper_daemon {
             daemon.warm();
         }
+
+        // Looked at in the background while llama-server starts.
+        let cloud = CloudLlm::from_environment(&models_root);
 
         // An explicit URL means someone is running their own server — the
         // development scripts, the benchmarks — and Ella must not start a
@@ -3855,6 +4008,7 @@ impl LocalEngine {
                 .join(" > "),
             stt_threads: canary_threads,
             piper: if piper_daemon.is_some() { "resident" } else { "one-shot" },
+            cloud: cloud.as_ref().map(|cloud| cloud.host()),
             error: llama_error.clone(),
         };
 
@@ -3874,7 +4028,13 @@ impl LocalEngine {
             slots: slot_dir.map(|dir| Arc::new(SlotStore::new(dir))),
             warm_ups: Arc::default(),
             queue: Arc::default(),
+            cloud,
         };
+        // So the first talk, or a bench's, does not go to the laptop only
+        // because the first look at the cloud had not come back yet.
+        if let Some(cloud) = &engine.cloud {
+            cloud.wait_for_first_look(Duration::from_secs(3));
+        }
         engine.report_ready(details);
         engine
     }
@@ -3913,6 +4073,8 @@ impl LocalEngine {
 impl TutorEngine for LocalEngine {
     fn status(&self) -> EngineStatus {
         let llm_ready = self.probe(&self.llm_base_url);
+        let cloud = self.cloud.as_ref().map(|cloud| cloud.describe());
+        let cloud_ready = cloud.as_ref().is_some_and(|(up, _)| *up);
         let (primary_stt, fallback_stt) = self.stt.status();
         let stt_ready = primary_stt.ready
             || fallback_stt
@@ -3937,12 +4099,19 @@ impl TutorEngine for LocalEngine {
                     )
                 },
             },
-            EngineComponent {
-                name: "Speech recognition (primary)".into(),
-                ready: primary_stt.ready,
-                detail: primary_stt.detail,
-            },
         ];
+        if let Some((ready, detail)) = cloud {
+            components.push(EngineComponent {
+                name: "Language model (internet)".into(),
+                ready,
+                detail,
+            });
+        }
+        components.push(EngineComponent {
+            name: "Speech recognition (primary)".into(),
+            ready: primary_stt.ready,
+            detail: primary_stt.detail,
+        });
         if let Some(fallback) = fallback_stt {
             components.push(EngineComponent {
                 name: "Speech recognition (fallback)".into(),
@@ -3965,8 +4134,15 @@ impl TutorEngine for LocalEngine {
         });
         EngineStatus {
             mode: "local".into(),
-            label: "Local AI — Canary primary".into(),
-            ready: llm_ready && stt_ready,
+            label: if self.cloud.is_some() {
+                "Local AI, and the internet's when online — Canary primary".into()
+            } else {
+                "Local AI — Canary primary".into()
+            },
+            // Either model will do: a request the cloud cannot answer goes to
+            // the local one, and while the local one is not up, the cloud
+            // still answers.
+            ready: (llm_ready || cloud_ready) && stt_ready,
             components,
         }
     }
@@ -4621,6 +4797,14 @@ impl LocalEngine {
         schema: Option<Value>,
         read: impl Fn(&Value) -> Option<T>,
     ) -> EllaResult<T> {
+        if let Some(cloud) = self.cloud.as_ref().filter(|cloud| cloud.usable()) {
+            match self.judge_cloud(cloud, label, &messages, max_tokens, &read, None) {
+                Ok((value, _)) => return Ok(value),
+                Err(why) => eprintln!(
+                    "[LATENCY]     judge> {label}: the cloud did not answer ({why}); asking the local model"
+                ),
+            }
+        }
         // A schema has llama.cpp hold the answer to that shape, not just to
         // JSON of some kind.
         let response_format = match schema {
@@ -4699,6 +4883,34 @@ impl LocalEngine {
         read: impl Fn(&Value) -> Option<T>,
         settle: Settle<'_, T>,
     ) -> EllaResult<T> {
+        // The cloud answers many requests at once, so its judges wait for
+        // nothing: not a talk, not an errand, not the hold.
+        if let Some(cloud) = self.cloud.as_ref().filter(|cloud| cloud.usable()) {
+            let asked = Instant::now();
+            let judged = self.judge_cloud(cloud, label, &messages, max_tokens, &read, settle);
+            let (status, run) = match &judged {
+                Ok((_, run)) => ("ok", run.clone()),
+                Err(_) => ("error", CloudJudgeRun::default()),
+            };
+            record_judge(JudgeTiming {
+                judge: name,
+                backend: "cloud",
+                status,
+                waited_ms: run.first_word_ms,
+                ms: (asked.elapsed().as_secs_f64() * 1_000.0).round() as u64,
+                attempts: run.attempts,
+                read_tokens: run.read_tokens,
+                written_tokens: run.written_tokens,
+                stopped_early: run.stopped_early,
+                ..JudgeTiming::default()
+            });
+            match judged {
+                Ok((value, _)) => return Ok(value),
+                Err(why) => eprintln!(
+                    "[LATENCY]     judge> {label}: the cloud did not answer ({why}); asking the local model"
+                ),
+            }
+        }
         let response_format = match schema {
             Some(schema) => json!({"type": "json_object", "schema": schema}),
             None => json!({"type": "json_object"}),
@@ -4877,11 +5089,6 @@ impl LocalEngine {
             messages.push(json!({"role": "system", "content": corrective}));
         }
 
-        eprintln!(
-            "[LATENCY]     llm> POST {}/chat/completions ({} messages, stream=true)",
-            self.llm_base_url.trim_end_matches('/'),
-            messages.len()
-        );
         // Every session shares one `id_slot`, so the prefix cached there is
         // whatever the last session left behind. The fingerprint is what says
         // which prompt this turn is actually being generated against: it must
@@ -4909,6 +5116,35 @@ impl LocalEngine {
             eprintln!("[PROMPT] ─── end of chained prompt ───");
         }
         let _talking = self.queue.talking();
+        // The cloud first, when it answers. What a failed attempt cost is
+        // counted in this reply's times, since the learner waited through it.
+        let mut cloud_ms = 0.0;
+        if let Some(cloud) = self.cloud.as_ref().filter(|cloud| cloud.usable()) {
+            let why = if corrective.is_some() { "rewrite" } else { "reply" };
+            match self.stream_cloud(cloud, &messages, why, speech.as_deref_mut()) {
+                Ok(reply) => return Ok(reply),
+                Err((failed, reason, ms)) => {
+                    cloud_ms = ms;
+                    eprintln!(
+                        "[LATENCY]     llm> cloud {failed} after {ms:.0}ms ({reason}); asking the local model"
+                    );
+                    if failed == "cut" {
+                        // What Piper was given no longer matches any reply,
+                        // so `PendingSpeech::matching` drops it and the reply
+                        // is said afresh. Nothing more goes to it.
+                        telemetry::note("cloud_cut");
+                        speech = None;
+                    } else {
+                        telemetry::note("cloud_fallback");
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "[LATENCY]     llm> POST {}/chat/completions ({} messages, stream=true)",
+            self.llm_base_url.trim_end_matches('/'),
+            messages.len()
+        );
         let started = Instant::now();
         // Counted in the time to the first token, as it was when the reply
         // queued behind the warm-up in the server instead.
@@ -5027,6 +5263,8 @@ impl LocalEngine {
         }
         telemetry::record_llm_run(LlmRun {
             why: if corrective.is_some() { "rewrite" } else { "reply" },
+            backend: "",
+            failed: "",
             wait_ms: waited_ms.round() as u64,
             errand: errand.map(Errand::name),
             ttft_ms: ttft_ms.unwrap_or(completion_ms).round() as u64,
@@ -5046,9 +5284,151 @@ impl LocalEngine {
         }
         Ok(GeneratedReply::plain(
             text,
-            ttft_ms.unwrap_or(completion_ms),
-            completion_ms,
+            ttft_ms.unwrap_or(completion_ms) + cloud_ms,
+            completion_ms + cloud_ms,
         ))
+    }
+
+    /// One reply from the cloud, each piece handed to `speech` as it lands,
+    /// as `stream_once` does with the local model's. `Err` says how it failed
+    /// (`unanswered` or `cut`), why, and how long that took.
+    fn stream_cloud(
+        &self,
+        cloud: &CloudLlm,
+        messages: &[Value],
+        why: &'static str,
+        mut speech: Option<&mut SpeechPipeline>,
+    ) -> Result<GeneratedReply, (&'static str, String, f64)> {
+        let asked = cloud.ask(
+            messages,
+            Ask {
+                max_tokens: CLOUD_REPLY_TOKENS,
+                temperature: 0.65,
+                json: false,
+                first_word: cloud_llm::REPLY_FIRST_WORD,
+            },
+            |piece, _| {
+                if let Some(pipeline) = speech.as_deref_mut() {
+                    pipeline.push(piece);
+                }
+                true
+            },
+        );
+        let (failed, reason, ms) = match asked {
+            Asked::Answered(answer) => {
+                let usage = answer.usage;
+                eprintln!(
+                    "[LATENCY]     llm> cloud: first word +{:.1}ms, done +{:.1}ms ({} prompt tokens, {} of them cached, {} written)",
+                    answer.ttft_ms, answer.ms, usage.prompt, usage.hit, usage.completion
+                );
+                telemetry::record_llm_run(LlmRun {
+                    why,
+                    backend: "cloud",
+                    failed: "",
+                    wait_ms: 0,
+                    errand: None,
+                    ttft_ms: answer.ttft_ms.round() as u64,
+                    ms: answer.ms.round() as u64,
+                    prompt_tokens: (usage.prompt > 0).then_some(usage.prompt),
+                    // What DeepSeek read afresh: its cache had the rest.
+                    prompt_evaluated: (usage.prompt > 0).then_some(usage.miss),
+                    prompt_ms: None,
+                    gen_tokens: (usage.completion > 0).then_some(usage.completion),
+                    gen_ms: None,
+                });
+                let mut text = answer.text.trim().to_owned();
+                if answer.cut_short {
+                    // Never a sentence broken off: what Piper had of it no
+                    // longer matches, so the reply is said afresh.
+                    telemetry::note("cloud_cut_short");
+                    if let Some(whole) = whole_sentences(&text) {
+                        text = whole;
+                    }
+                }
+                return Ok(GeneratedReply::plain(text, answer.ttft_ms, answer.ms));
+            }
+            Asked::Unanswered { why, ms } => ("unanswered", why, ms),
+            Asked::Empty { ms } => ("unanswered", "an empty answer".to_owned(), ms),
+            Asked::Cut { why, ms } => ("cut", why, ms),
+        };
+        telemetry::record_llm_run(LlmRun {
+            why,
+            backend: "cloud",
+            failed,
+            wait_ms: 0,
+            errand: None,
+            ttft_ms: ms.round() as u64,
+            ms: ms.round() as u64,
+            prompt_tokens: None,
+            prompt_evaluated: None,
+            prompt_ms: None,
+            gen_tokens: None,
+            gen_ms: None,
+        });
+        Err((failed, reason, ms))
+    }
+
+    /// A judge's answer from the cloud, asked for twice at most, as the local
+    /// model's is: `Err` when the cloud could not give one, and the local
+    /// model is to be asked instead. With it, what asking took, for the
+    /// assessment's telemetry.
+    fn judge_cloud<T>(
+        &self,
+        cloud: &CloudLlm,
+        label: &str,
+        messages: &[Value],
+        max_tokens: u32,
+        read: &dyn Fn(&Value) -> Option<T>,
+        settle: Settle<'_, T>,
+    ) -> Result<(T, CloudJudgeRun), String> {
+        let mut run = CloudJudgeRun::default();
+        let mut failure = String::new();
+        for attempt in 1..=2 {
+            run.attempts = attempt;
+            let mut settled = None;
+            let asked = cloud.ask(
+                messages,
+                Ask {
+                    max_tokens,
+                    temperature: 0.1,
+                    json: true,
+                    first_word: cloud_llm::JUDGE_FIRST_WORD,
+                },
+                |_, whole| {
+                    settled = settle.and_then(|settle| settle(whole));
+                    settled.is_none()
+                },
+            );
+            match asked {
+                Asked::Answered(answer) => {
+                    if run.first_word_ms == 0 {
+                        run.first_word_ms = answer.ttft_ms.round() as u64;
+                    }
+                    run.read_tokens += answer.usage.prompt;
+                    run.written_tokens += answer.usage.completion;
+                    if let Some(value) = settled {
+                        run.stopped_early = true;
+                        eprintln!(
+                            "[LATENCY]     judge> {label}: cloud attempt {attempt} had all it needed after {:.0}ms, so the rest was not waited for",
+                            answer.ms
+                        );
+                        return Ok((value, run));
+                    }
+                    eprintln!(
+                        "[LATENCY]     judge> {label}: cloud attempt {attempt} took {:.0}ms: {}",
+                        answer.ms,
+                        answer.text.trim()
+                    );
+                    if let Some(value) = json_object_in(&answer.text).as_ref().and_then(read) {
+                        return Ok((value, run));
+                    }
+                    failure = format!("an answer that could not be read: {}", answer.text.trim());
+                }
+                Asked::Empty { .. } => failure = "an empty answer".into(),
+                Asked::Unanswered { why, .. } | Asked::Cut { why, .. } => return Err(why),
+            }
+        }
+        Err(failure)
     }
 
     fn synthesize_oneshot(&self, text: &str) -> EllaResult<SynthesizedAudio> {
@@ -5646,6 +6026,67 @@ mod ledger_tests {
             max_turns: chore.max_turns,
             ledger,
         }
+    }
+
+    #[test]
+    fn a_figure_the_cloud_spells_out_is_read_with_or_without_its_unit() {
+        // Lines DeepSeek wrote as the stall owner and the landlord on the bench.
+        let market = market_spec();
+        assert_eq!(extract_figure("That one is good cotton. For you it is six hundred rupees.", &market), Some(600));
+        assert_eq!(
+            extract_figure("Six hundred is fair for this quality, but I will say five hundred fifty.", &market),
+            Some(550)
+        );
+        assert_eq!(
+            extract_figure("Four hundred fifty is too low for this cloth, but I can do five hundred.", &market),
+            Some(500)
+        );
+        assert_eq!(extract_figure("Four hundred seventy five rupees, and I am shaking my head.", &market), Some(475));
+        // Beside its unit, a figure beats one without, spelled or not.
+        assert_eq!(extract_figure("Rs 500 is my price, not five hundred fifty.", &market), Some(500));
+        // Small numbers still need the unit: they are rarely a price.
+        assert_eq!(extract_figure("Twenty years I have sold cloth in this market.", &market), None);
+        assert_eq!(extract_figure("Two shirts, one price.", &market), None);
+        let refund = refund_spec();
+        assert_eq!(extract_figure("I can stretch to eight hundred rupees, and the rest goes on paint.", &refund), Some(800));
+        assert_eq!(extract_figure("I will go to one thousand two hundred, because you left it tidy.", &refund), Some(1200));
+        assert_eq!(extract_figure("Fine, twelve hundred back to you.", &refund), Some(1200));
+    }
+
+    #[test]
+    fn a_price_said_the_indian_way_and_a_figure_refused_are_read_as_meant() {
+        let market = market_spec();
+        assert_eq!(extract_figure("Since you asked nicely, I can do five fifty, that is all.", &market), Some(550));
+        assert_eq!(extract_figure("Four seventy five, my last price.", &market), Some(475));
+        assert_eq!(extract_figure("Twenty five rupees for the bag.", &market), Some(25));
+        assert_eq!(
+            extract_figure("I said four fifty, not four hundred, and I already told you why.", &market),
+            Some(450)
+        );
+        assert_eq!(extract_figure("Rs 450, not Rs 400.", &market), Some(450));
+        assert_eq!(extract_figure("Never 300 rupees, my friend: 500.", &market), Some(500));
+        assert_eq!(extract_figure("No, five hundred is my price.", &market), Some(500));
+    }
+
+    #[test]
+    fn a_curly_apostrophe_or_rupee_sign_beside_a_figure_is_read_safely() {
+        let market = market_spec();
+        assert_eq!(extract_figure("I can’t go below 500’s worth, friend, rupees only.", &market), Some(500));
+        assert_eq!(extract_figure("’’’’500 rupees’’’’", &market), Some(500));
+        assert_eq!(extract_figure("₹550, final.", &market), Some(550));
+        assert_eq!(extract_figure("That’s ₹ five hundred, my friend’s price.", &market), Some(500));
+    }
+
+    #[test]
+    fn a_cloud_reply_that_ran_out_of_tokens_is_cut_back_to_its_last_whole_sentence() {
+        assert_eq!(
+            whole_sentences("That is a big jump. I will go to one thousand two hundred, because you did leave the").as_deref(),
+            Some("That is a big jump.")
+        );
+        assert_eq!(whole_sentences("Fine! Is that fair? And then").as_deref(), Some("Fine! Is that fair?"));
+        assert_eq!(whole_sentences("He said “go.” Then he left and").as_deref(), Some("He said “go.”"));
+        assert_eq!(whole_sentences("No sentence end at all"), None);
+        assert_eq!(whole_sentences("It costs Rs 4.50 and"), None);
     }
 
     #[test]
@@ -7485,6 +7926,9 @@ mod errand_tests {
     struct FakeLlama {
         url: String,
         seen: Arc<Mutex<Vec<Seen>>>,
+        /// Whether the stand-in for the cloud's proxy, served beside it under
+        /// `/ella-desktop/`, refuses every chat as over the day's cap.
+        cloud_refuses: Arc<AtomicBool>,
         slots: tempfile::TempDir,
         _model: tempfile::NamedTempFile,
     }
@@ -7492,6 +7936,7 @@ mod errand_tests {
     struct Served {
         pace: Pace,
         seen: Arc<Mutex<Vec<Seen>>>,
+        cloud_refuses: Arc<AtomicBool>,
         /// Held while a request is worked on: one at a time.
         slot: Mutex<()>,
         slot_dir: PathBuf,
@@ -7514,9 +7959,11 @@ mod errand_tests {
             let slots = tempfile::tempdir().unwrap();
             let model = tempfile::NamedTempFile::new().unwrap();
             let seen = Arc::new(Mutex::new(Vec::new()));
+            let cloud_refuses = Arc::new(AtomicBool::new(false));
             let served = Arc::new(Served {
                 pace,
                 seen: Arc::clone(&seen),
+                cloud_refuses: Arc::clone(&cloud_refuses),
                 slot: Mutex::new(()),
                 slot_dir: slots.path().to_path_buf(),
                 model: model.path().display().to_string(),
@@ -7533,6 +7980,7 @@ mod errand_tests {
             Self {
                 url: format!("http://127.0.0.1:{port}/v1"),
                 seen,
+                cloud_refuses,
                 slots,
                 _model: model,
             }
@@ -7576,13 +8024,60 @@ mod errand_tests {
                 slots: Some(Arc::new(SlotStore::new(self.slots.path().to_path_buf()))),
                 warm_ups: Arc::default(),
                 queue: Arc::new(ModelQueue::new(quiet)),
+                cloud: None,
             }
+        }
+
+        /// The engine, with the stand-in's proxy as its cloud, once it is up.
+        fn engine_with_cloud(&self, quiet: Duration) -> LocalEngine {
+            let mut engine = self.engine(quiet);
+            let proxy = format!("{}/ella-desktop", self.url.trim_end_matches("/v1"));
+            let cloud = Arc::new(CloudLlm::new(proxy, None));
+            eventually("the cloud is up", || cloud.usable());
+            engine.cloud = Some(cloud);
+            engine
+        }
+
+        /// What the stand-in's proxy was asked to chat about.
+        fn cloud_chats(&self) -> Vec<Seen> {
+            self.seen()
+                .into_iter()
+                .filter(|seen| seen.path == "/ella-desktop/v1/chat")
+                .collect()
         }
     }
 
     impl Served {
         fn serve(&self, mut stream: TcpStream) -> std::io::Result<()> {
             let (path, body) = read_request(&mut stream)?;
+            // The cloud's proxy answers many requests at once, so it takes no
+            // turn at the one slot.
+            if let Some(route) = path.strip_prefix("/ella-desktop/") {
+                let answered = match route {
+                    "healthz" => respond(&mut stream, "200 OK", &json!({"ok": true, "chat": true})),
+                    "v1/installs" => respond(&mut stream, "201 Created", &json!({"token": "ab".repeat(32)})),
+                    _ if self.cloud_refuses.load(Ordering::Relaxed) => respond(
+                        &mut stream,
+                        "503 Service Unavailable",
+                        &json!({"error": "cap", "message": "today's spend has reached the cap"}),
+                    ),
+                    _ => {
+                        let judged = body.get("response_format").is_some();
+                        let instructions = body["messages"][0]["content"].as_str().unwrap_or_default();
+                        let text = match () {
+                            _ if instructions == CORRECTION_PROMPT => CORRECTED,
+                            _ if instructions.starts_with("You check a spoken-English practice talk") => {
+                                r#"{"shown": []}"#
+                            }
+                            _ if judged => JUDGED,
+                            _ => REPLY,
+                        };
+                        stream_parts(&mut stream, text, 3, Duration::ZERO)
+                    }
+                };
+                self.seen.lock().unwrap().push(Seen { path, body, dropped: false });
+                return answered;
+            }
             if path == "/props" {
                 return respond(
                     &mut stream,
@@ -8280,6 +8775,72 @@ mod errand_tests {
         let last_judged = asked.iter().rposition(judge).unwrap();
         let first_prepared = asked.iter().position(|seen| !judge(seen)).unwrap();
         assert!(last_judged < first_prepared, "the judges went first, back to back");
+    }
+
+    #[test]
+    fn a_reply_goes_to_the_cloud_while_it_answers_and_to_the_laptop_when_it_does_not() {
+        let fake = FakeLlama::start(pace(5, 5, 4));
+        let engine = fake.engine_with_cloud(Duration::from_secs(60));
+        let answer = || {
+            engine.reply(&after_where("I had the crispy corn in Barbecue Nation.")).unwrap();
+        };
+
+        let event = traced(answer);
+        assert_eq!(event["llm_runs"][0]["backend"], "cloud");
+        assert_eq!(talk_turns(&fake), 0, "llama-server wrote nothing");
+        let [asked] = fake.cloud_chats().try_into().unwrap();
+        assert_eq!(asked.body["max_tokens"], CLOUD_REPLY_TOKENS);
+        assert_eq!(asked.body["stream"], true);
+        for local_only in ["cache_prompt", "id_slot", "timings_per_token", "response_format", "model"] {
+            assert!(asked.body.get(local_only).is_none(), "{local_only} is llama-server's alone");
+        }
+
+        // Refused: the same turn is the laptop's, and the cloud's try is on record.
+        fake.cloud_refuses.store(true, Ordering::Relaxed);
+        let event = traced(answer);
+        let runs: Vec<(&str, &str)> = event["llm_runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|run| (run["backend"].as_str().unwrap_or("local"), run["failed"].as_str().unwrap_or("")))
+            .collect();
+        assert_eq!(runs, [("cloud", "unanswered"), ("local", "")]);
+        assert!(event["notes"].as_array().unwrap().contains(&json!("cloud_fallback")));
+        assert_eq!(talk_turns(&fake), 1);
+
+        // And the cloud is left alone after that: the next turn does not wait on it.
+        let event = traced(answer);
+        assert_eq!(event["llm_runs"].as_array().unwrap().len(), 1);
+        assert!(event["llm_runs"][0].get("backend").is_none());
+        assert_eq!(fake.cloud_chats().len(), 2);
+    }
+
+    #[test]
+    fn a_finished_talk_is_judged_in_the_cloud_without_waiting_for_the_talk_after_it() {
+        let fake = FakeLlama::start(pace(5, 5, 4));
+        let engine = fake.engine_with_cloud(Duration::from_secs(60));
+        // A talk is open: a judge on the laptop would wait for it to be over.
+        let _talking = engine.queue.talking();
+        let reading = engine.place("Asha", &placement_chat()).unwrap().unwrap();
+        assert_eq!(reading.level, "B1");
+        assert!(fake.completions().is_empty(), "llama-server was not asked");
+        let [judged] = fake.cloud_chats().try_into().unwrap();
+        assert_eq!(judged.body["response_format"], json!({"type": "json_object"}));
+
+        let lines = engine.correct(&SCHOOL, &|_| false).unwrap().unwrap();
+        assert_eq!(lines[0], SCHOOL[0].replace("it have", "it has"));
+        assert!(fake.completions().is_empty());
+    }
+
+    #[test]
+    fn a_judge_the_cloud_cannot_answer_is_asked_of_the_laptop() {
+        let fake = FakeLlama::start(pace(5, 5, 4));
+        let engine = fake.engine_with_cloud(Duration::from_millis(50));
+        fake.cloud_refuses.store(true, Ordering::Relaxed);
+        let reading = engine.place("Asha", &placement_chat()).unwrap().unwrap();
+        assert_eq!(reading.level, "B1");
+        assert_eq!(fake.cloud_chats().len(), 1);
+        assert!(!fake.completions().is_empty(), "llama-server judged it");
     }
 
     #[test]
