@@ -55,6 +55,17 @@ const BACKOFF_MIN: Duration = Duration::from_secs(30);
 const BACKOFF_MAX: Duration = Duration::from_secs(300);
 /// Left alone after the proxy says it, or DeepSeek, is too busy.
 const BUSY_WAIT: Duration = Duration::from_secs(60);
+/// A judge looks at a cloud that went down this recently itself, rather than
+/// wait out its backoff (`usable_for_judge`)...
+const JUDGE_LOOKS_FOR: Duration = Duration::from_secs(600);
+/// ...but not again this soon after a look that found it still down, so the
+/// two judges of one recap look once between them.
+const JUDGE_LOOK_GAP: Duration = Duration::from_secs(60);
+/// The most one answer may ask for. The proxy refuses a request for more
+/// whole (`MAX_TOKENS` in its chat.ts, which must say the same); asked for
+/// this much instead, an answer that needed more comes back cut, and its
+/// caller goes local as it does for any other cut.
+pub const CLOUD_MAX_TOKENS: u32 = 4096;
 
 /// What one request asks for, beyond its messages.
 #[derive(Debug, Clone, Copy)]
@@ -138,6 +149,12 @@ struct Health {
     backoff: Duration,
     /// Why it is down, for the status and the log.
     reason: String,
+    /// What kind of failure took it down, while it is down.
+    failure: Option<Failure>,
+    /// When it last went down after answering, while it is down.
+    down_since: Option<Instant>,
+    /// When a look at the proxy last found it still down, while it is down.
+    looked_in_vain: Option<Instant>,
 }
 
 pub struct CloudLlm {
@@ -196,6 +213,9 @@ impl CloudLlm {
                 retry_at: Instant::now(),
                 backoff: BACKOFF_MIN,
                 reason: "not looked at yet".into(),
+                failure: None,
+                down_since: None,
+                looked_in_vain: None,
             }),
             probing: AtomicBool::new(false),
         }
@@ -244,6 +264,37 @@ impl CloudLlm {
         false
     }
 
+    /// Whether a judge should ask the cloud: `usable`, except that a cloud
+    /// that was answering until lately, and went down for a reason a look can
+    /// settle (out of reach, or slow to start an answer), is looked at now and
+    /// the look waited for, rather than left until its wait is over. A reply's
+    /// 5 s deadline finds the cloud slow now and then, and it is usually back
+    /// by the recap: on 2026-10-12 a tester's two recaps were judged by the
+    /// laptop 21 s and 36 s before the cloud was found answering again.
+    /// Nobody hears a judge as it works, and the laptop takes 10-40 s over
+    /// one, so a look of at most `PROBE_LIMIT` is worth it. After a refusal,
+    /// which a look at `/healthz` cannot see past, it waits as replies do.
+    pub fn usable_for_judge(self: &Arc<Self>) -> bool {
+        let look = {
+            let health = self.health();
+            if health.up {
+                return true;
+            }
+            health.down_since.is_some_and(|since| since.elapsed() < JUDGE_LOOKS_FOR)
+                && matches!(health.failure, Some(Failure::Slow | Failure::Unreachable))
+                && health.looked_in_vain.map_or(true, |at| at.elapsed() >= JUDGE_LOOK_GAP)
+        };
+        if !look {
+            return self.usable();
+        }
+        self.probe_now();
+        let deadline = Instant::now() + PROBE_LIMIT + Duration::from_secs(1);
+        while self.probing.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        self.health().up
+    }
+
     /// Asks for one streamed answer to `messages`, handing `more` each piece
     /// as it lands and all of the answer so far. `more` returning false stops
     /// the answer there: the rest is not waited for, and the proxy stops
@@ -267,7 +318,7 @@ impl CloudLlm {
         };
         let mut body = json!({
             "messages": messages,
-            "max_tokens": ask.max_tokens,
+            "max_tokens": ask.max_tokens.min(CLOUD_MAX_TOKENS),
             "temperature": ask.temperature,
             "stream": true,
         });
@@ -454,7 +505,10 @@ impl CloudLlm {
         thread::spawn(move || {
             match cloud.probe() {
                 Ok(()) => cloud.came_up(),
-                Err(why) => cloud.went_down(&why, Failure::Unreachable),
+                Err(why) => {
+                    cloud.went_down(&why, Failure::Unreachable);
+                    cloud.health().looked_in_vain = Some(Instant::now());
+                }
             }
             cloud.probing.store(false, Ordering::Release);
         });
@@ -487,6 +541,9 @@ impl CloudLlm {
         health.known = true;
         health.backoff = BACKOFF_MIN;
         health.reason.clear();
+        health.failure = None;
+        health.down_since = None;
+        health.looked_in_vain = None;
     }
 
     fn went_down(&self, why: &str, failure: Failure) {
@@ -519,9 +576,13 @@ impl CloudLlm {
         if health.up || !health.known {
             telemetry::cloud_changed(false, why);
         }
+        if health.up {
+            health.down_since = Some(Instant::now());
+        }
         health.up = false;
         health.known = true;
         health.reason = why.to_owned();
+        health.failure = Some(failure);
     }
 
     fn forget_token(&self) {
@@ -1010,6 +1071,91 @@ mod tests {
             Asked::Unanswered { .. }
         ));
         assert!(cloud.usable());
+    }
+
+    #[test]
+    fn an_answer_never_asks_for_more_than_the_proxy_allows() {
+        let proxy = FakeProxy::start(Chat::Stream(vec!["{}"], Duration::ZERO));
+        let cloud = proxy.cloud(None);
+        up(&cloud);
+        let long = Ask {
+            max_tokens: 10_000,
+            ..ask(true, 2_000)
+        };
+        assert!(matches!(
+            cloud.ask(&messages(), long, |_, _| true),
+            Asked::Answered(_)
+        ));
+        let chat = proxy
+            .asked
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(path, _)| path.ends_with("/v1/chat"))
+            .cloned()
+            .unwrap();
+        assert_eq!(chat.1["max_tokens"], CLOUD_MAX_TOKENS);
+    }
+
+    fn looks(proxy: &FakeProxy) -> usize {
+        proxy
+            .paths()
+            .iter()
+            .filter(|path| path.ends_with("/healthz"))
+            .count()
+    }
+
+    #[test]
+    fn a_judge_looks_at_once_at_a_cloud_a_reply_found_slow() {
+        let proxy = FakeProxy::start(Chat::Silent(Duration::from_secs(3)));
+        let cloud = proxy.cloud(None);
+        up(&cloud);
+        assert!(matches!(
+            cloud.ask(&messages(), ask(false, 300), |_, _| true),
+            Asked::Unanswered { .. }
+        ));
+        // A reply waits out the backoff...
+        assert!(!cloud.usable());
+        let before = looks(&proxy);
+        // ...a judge looks now, and finds it answering.
+        assert!(cloud.usable_for_judge());
+        assert_eq!(looks(&proxy), before + 1);
+    }
+
+    #[test]
+    fn the_judges_of_one_recap_look_once_between_them() {
+        let proxy = FakeProxy::start(Chat::Silent(Duration::from_secs(3)));
+        let cloud = proxy.cloud(None);
+        up(&cloud);
+        let _ = cloud.ask(&messages(), ask(false, 300), |_, _| true);
+        proxy.healthy.store(false, Ordering::Relaxed);
+        let before = looks(&proxy);
+        assert!(!cloud.usable_for_judge());
+        assert!(!cloud.usable_for_judge());
+        settled(&cloud);
+        assert_eq!(looks(&proxy), before + 1);
+    }
+
+    #[test]
+    fn a_judge_waits_out_a_refusal_and_a_cloud_not_seen_answering() {
+        let proxy = FakeProxy::start(Chat::Refuses(503, "cap"));
+        let cloud = proxy.cloud(None);
+        up(&cloud);
+        let _ = cloud.ask(&messages(), ask(false, 2_000), |_, _| true);
+        let before = looks(&proxy);
+        assert!(!cloud.usable_for_judge());
+        settled(&cloud);
+        assert_eq!(looks(&proxy), before, "a look cannot see past the cap");
+
+        let proxy = FakeProxy::start(Chat::Stream(vec!["Hi"], Duration::ZERO));
+        proxy.healthy.store(false, Ordering::Relaxed);
+        let cloud = proxy.cloud(None);
+        cloud.probe_now();
+        settled(&cloud);
+        let before = looks(&proxy);
+        assert!(!cloud.usable_for_judge());
+        settled(&cloud);
+        assert_eq!(looks(&proxy), before, "an offline laptop's recap is not held up");
     }
 
     #[test]

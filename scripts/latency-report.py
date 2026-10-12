@@ -450,6 +450,20 @@ def main() -> int:
                 f"{restored:>3}/{len(judges):<4} {stopped:>7}"
             )
 
+        # A judge that failed hands its recap to the next model, so the recap
+        # itself still reads "ok". Builds after 0.1.19 keep why it failed.
+        failed = Counter(
+            (judge.get("judge", "?"), judge.get("backend") or "local", judge.get("error") or "(why not kept)")
+            for events in recaps.values()
+            for event in events
+            for judge in event.get("judges", [])
+            if judge.get("status") == "error"
+        )
+        if failed:
+            print("\nJudges that failed:")
+            for (name, backend, why), count in failed.most_common(8):
+                print(f"  {count:>3} x {name} on {backend}: {why}")
+
     if "--turns" in flags:
         turn_rows(turns)
 

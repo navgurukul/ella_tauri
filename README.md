@@ -181,7 +181,9 @@ number on the ladder, 1 to 6.
 - **Every talk quietly aims at one skill** of the learner's step, picked when it
   starts by the phone's priority (need, uncertainty, review due, curriculum
   order, variety, and a cooldown for the latest aims) and kept on the session.
-  Unlike on the phone, the aim is not named in Ella's instructions. Told it,
+  The cloud's model hears it as the phone's does, on the replies after the
+  learner's second answer and every third from there ([Over the
+  internet](#over-the-internet)). The laptop's model never does. Told it,
   Ella's 3B model asked about the skill instead of the topic: aimed at
   collocations ("make a decision, pay attention, take a risk"), the job
   interviewer brought those words into 14 of 15 questions, and aimed at the
@@ -473,8 +475,8 @@ from slow code:
   instructions into the slot took, what was restored from a kept slot and what
   was evaluated
 - `notes`, what happened to the reply on the way (`flagged`,
-  `repeated_question`, `repeat_dropped`, `ledger_break`, `audio_ahead_dropped`
-  and the like), and `tts_path`: `overlapped`, `on_clock` or `failed`
+  `repeated_question`, `repeat_dropped`, `ledger_break`, `audio_ahead_dropped`,
+  `aim_told` and the like), and `tts_path`: `overlapped`, `on_clock` or `failed`
 - `machine`, on Windows: on AC or battery, battery saver, the power mode, the
   CPU's clock and the limit it is held to, how busy the CPU was and how much of
   that was Ella (this process, llama-server, Piper), and the memory free
@@ -486,8 +488,12 @@ the talk counted was kept and on its way to the recap (`scored_ms`), when all
 of it was (`total_ms`), and for each judge (`score`, `correct`, `place`) how
 long it waited for the model and then had it, how often it gave way to a talk,
 the tokens of its instructions restored and the prompt tokens it read, the
-tokens it wrote, and whether its answer was stopped early, and the `machine`
-as for a turn.
+tokens it wrote, whether its answer was stopped early, and for one that failed
+why (`error`: the proxy's refusal, a timeout, the local server's error, but
+never the answer itself, which may quote the learner), and the `machine` as
+for a turn. A judge that failed hands the recap to the next model, so the
+recap's own `status` still says `ok`; `telemetry:report` counts the failed
+judges by reason.
 
 Every line names the build that wrote it (`app_version`) and the launch
 (`launch_id`). Each launch writes an `ella_launch` line, with the operating
@@ -824,7 +830,11 @@ reply, placement check, judges ──► cloud up? ──yes──► Ella Deskt
   (`models/cloud/install-token` beside the weights), and forwards only what Ella
   sends — messages, `max_tokens`, temperature, JSON or not — to
   `deepseek-flash` with thinking off: a model that reasons before it answers
-  starts talking seconds later. Every request is counted against the install
+  starts talking seconds later. `max_tokens` may be up to 4,096, enough to
+  correct a chore's twelve answers of 800 characters, and the laptop never asks
+  for more (`CLOUD_MAX_TOKENS`). At 1,024, every correction of a talk of more
+  than about 470 words was refused, which on 2026-10-12 was 13 of a B1
+  tester's 16 recaps. Every request is counted against the install
   (40 a minute, 800 a day) and every install against the day's spend ($5),
   all set with the function's `ELLA_DESKTOP_LIMITS` secret.
 - **Up or down.** Whether the cloud answers is found out by asking the proxy's
@@ -840,11 +850,27 @@ reply, placement check, judges ──► cloud up? ──yes──► Ella Deskt
   turn's times. A reply cut off partway is written again by the laptop's model,
   and what Piper had of it no longer matches, so it is dropped and the new reply
   said afresh (`PendingSpeech::matching`).
+- **The talk's aim.** The reply to a free talk's second answer, and every third
+  from there, tells the cloud's model the skill the talk aims at, in Ella
+  Mobile's words: ask a question that gives the learner a reason to use it if
+  it follows from what they said, and never name, teach or quiz it
+  (`aim_note`). It is a note of its own, just before the learner's latest
+  answer, so DeepSeek's cache keeps the rest, and the laptop's model, which
+  asked about the skill instead of the topic when told, never sees it. Left
+  untold, nothing in a talk drew the skill out: on 2026-10-12 the cloud found
+  none of their step's skills in 18 of two testers' 24 talks.
 - **Judges** in the cloud wait for nothing: DeepSeek answers many requests at
   once, so they skip `ModelQueue`, the talk open or not. DeepSeek holds an answer
   to JSON but not to a schema, so the correction's one line per answer is
   checked by `read_corrections` rather than enforced; an answer that cannot be
-  read is asked for again, then asked of the laptop.
+  read is asked for again, then asked of the laptop, and one that ran out of
+  tokens goes to the laptop at once. A cloud that went down in the last 10
+  minutes after a slow or broken-off answer is looked at again by the judge
+  itself, which waits for the look (at most 5 s) instead of the replies' 30 s
+  or more: a reply's 5 s deadline catches the cloud slow now and then, and on
+  2026-10-12 two recaps went to a tester's laptop 21 s and 36 s before the
+  cloud was found answering again. A look that finds it still down is not
+  repeated for a minute, so a recap's two judges look once between them.
 - **The laptop stays ready.** Warm-ups, kept slots and errands go on as without
   the cloud, so a request the cloud fails finds the local model as warm as ever.
 - **Measured** from a Mac in India through the proxy, on 2026-10-10, with
@@ -871,8 +897,9 @@ reply, placement check, judges ──► cloud up? ──yes──► Ella Deskt
   out is cut back to its last whole sentence (`whole_sentences`).
 - **Telemetry** marks what the cloud did: `backend: "cloud"` on a turn's
   `llm_runs` and an assessment's `judges`, with `failed` (`unanswered` or `cut`)
-  on a try that gave no reply, and `cloud_fallback` or `cloud_cut` in the turn's
-  `notes`. `telemetry:report` groups turns the cloud answered, and recaps it
+  on a try that gave no reply, `cloud_fallback` or `cloud_cut` in the turn's
+  `notes`, and `aim_told` on a reply that told the cloud the talk's aim. A
+  judge that failed says why in its `error`. `telemetry:report` groups turns the cloud answered, and recaps it
   judged, apart from the laptop's, and says how fast its first word came, how
   much of its prompts DeepSeek had cached, and what its failures cost.
 
