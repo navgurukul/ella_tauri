@@ -18,8 +18,15 @@ export const MAX_BODY_BYTES = 96 * 1024;
 const MAX_MESSAGES = 120;
 const MAX_CONTENT_CHARS = 24_000;
 const MAX_TOTAL_CHARS = 80_000;
-/** The longest answer a laptop asks for: a correction of a long talk. */
-export const MAX_TOKENS = 1024;
+/**
+ * The longest answer a laptop asks for: a correction of a long talk, which
+ * writes every answer again. It asks for twice the learner's words and a
+ * little per answer, so a chore's twelve answers of 800 characters ask for
+ * about 3,800. At 1,024, a B1 learner's six-answer talks of 470-700 words
+ * were refused, and their recaps went without a fix. The laptop never asks
+ * for more than this (`CLOUD_MAX_TOKENS` in cloud_llm.rs).
+ */
+export const MAX_TOKENS = 4096;
 const MAX_STOPS = 4;
 const MAX_STOP_CHARS = 32;
 

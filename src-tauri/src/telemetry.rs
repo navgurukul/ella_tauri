@@ -644,6 +644,12 @@ pub struct JudgeTiming {
     pub backend: &'static str,
     /// `ok`, or `error` for an answer that never came or could not be read.
     pub status: &'static str,
+    /// Why it failed, in a few words, when it did: the cloud's refusal or
+    /// silence, or the local model's error. Never the answer itself, which
+    /// may quote the learner. A 400 from the proxy was told apart from any
+    /// other failure only by reading the laptop's stderr until this was kept.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     /// From asking to the model's first piece: what a talk, or a more urgent
     /// errand, held it back.
     pub waited_ms: u64,

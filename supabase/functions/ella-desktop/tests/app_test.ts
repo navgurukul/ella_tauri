@@ -254,6 +254,16 @@ Deno.test("requests outside Ella's shape are refused before DeepSeek sees them",
   assertEquals(seen.length, 0);
 });
 
+Deno.test("a correction of a chore's twelve long answers may ask for all it needs", async () => {
+  const { chat, token, seen } = proxy(() => ok(ANSWER));
+  // Twelve answers of about 150 words, the most 800 characters hold, as
+  // the laptop budgets a correction: twice the words, 12 an answer, and 24.
+  const budget = 2 * 12 * 150 + 12 * 12 + 24;
+  const response = await chat(await token(), { ...ASK, max_tokens: budget });
+  assertEquals(response.status, 200);
+  assertEquals(seen[0].body.max_tokens, budget);
+});
+
 Deno.test("an install over its minute is refused, and so is everyone past the day's cap", async () => {
   const { chat, token } = proxy(() => ok(ANSWER), { limits: { perMinute: 2 } });
   const mine = await token();

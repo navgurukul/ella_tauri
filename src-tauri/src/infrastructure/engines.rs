@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     domain::{
-        AudioPayload, ChoreContext, Confidence, Direction, EngineComponent, EngineStatus, LedgerSpec,
+        AudioPayload, ChoreContext, Confidence, Direction, EngineComponent, EngineStatus, Focus, LedgerSpec,
         Message, PhonemeSpan, Pitch, PlacementReading, Readiness, Scorable, Speaker, Topic, TurnSignal,
         TutorRequest, WordSpan,
     },
@@ -1338,19 +1338,47 @@ fn ella_topic_prompt(learner_name: &str, topic_id: &str, topic_label: &str, leve
 
 /// A free conversation's instructions: its topic's, at the level the talk is
 /// pitched at. The skill the talk aims at (`Pitch::focus`) is kept on the
-/// session for scoring but not told to the model. Told it, as Ella Mobile
-/// tells its much larger model ("this conversation quietly aims at one skill
-/// ... never name the skill, teach it or quiz them on it"), Ella's 3B model
-/// asked about the skill instead of the topic. Measured on two topics, three
-/// seeds and five aims of the first steps, the same six answers each time:
-/// aimed at collocations ("make a decision, pay attention, take a risk"), the
-/// job interviewer brought the skill's own words into 14 of 15 questions ("a
-/// risk you took on a recent project"); aimed at the present perfect, it said
-/// the skill's example as its own, "I've lived here for 3 years", and asked
-/// how their "work experience connected your past and present work" in 9 of
-/// 15. Without the aim, none of the 30 replies did.
+/// session for scoring but not told to the local model. Told it, as Ella
+/// Mobile tells its much larger model ("this conversation quietly aims at one
+/// skill ... never name the skill, teach it or quiz them on it"), Ella's 3B
+/// model asked about the skill instead of the topic. Measured on two topics,
+/// three seeds and five aims of the first steps, the same six answers each
+/// time: aimed at collocations ("make a decision, pay attention, take a
+/// risk"), the job interviewer brought the skill's own words into 14 of 15
+/// questions ("a risk you took on a recent project"); aimed at the present
+/// perfect, it said the skill's example as its own, "I've lived here for 3
+/// years", and asked how their "work experience connected your past and
+/// present work" in 9 of 15. Without the aim, none of the 30 replies did.
+///
+/// The cloud's model is told, on the replies `aims_at_skill` picks, in a note
+/// of its own (`aim_note`): left untold, nothing in a talk asked for its
+/// skill, and on 2026-10-12 two testers' talks showed none of their step's
+/// skills in 18 of the 24 the cloud scored.
 fn ella_system_prompt(learner_name: &str, topic_id: &str, topic_label: &str, pitch: &Pitch) -> String {
     ella_topic_prompt(learner_name, topic_id, topic_label, &pitch.level)
+}
+
+/// What the cloud's model is told of the talk's aim, in Ella Mobile's words
+/// (`focusBrief`), as a note just before the learner's latest answer. The
+/// local model's prompt, cached in its slot, is the same with or without it.
+fn aim_note(focus: &Focus) -> String {
+    format!(
+        "The learner is on the step \"{}\": {}\n\
+         This talk quietly aims at one skill from it: {}\n\
+         - If it follows naturally from what they just said, ask a question that gives them a \
+         reason to use it. If they have no example to give, leave it and go on with the topic.\n\
+         - Never name the skill, teach it or quiz them on it. The conversation comes first.",
+        focus.step_title, focus.step_focus, focus.skill
+    )
+}
+
+/// Whether the reply to the learner's `turn`-th answer may ask for the talk's
+/// skill: after the second and every third from there, so never two replies
+/// running. Ella Mobile's rule (`aimsAtSkill`): told on every reply, its model
+/// asked for someone's story four times running while the learner said they
+/// had none.
+fn aims_at_skill(turn: u32) -> bool {
+    turn % 3 == 2
 }
 
 /// A character with a setting, a goal the learner can see, and a brief the
@@ -3728,6 +3756,20 @@ struct CloudJudgeRun {
     stopped_early: bool,
 }
 
+/// What a judge's failure says of an answer it could not read. The answer
+/// itself is logged, never kept in the telemetry: it may quote the learner.
+const UNREADABLE: &str = "an answer that could not be read";
+
+/// `why`, cut to the length a judge's telemetry keeps of it.
+fn in_brief(why: &str) -> String {
+    const MOST: usize = 160;
+    let why = why.trim();
+    match why.char_indices().nth(MOST) {
+        Some((end, _)) => format!("{}…", &why[..end]),
+        None => why.to_owned(),
+    }
+}
+
 /// What came of an errand's streamed request.
 enum Answer<T> {
     /// The whole answer, how many prompt tokens the server read for it, and
@@ -4285,6 +4327,16 @@ impl TutorEngine for LocalEngine {
                 json!({"role": "system", "content": note}),
             );
         }
+        // A free talk's aim, for the cloud's model alone (`aim_note`).
+        let aim = match (&request.placement, &request.chore) {
+            (None, None) => request
+                .pitch
+                .focus
+                .as_ref()
+                .filter(|_| aims_at_skill(request.turn))
+                .map(aim_note),
+            _ => None,
+        };
 
         // Sentences are synthesized as the model writes them but held back:
         // Piper's time overlaps the model's, and none of it is heard until the
@@ -4306,7 +4358,7 @@ impl TutorEngine for LocalEngine {
             telemetry::note("no_audio_ahead");
         }
 
-        let first = self.stream_once(&system, &history, None, pipeline.as_mut())?;
+        let first = self.stream_once(&system, &history, None, aim.as_deref(), pipeline.as_mut())?;
         // Only the first generation feeds the speaker; a regenerated reply is
         // said from scratch by the caller. Whatever is still being synthesized
         // carries on while the reply is checked.
@@ -4337,7 +4389,7 @@ impl TutorEngine for LocalEngine {
                 // the model's second one. In the rare case that the second
                 // comes back empty, the caller says the first one itself.
                 drop(pipeline.take());
-                let second = self.stream_once(&system, &history, Some(&corrective), None)?;
+                let second = self.stream_once(&system, &history, Some(&corrective), None, None)?;
                 let (retry_text, _) = take_signal(&second.text);
                 // Once only. Whatever the second asks again is dropped rather
                 // than written a third time: another generation costs the
@@ -4464,7 +4516,7 @@ impl TutorEngine for LocalEngine {
             ledger.spec.unit,
             ledger.current,
         );
-        let second = self.stream_once(&system, &history, Some(&corrective), None)?;
+        let second = self.stream_once(&system, &history, Some(&corrective), None, None)?;
         let (retry_text, retry_signal) = take_signal(&second.text);
         let retry_figure = settled_figure(
             &retry_text,
@@ -4811,18 +4863,20 @@ impl LocalEngine {
         settle: Settle<'_, T>,
     ) -> EllaResult<T> {
         // The cloud answers many requests at once, so its judges wait for
-        // nothing: not a talk, not an errand, not the hold.
-        if let Some(cloud) = self.cloud.as_ref().filter(|cloud| cloud.usable()) {
+        // nothing: not a talk, not an errand, not the hold. One that went
+        // down a moment ago is looked at again first (`usable_for_judge`).
+        if let Some(cloud) = self.cloud.as_ref().filter(|cloud| cloud.usable_for_judge()) {
             let asked = Instant::now();
             let judged = self.judge_cloud(cloud, label, &messages, max_tokens, &read, settle);
-            let (status, run) = match &judged {
-                Ok((_, run)) => ("ok", run.clone()),
-                Err(_) => ("error", CloudJudgeRun::default()),
+            let (status, run, error) = match &judged {
+                Ok((_, run)) => ("ok", run.clone(), None),
+                Err(why) => ("error", CloudJudgeRun::default(), Some(in_brief(why))),
             };
             record_judge(JudgeTiming {
                 judge: name,
                 backend: "cloud",
                 status,
+                error,
                 waited_ms: run.first_word_ms,
                 ms: (asked.elapsed().as_secs_f64() * 1_000.0).round() as u64,
                 attempts: run.attempts,
@@ -4860,6 +4914,8 @@ impl LocalEngine {
         let mut waited = false;
         let mut attempt = 0;
         let mut failure = String::new();
+        // `failure` without the answer it could not read, for the telemetry.
+        let mut reason = String::new();
         let outcome = self.queue.run(Errand::Assess, |errand| {
             let started = Instant::now();
             if !waited {
@@ -4889,7 +4945,10 @@ impl LocalEngine {
                     timing.gave_way += 1;
                     return Step::GaveWay;
                 }
-                Err(error) => return Step::Done(Err(error)),
+                Err(error) => {
+                    reason = error.to_string();
+                    return Step::Done(Err(error));
+                }
             }
             while attempt < 2 {
                 attempt += 1;
@@ -4939,10 +4998,12 @@ impl LocalEngine {
                             return Step::Done(Ok(read));
                         }
                         failure = format!("an answer that could not be read: {}", text.trim());
+                        reason = UNREADABLE.into();
                     }
                     Err(error) => {
                         eprintln!("[LATENCY]     judge> {label}: attempt {attempt} failed after {took_ms:.0}ms: {error}");
                         failure = error.to_string();
+                        reason = failure.clone();
                     }
                 }
             }
@@ -4951,6 +5012,12 @@ impl LocalEngine {
         timing.attempts = attempt;
         timing.ms = (asked.elapsed().as_secs_f64() * 1_000.0).round() as u64;
         timing.status = if matches!(outcome, Some(Ok(_))) { "ok" } else { "error" };
+        if timing.status == "error" {
+            timing.error = Some(match &outcome {
+                None => "Ella is closing".into(),
+                Some(_) => in_brief(&reason),
+            });
+        }
         record_judge(timing);
         outcome.unwrap_or_else(|| Err(EllaError::Engine("Ella is closing.".into())))
     }
@@ -5000,14 +5067,16 @@ impl LocalEngine {
     }
 
     /// One streamed generation. `corrective` is appended as a system turn when
-    /// re-generating after a ledger break. `speech` receives token deltas as
-    /// they land so whole sentences can be synthesized without waiting for the
-    /// model to finish.
+    /// re-generating after a ledger break. `aim`, the talk's skill
+    /// (`aim_note`), goes to the cloud's model alone, just before the learner's
+    /// latest answer. `speech` receives token deltas as they land so whole
+    /// sentences can be synthesized without waiting for the model to finish.
     fn stream_once(
         &self,
         system: &str,
         history: &[Value],
         corrective: Option<&str>,
+        aim: Option<&str>,
         mut speech: Option<&mut SpeechPipeline>,
     ) -> EllaResult<GeneratedReply> {
         let mut messages = vec![json!({"role": "system", "content": system})];
@@ -5048,7 +5117,15 @@ impl LocalEngine {
         let mut cloud_ms = 0.0;
         if let Some(cloud) = self.cloud.as_ref().filter(|cloud| cloud.usable()) {
             let why = if corrective.is_some() { "rewrite" } else { "reply" };
-            match self.stream_cloud(cloud, &messages, why, speech.as_deref_mut()) {
+            let mut asked = messages.clone();
+            if let Some(aim) = aim {
+                asked.insert(
+                    asked.len().saturating_sub(1),
+                    json!({"role": "system", "content": aim}),
+                );
+                telemetry::note("aim_told");
+            }
+            match self.stream_cloud(cloud, &asked, why, speech.as_deref_mut()) {
                 Ok(reply) => return Ok(reply),
                 Err((failed, reason, ms)) => {
                     cloud_ms = ms;
@@ -5349,7 +5426,16 @@ impl LocalEngine {
                     if let Some(value) = json_object_in(&answer.text).as_ref().and_then(read) {
                         return Ok((value, run));
                     }
-                    failure = format!("an answer that could not be read: {}", answer.text.trim());
+                    // Without the answer, which is logged just above: what
+                    // comes back from here is kept in the telemetry.
+                    if answer.cut_short {
+                        // Asked again, it would be cut off again.
+                        return Err(format!(
+                            "{UNREADABLE}, cut off at {} tokens",
+                            max_tokens.min(cloud_llm::CLOUD_MAX_TOKENS)
+                        ));
+                    }
+                    failure = UNREADABLE.into();
                 }
                 Asked::Empty { .. } => failure = "an empty answer".into(),
                 Asked::Unanswered { why, .. } | Asked::Cut { why, .. } => return Err(why),
@@ -8776,6 +8862,82 @@ mod errand_tests {
         assert_eq!(reading.level, "B1");
         assert_eq!(fake.cloud_chats().len(), 1);
         assert!(!fake.completions().is_empty(), "llama-server judged it");
+    }
+
+    #[test]
+    fn the_cloud_hears_a_talks_aim_on_some_replies_and_the_laptop_never() {
+        let fake = FakeLlama::start(pace(5, 5, 4));
+        let engine = fake.engine_with_cloud(Duration::from_secs(60));
+        let focus = Focus {
+            step_title: "Choosing words with more precision and feeling".into(),
+            step_focus: "Picking the word that says exactly what you mean.".into(),
+            skill: "I can express nuanced ideas, not just basic ones.".into(),
+        };
+        let answer = "I had the crispy corn in Barbecue Nation.";
+        let at = |turn: u32| TutorRequest {
+            turn,
+            pitch: Pitch {
+                level: "B2".into(),
+                focus: Some(focus.clone()),
+            },
+            ..after_where(answer)
+        };
+        let told = |seen: &Seen| prompt_text(&seen.body).contains("quietly aims at one skill");
+
+        for turn in 1..=6 {
+            engine.reply(&at(turn)).unwrap();
+        }
+        let aimed: Vec<bool> = fake.cloud_chats().iter().map(told).collect();
+        assert_eq!(aimed, [false, true, false, false, true, false]);
+        // A note of its own, just before the answer it follows.
+        let second = fake.cloud_chats()[1].body["messages"].as_array().unwrap().clone();
+        let [.., note, latest] = second.as_slice() else {
+            panic!("no messages");
+        };
+        assert_eq!(note["role"], "system");
+        assert!(note["content"].as_str().unwrap().contains(&focus.skill));
+        assert_eq!(latest["content"], answer);
+
+        // Never in the placement chat, which asks its own questions.
+        engine
+            .reply(&TutorRequest {
+                placement: Some(crate::domain::PlacementBrief { age: None, closing: false }),
+                ..at(2)
+            })
+            .unwrap();
+        assert!(!told(fake.cloud_chats().last().unwrap()));
+
+        // The laptop, answering in the cloud's place, is never told.
+        fake.cloud_refuses.store(true, Ordering::Relaxed);
+        engine.reply(&at(2)).unwrap();
+        assert_eq!(talk_turns(&fake), 1);
+        assert!(!fake.completions().iter().any(told));
+    }
+
+    #[test]
+    fn a_judge_that_fails_says_why_in_the_assessments_telemetry() {
+        let fake = FakeLlama::start(pace(5, 5, 4));
+        let engine = fake.engine_with_cloud(Duration::from_millis(50));
+        fake.cloud_refuses.store(true, Ordering::Relaxed);
+        let trace = crate::telemetry::AssessmentTrace::begin("placement-1", "placement", 6, None);
+        engine.place("Asha", &placement_chat()).unwrap().unwrap();
+        trace.finish("ok", None);
+        let event = crate::telemetry::written().pop().unwrap();
+        let judges = event["judges"].as_array().unwrap();
+        assert_eq!(judges.len(), 2, "{judges:?}");
+        assert_eq!(
+            (&judges[0]["backend"], &judges[0]["status"]),
+            (&json!("cloud"), &json!("error"))
+        );
+        assert_eq!(judges[0]["error"], "cap: today's spend has reached the cap");
+        assert_eq!(judges[1]["status"], "ok");
+        assert!(judges[1].get("error").is_none(), "{:?}", judges[1]);
+    }
+
+    #[test]
+    fn a_judges_failure_is_kept_in_brief() {
+        assert_eq!(in_brief("  timed out "), "timed out");
+        assert_eq!(in_brief(&"é".repeat(200)), format!("{}…", "é".repeat(160)));
     }
 
     #[test]
