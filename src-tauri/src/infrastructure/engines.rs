@@ -1302,6 +1302,19 @@ fn ella_topic_prompt(learner_name: &str, topic_id: &str, topic_label: &str, leve
          anything new. Ask about one thing at a time, and never ask a question you have \
          already asked — unless they never actually answered it, in which case ask that \
          same one again instead of moving on.\n\n\
+         Before choosing your next question, check what their last answer actually \
+         answered. If it answers your last question, even briefly, do not ask for \
+         the same information again; acknowledge what they said and ask a relevant \
+         next question. If it answers only part of your question, acknowledge the \
+         part they answered and ask only for the missing part. If it does not answer \
+         your question, repeat that same question; if your words were unclear, ask \
+         it in easier words. A short answer is not automatically an unanswered \
+         question. Keep to the topic and ask only one question.\n\n\
+         Use the learner's name only when greeting them at the beginning \
+         of the conversation. After the opening greeting, never use their \
+         name again in any reply or question, even to show warmth or \
+         encouragement. Continue the conversation naturally by responding \
+         directly to what they say, without addressing them by name.\n\n\
          If their answer is very short, take it warmly and ask for one small detail. If \
          you cannot make sense of what they said, say so kindly and ask the same thing \
          in easier words. If they use a Hindi word, carry on in English and use the \
@@ -6281,6 +6294,32 @@ mod ledger_tests {
         );
     }
 
+    #[test]
+    fn a_free_conversation_tracks_whether_the_learner_answered_the_last_question() {
+        let prompt = ella_system_prompt(
+            "Asha",
+            "street-food",
+            "Street food stories",
+            &Pitch::at("A1"),
+        );
+
+        for instruction in [
+            "check what their last answer actually",
+            "do not ask for",
+            "ask a relevant",
+            "ask only for the missing part",
+            "repeat that same question",
+            "not automatically an unanswered",
+            "only when greeting them at the beginning",
+            "never use their name again in any reply or question",
+            "without addressing them by name",
+        ] {
+            assert!(
+                prompt.contains(instruction),
+                "missing answer-tracking guidance: {instruction:?}"
+            );
+        }
+    }
     #[test]
     fn a_free_conversation_is_told_not_to_play_along_with_a_romantic_advance() {
         // A real session had the learner escalate from "go on a date with you" to
