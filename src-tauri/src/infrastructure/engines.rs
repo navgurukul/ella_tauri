@@ -3870,6 +3870,50 @@ pub struct LocalEngine {
     /// warm-ups, kept slots, errands — goes on as though it were not there,
     /// so a request the cloud fails finds the local model as ready as ever.
     cloud: Option<Arc<CloudLlm>>,
+    /// How long a reply waits for the cloud's first word before the laptop's
+    /// model starts reading the conversation too (`HEDGE_AFTER`), and how
+    /// long before it gives the cloud up (`cloud_llm::REPLY_FIRST_WORD`).
+    /// Fields, so tests need not wait seconds.
+    hedge_after: Duration,
+    reply_first_word: Duration,
+}
+
+/// After this long without the cloud's first word, the laptop's model starts
+/// reading the reply's conversation too, as a warm-up does, so that if the
+/// cloud never starts (`cloud_llm::REPLY_FIRST_WORD`, 5 s) the reply the
+/// laptop then writes finds most of its prompt already read. In 146 replies
+/// on 2026-10-12 the cloud's first word took 1.0-1.4 s at the median and
+/// 2.8 s at most; on 2026-10-13 one took 4.4 s. One in 25 never came, and
+/// the laptop then took 5-11 s more on a slow laptop, most of it reading.
+/// A cloud that answers late still answers: the laptop's reading goes on
+/// unheard, and the next reply the laptop writes starts from it.
+const HEDGE_AFTER: Duration = Duration::from_secs(2);
+
+/// The laptop's model reading a reply's conversation while the cloud is slow
+/// to start answering it (`HEDGE_AFTER`).
+#[derive(Default)]
+struct Hedge {
+    state: Mutex<HedgeState>,
+    settled: Condvar,
+}
+
+#[derive(Default)]
+struct HedgeState {
+    /// The cloud has answered or been given up: too late to start.
+    settled: bool,
+    /// The laptop started reading.
+    started: bool,
+}
+
+impl Hedge {
+    /// The cloud has answered, or been given up. Whether the laptop had
+    /// started reading by then.
+    fn settle(&self) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.settled = true;
+        self.settled.notify_all();
+        state.started
+    }
 }
 
 impl LocalEngine {
@@ -3999,6 +4043,8 @@ impl LocalEngine {
             warm_ups: Arc::default(),
             queue: Arc::default(),
             cloud,
+            hedge_after: HEDGE_AFTER,
+            reply_first_word: cloud_llm::REPLY_FIRST_WORD,
         };
         // So the first talk, or a bench's, does not go to the laptop only
         // because the first look at the cloud had not come back yet.
@@ -5134,7 +5180,12 @@ impl LocalEngine {
                 );
                 telemetry::note("aim_told");
             }
-            match self.stream_cloud(cloud, &asked, why, speech.as_deref_mut()) {
+            let hedge = self.hedge(&messages);
+            let answered = self.stream_cloud(cloud, &asked, why, speech.as_deref_mut(), hedge.as_deref());
+            if hedge.is_some_and(|hedge| hedge.settle()) {
+                telemetry::note("laptop_hedged");
+            }
+            match answered {
                 Ok(reply) => return Ok(reply),
                 Err((failed, reason, ms)) => {
                     cloud_ms = ms;
@@ -5305,12 +5356,85 @@ impl LocalEngine {
     /// One reply from the cloud, each piece handed to `speech` as it lands,
     /// as `stream_once` does with the local model's. `Err` says how it failed
     /// (`unanswered` or `cut`), why, and how long that took.
+    /// Has the laptop's model read `messages` into its slot, as a warm-up
+    /// does, if the cloud has not started answering them within
+    /// `hedge_after` (`HEDGE_AFTER`). Counted as a warm-up from the moment it
+    /// starts, so a reply the cloud then fails waits for it rather than
+    /// reading the same prompt beside it. None when there is no laptop model
+    /// to ask.
+    fn hedge(&self, messages: &[Value]) -> Option<Arc<Hedge>> {
+        if self.llama_error.is_some() {
+            return None;
+        }
+        let hedge = Arc::new(Hedge::default());
+        let waiting = Arc::clone(&hedge);
+        let after = self.hedge_after;
+        let warm_ups = Arc::clone(&self.warm_ups);
+        let slots = self.slots.clone();
+        let client = self.client.clone();
+        let url = format!("{}/chat/completions", self.llm_base_url.trim_end_matches('/'));
+        // What the laptop's reply would send, so the reply finds all of it.
+        let body = json!({
+            "model": "local",
+            "messages": messages,
+            "max_tokens": 1,
+            "stream": false,
+            "cache_prompt": true,
+            "id_slot": self.llm_slot,
+        });
+        thread::spawn(move || {
+            let _running = {
+                let deadline = Instant::now() + after;
+                let mut state = waiting.state.lock().unwrap_or_else(PoisonError::into_inner);
+                while !state.settled {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        break;
+                    }
+                    state = waiting
+                        .settled
+                        .wait_timeout(state, deadline - now)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0;
+                }
+                if state.settled {
+                    return;
+                }
+                state.started = true;
+                // Under the lock, so a reply that settles after this waits
+                // for the reading.
+                warm_ups.begin()
+            };
+            eprintln!(
+                "[LATENCY]     llm> no first word from the cloud in {} ms; the laptop reads the conversation too",
+                after.as_millis()
+            );
+            if let Some(slots) = &slots {
+                slots.wait_for_saves();
+            }
+            let started = Instant::now();
+            match client.post(url).json(&body).send() {
+                Ok(response) => {
+                    let body = response.json::<Value>().unwrap_or(Value::Null);
+                    eprintln!(
+                        "[LATENCY]     llm> the laptop read {} prompt tokens in {:.0}ms",
+                        body["timings"]["prompt_n"].as_u64().unwrap_or(0),
+                        started.elapsed().as_secs_f64() * 1_000.0
+                    );
+                }
+                Err(error) => eprintln!("[LATENCY]     llm> the laptop could not read the conversation: {error}"),
+            }
+        });
+        Some(hedge)
+    }
+
     fn stream_cloud(
         &self,
         cloud: &CloudLlm,
         messages: &[Value],
         why: &'static str,
         mut speech: Option<&mut SpeechPipeline>,
+        hedge: Option<&Hedge>,
     ) -> Result<GeneratedReply, (&'static str, String, f64)> {
         let asked = cloud.ask(
             messages,
@@ -5318,9 +5442,13 @@ impl LocalEngine {
                 max_tokens: CLOUD_REPLY_TOKENS,
                 temperature: 0.65,
                 json: false,
-                first_word: cloud_llm::REPLY_FIRST_WORD,
+                first_word: self.reply_first_word,
             },
             |piece, _| {
+                // The first word is in: too late for the laptop to start.
+                if let Some(hedge) = hedge {
+                    hedge.settle();
+                }
                 if let Some(pipeline) = speech.as_deref_mut() {
                     pipeline.push(piece);
                 }
@@ -7976,6 +8104,8 @@ mod errand_tests {
         /// Whether the stand-in for the cloud's proxy, served beside it under
         /// `/ella-desktop/`, refuses every chat as over the day's cap.
         cloud_refuses: Arc<AtomicBool>,
+        /// How long the stand-in's proxy is silent before it answers a chat.
+        cloud_quiet_ms: Arc<AtomicU64>,
         slots: tempfile::TempDir,
         _model: tempfile::NamedTempFile,
     }
@@ -7984,6 +8114,7 @@ mod errand_tests {
         pace: Pace,
         seen: Arc<Mutex<Vec<Seen>>>,
         cloud_refuses: Arc<AtomicBool>,
+        cloud_quiet_ms: Arc<AtomicU64>,
         /// Held while a request is worked on: one at a time.
         slot: Mutex<()>,
         slot_dir: PathBuf,
@@ -8007,10 +8138,12 @@ mod errand_tests {
             let model = tempfile::NamedTempFile::new().unwrap();
             let seen = Arc::new(Mutex::new(Vec::new()));
             let cloud_refuses = Arc::new(AtomicBool::new(false));
+            let cloud_quiet_ms = Arc::new(AtomicU64::new(0));
             let served = Arc::new(Served {
                 pace,
                 seen: Arc::clone(&seen),
                 cloud_refuses: Arc::clone(&cloud_refuses),
+                cloud_quiet_ms: Arc::clone(&cloud_quiet_ms),
                 slot: Mutex::new(()),
                 slot_dir: slots.path().to_path_buf(),
                 model: model.path().display().to_string(),
@@ -8028,6 +8161,7 @@ mod errand_tests {
                 url: format!("http://127.0.0.1:{port}/v1"),
                 seen,
                 cloud_refuses,
+                cloud_quiet_ms,
                 slots,
                 _model: model,
             }
@@ -8072,6 +8206,8 @@ mod errand_tests {
                 warm_ups: Arc::default(),
                 queue: Arc::new(ModelQueue::new(quiet)),
                 cloud: None,
+                hedge_after: HEDGE_AFTER,
+                reply_first_word: cloud_llm::REPLY_FIRST_WORD,
             }
         }
 
@@ -8109,6 +8245,7 @@ mod errand_tests {
                         &json!({"error": "cap", "message": "today's spend has reached the cap"}),
                     ),
                     _ => {
+                        thread::sleep(Duration::from_millis(self.cloud_quiet_ms.load(Ordering::Relaxed)));
                         let judged = body.get("response_format").is_some();
                         let instructions = body["messages"][0]["content"].as_str().unwrap_or_default();
                         let text = match () {
@@ -8938,6 +9075,82 @@ mod errand_tests {
         engine.reply(&at(2)).unwrap();
         assert_eq!(talk_turns(&fake), 1);
         assert!(!fake.completions().iter().any(told));
+    }
+
+    /// The laptop's reads of a conversation that are not replies: warm-ups,
+    /// and the reading a slow cloud sets off.
+    fn readings(fake: &FakeLlama) -> Vec<Seen> {
+        fake.completions()
+            .into_iter()
+            .filter(|seen| seen.body["max_tokens"] == 1 && seen.body["stream"] == false)
+            .collect()
+    }
+
+    #[test]
+    fn a_cloud_slow_to_start_has_the_laptop_read_the_conversation_and_a_quick_one_does_not() {
+        let fake = FakeLlama::start(pace(5, 5, 4));
+        let mut engine = fake.engine_with_cloud(Duration::from_secs(60));
+        engine.hedge_after = Duration::from_millis(50);
+        fake.cloud_quiet_ms.store(400, Ordering::Relaxed);
+        let trace = crate::telemetry::LatencyTrace::new("text");
+        let reply = engine.reply(&after_where("I had pani puri at the station.")).unwrap();
+        trace.finish("ok", None);
+
+        assert_eq!(reply.text, REPLY);
+        assert_eq!(talk_turns(&fake), 0, "the cloud wrote it");
+        let read = readings(&fake);
+        assert_eq!(read.len(), 1, "the laptop read the conversation once");
+        assert_eq!(
+            read[0].body["messages"],
+            fake.cloud_chats()[0].body["messages"],
+            "what the laptop would reply to"
+        );
+        let event = crate::telemetry::written().pop().unwrap();
+        assert!(event["notes"].as_array().unwrap().contains(&json!("laptop_hedged")));
+
+        fake.cloud_quiet_ms.store(0, Ordering::Relaxed);
+        engine.hedge_after = Duration::from_millis(1_500);
+        engine.reply(&after_where("I had pani puri at the station.")).unwrap();
+        thread::sleep(Duration::from_millis(1_700));
+        assert_eq!(readings(&fake).len(), 1, "a cloud that starts in time leaves the laptop alone");
+    }
+
+    #[test]
+    fn a_cloud_that_never_starts_leaves_the_laptop_part_way_through_the_reading() {
+        let fake = FakeLlama::start(pace(5, 5, 4));
+        let mut engine = fake.engine_with_cloud(Duration::from_secs(60));
+        engine.hedge_after = Duration::from_millis(50);
+        engine.reply_first_word = Duration::from_millis(300);
+        fake.cloud_quiet_ms.store(2_000, Ordering::Relaxed);
+        let trace = crate::telemetry::LatencyTrace::new("text");
+        engine.reply(&after_where("I had pani puri at the station.")).unwrap();
+        trace.finish("ok", None);
+
+        let completions = fake.completions();
+        let read = completions
+            .iter()
+            .position(|seen| seen.body["max_tokens"] == 1)
+            .expect("the laptop read the conversation");
+        let replied = completions
+            .iter()
+            .position(|seen| seen.body["stream"] == true)
+            .expect("the laptop replied");
+        assert!(read < replied, "the reply waited for the reading");
+        assert_eq!(completions[read].body["messages"], completions[replied].body["messages"]);
+        let event = crate::telemetry::written().pop().unwrap();
+        let notes = event["notes"].as_array().unwrap();
+        assert!(notes.contains(&json!("cloud_fallback")) && notes.contains(&json!("laptop_hedged")), "{notes:?}");
+    }
+
+    #[test]
+    fn a_laptop_whose_model_did_not_start_is_not_asked_to_read() {
+        let fake = FakeLlama::start(pace(5, 5, 4));
+        let mut engine = fake.engine_with_cloud(Duration::from_secs(60));
+        engine.llama_error = Some("llama-server stopped before it was ready".into());
+        engine.hedge_after = Duration::from_millis(50);
+        fake.cloud_quiet_ms.store(300, Ordering::Relaxed);
+        engine.reply(&after_where("I had pani puri at the station.")).unwrap();
+        assert!(readings(&fake).is_empty());
     }
 
     #[test]

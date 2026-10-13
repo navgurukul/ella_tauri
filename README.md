@@ -873,7 +873,11 @@ reply, placement check, judges ──► cloud up? ──yes──► Ella Deskt
   the same turn goes to the laptop's model, and the time lost is counted in the
   turn's times. A reply cut off partway is written again by the laptop's model,
   and what Piper had of it no longer matches, so it is dropped and the new reply
-  said afresh (`PendingSpeech::matching`).
+  said afresh (`PendingSpeech::matching`). With no first word in 2 s, the
+  laptop's model starts reading the conversation too, as a warm-up does
+  (`HEDGE_AFTER`), so a cloud that never starts leaves it 3 s into the reading
+  rather than at the start; a cloud that answers late still answers, and the
+  laptop's next reply starts from what it read.
 - **The talk's aim.** The reply to a free talk's second answer, and every third
   from there, tells the cloud's model the skill the talk aims at, in Ella
   Mobile's words: ask a question that gives the learner a reason to use it if
@@ -922,7 +926,8 @@ reply, placement check, judges ──► cloud up? ──yes──► Ella Deskt
 - **Telemetry** marks what the cloud did: `backend: "cloud"` on a turn's
   `llm_runs` and an assessment's `judges`, with `failed` (`unanswered` or `cut`)
   on a try that gave no reply, `cloud_fallback` or `cloud_cut` in the turn's
-  `notes`, and `aim_told` on a reply that told the cloud the talk's aim. A
+  `notes`, `aim_told` on a reply that told the cloud the talk's aim, and
+  `laptop_hedged` on one whose slow start had the laptop read along. A
   judge that failed says why in its `error`. `telemetry:report` groups turns the cloud answered, and recaps it
   judged, apart from the laptop's, and says how fast its first word came, how
   much of its prompts DeepSeek had cached, and what its failures cost.
