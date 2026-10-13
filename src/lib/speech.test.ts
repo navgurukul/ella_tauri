@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createSpeechQueue, downsampleToPcm16, speakText } from "./speech";
+import { createSpeechQueue as openQueue, downsampleToPcm16, speakText, type SpeechQueue } from "./speech";
 
 describe("audio conversion", () => {
   it("downsamples float microphone frames to bounded PCM16", () => {
@@ -108,7 +108,19 @@ describe("streamed sentence playback", () => {
    * more than half a second between looks. */
   const look = () => new Promise((resolve) => setTimeout(resolve, 600));
 
+  /** Every queue a test opened. One whose clip never ends keeps its word
+   * highlight looking at the clock, and a look that fires after the file's
+   * window is gone throws "window is not defined" outside any test, which
+   * fails the run although every test passed. */
+  const opened: SpeechQueue[] = [];
+  const createSpeechQueue = (...args: Parameters<typeof openQueue>) => {
+    const queue = openQueue(...args);
+    opened.push(queue);
+    return queue;
+  };
+
   afterEach(() => {
+    for (const queue of opened.splice(0)) queue.cancel();
     vi.restoreAllMocks();
   });
 
