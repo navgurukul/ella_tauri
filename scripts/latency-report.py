@@ -287,11 +287,20 @@ def launches(events):
         power = launch.get("machine") or {}
         if power.get("on_ac") is not None:
             line += "  on AC" if power["on_ac"] else f"  on battery {power.get('battery_pct', '?')}%"
+        install = launch.get("install") or {}
+        if install:
+            line += f"\n      install: {install.get('bundle') or '-'} {install.get('place', '?')}"
+            if install.get("also_at"):
+                line += f"; ANOTHER COPY at {', '.join(install['also_at'])}"
         engine = engines.get(launch.get("launch_id"))
         if engine:
+            expected, build = engine.get("llama_expected"), engine.get("llama_build") or ""
+            stale = expected and build and build != expected and not build.startswith(f"{expected}-")
             line += (
                 f"\n      engine: llama {engine.get('llm_server')}, {engine.get('llama_threads', '-')} threads, "
-                f"build {engine.get('llama_build', '-')}, model {engine.get('llm_model_mb', '-')} MB; "
+                f"build {engine.get('llama_build', '-')}"
+                + (f" (BUILT FOR {expected}: engines from another version)" if stale else "")
+                + f", model {engine.get('llm_model_mb', '-')} MB; "
                 f"stt {engine.get('stt')}; piper {engine.get('piper')}; "
                 f"ready {secs(engine.get('since_launch_ms'))} s after launch"
                 + (f"; error: {engine['error']}" if engine.get("error") else "")

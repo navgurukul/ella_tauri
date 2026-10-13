@@ -11,7 +11,7 @@ use chrono::Utc;
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::{domain::TurnTimings, machine};
+use crate::{domain::TurnTimings, install, machine};
 
 /// The build writing the events. Every release sets it. Telemetry used to
 /// carry no version, so turns had to be matched to releases by when each was
@@ -81,6 +81,7 @@ fn write_launch() {
         header: Header::new("ella_launch", 1),
         computer: machine::describe(),
         machine: machine::state_now(),
+        install: install::describe(),
     });
 }
 
@@ -136,6 +137,9 @@ struct LaunchEvent {
     computer: machine::Description,
     #[serde(skip_serializing_if = "Option::is_none")]
     machine: Option<machine::State>,
+    /// Which installer made this copy, the kind of place it runs from, and
+    /// where else a copy sits: see `install`.
+    install: install::Install,
 }
 
 /// How the engine came up, for the launch's `ella_engine` event.
@@ -150,6 +154,13 @@ pub struct EngineDetails {
     /// started with.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub llama_build: Option<String>,
+    /// The llama.cpp release this build was made to run (`ELLA_LLAMA_TAG` in
+    /// the release workflow), for a server Ella started herself. A
+    /// `llama_build` that does not start with it is an engine folder an
+    /// update did not finish replacing: on 2026-10-13 a tester's 0.1.20 ran
+    /// 0.1.16's b10751 instead of b11405.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llama_expected: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub llm_ctx: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -821,6 +832,7 @@ mod tests {
         assert_eq!(launch["app_version"], APP_VERSION);
         assert!(launch["os"].is_string());
         assert!(launch["cores_logical"].as_u64().unwrap() >= 1);
+        assert_eq!(launch["install"]["place"], "source", "a test runs from target/");
         let engine = events.iter().find(|event| event["event"] == "ella_engine").unwrap();
         assert_eq!(engine["launch_id"], launch["launch_id"], "one launch, one id");
         assert_eq!(engine["llama_threads"], 4);

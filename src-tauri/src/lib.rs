@@ -3,6 +3,7 @@ pub mod curriculum;
 pub mod domain;
 pub mod error;
 pub mod infrastructure;
+mod install;
 mod ipc;
 mod machine;
 pub mod notes;

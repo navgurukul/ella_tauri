@@ -3966,6 +3966,7 @@ impl LocalEngine {
             llm_server,
             llama_threads: (llm_server == "started").then_some(llama_threads),
             llama_build: None,
+            llama_expected: (llm_server == "started").then_some(EXPECTED_LLAMA).flatten(),
             llm_ctx: None,
             llm_model_mb: fs::metadata(models_root.join("llm").join("model.gguf"))
                 .ok()
@@ -4023,6 +4024,14 @@ impl LocalEngine {
             if let Ok(props) = props {
                 details.llama_build = props["build_info"].as_str().map(str::to_owned);
                 details.llm_ctx = props["default_generation_settings"]["n_ctx"].as_u64();
+            }
+        }
+        if let (Some(expected), Some(build)) = (details.llama_expected, details.llama_build.as_deref()) {
+            if !is_build_of(build, expected) {
+                eprintln!(
+                    "[engines] llama-server is {build}, but this Ella was built for {expected}: \
+                     the engine folder is from another version"
+                );
             }
         }
         telemetry::engine_ready(&details);
@@ -5646,6 +5655,15 @@ fn performance_cores() -> Option<usize> {
     Some(num_cpus::get_physical()).filter(|cores| *cores > 0)
 }
 
+/// The llama.cpp release this build was made with, when the release workflow
+/// said (`ELLA_LLAMA_TAG`, which also picks the llama-server it bundles).
+const EXPECTED_LLAMA: Option<&str> = option_env!("ELLA_LLAMA_TAG");
+
+/// Whether llama-server's `build_info` (`b11405-1b43d3116`) is release `tag`.
+fn is_build_of(build: &str, tag: &str) -> bool {
+    build == tag || build.strip_prefix(tag).is_some_and(|rest| rest.starts_with('-'))
+}
+
 fn resolve_engine_root(packaged_engine_root: Option<PathBuf>) -> PathBuf {
     if let Ok(configured) = env::var("ELLA_ENGINE_ROOT") {
         return PathBuf::from(configured);
@@ -5758,6 +5776,14 @@ fn opening_for(topic_id: &str, learner_name: &str) -> String {
 mod tests {
     use super::*;
     use crate::domain::Focus;
+
+    #[test]
+    fn a_llama_build_is_matched_to_its_release_tag() {
+        assert!(is_build_of("b11405-1b43d3116", "b11405"));
+        assert!(is_build_of("b11405", "b11405"));
+        assert!(!is_build_of("b10751-3466812d1", "b11405"), "0.1.16's server under 0.1.20");
+        assert!(!is_build_of("b114050-abc", "b11405"));
+    }
 
     #[test]
     fn llama_gets_a_thread_per_performance_core() {
