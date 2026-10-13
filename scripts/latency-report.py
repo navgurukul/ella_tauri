@@ -218,6 +218,8 @@ def detail_summary(days):
         factor = [f for f in map(canary_factor, pieces) if f is not None]
         queued = sum(1 for piece in pieces if (piece.get("queued_ms") or 0) >= 100)
         engines = Counter(piece.get("engine") for piece in pieces)
+        at_pause = sum(1 for piece in pieces if piece.get("cut") == "pause")
+        tails = [piece["ms"] for piece in pieces if piece.get("part") == "tail" and piece.get("ms") is not None]
         machines = [e["machine"] for e in events if e.get("machine")]
         battery = sum(1 for m in machines if m.get("on_ac") is False)
         saver = sum(1 for m in machines if m.get("battery_saver"))
@@ -256,7 +258,10 @@ def detail_summary(days):
         if pieces:
             speed = f"Canary {median(factor):.2f} s a second of speech, " if factor else ""
             print(
-                f"  speech   {speed}{len(pieces)} pieces, {queued} waited for another; "
+                f"  speech   {speed}{len(pieces)} pieces, {queued} waited for another"
+                + (f", {at_pause} cut at a pause" if at_pause else "")
+                + (f"; the last piece took {fmt(median(tails))} ms (p90 {fmt(pct(tails, 90))})" if tails else "")
+                + "; "
                 + ", ".join(f"{name} {count}" for name, count in engines.most_common())
             )
         if machines:
@@ -287,16 +292,54 @@ def launches(events):
         power = launch.get("machine") or {}
         if power.get("on_ac") is not None:
             line += "  on AC" if power["on_ac"] else f"  on battery {power.get('battery_pct', '?')}%"
+        install = launch.get("install") or {}
+        if install:
+            line += f"\n      install: {install.get('bundle') or '-'} {install.get('place', '?')}"
+            if install.get("also_at"):
+                line += f"; ANOTHER COPY at {', '.join(install['also_at'])}"
         engine = engines.get(launch.get("launch_id"))
         if engine:
+            expected, build = engine.get("llama_expected"), engine.get("llama_build") or ""
+            stale = expected and build and build != expected and not build.startswith(f"{expected}-")
             line += (
                 f"\n      engine: llama {engine.get('llm_server')}, {engine.get('llama_threads', '-')} threads, "
-                f"build {engine.get('llama_build', '-')}, model {engine.get('llm_model_mb', '-')} MB; "
+                f"build {engine.get('llama_build', '-')}"
+                + (f" (BUILT FOR {expected}: engines from another version)" if stale else "")
+                + f", model {engine.get('llm_model_mb', '-')} MB; "
                 f"stt {engine.get('stt')}; piper {engine.get('piper')}; "
                 f"ready {secs(engine.get('since_launch_ms'))} s after launch"
                 + (f"; error: {engine['error']}" if engine.get("error") else "")
             )
         print(line)
+
+
+def updates(events):
+    """What the updater did, and which version each launch followed, in order.
+    Builds after 0.1.20 write both."""
+    rows = []
+    for event in events:
+        at = local(event)
+        when_ = f"{at:%Y-%m-%d %H:%M}" if at else "?"
+        version = event.get("app_version", "?")
+        if event.get("event") == "ella_launch" and event.get("previous_version"):
+            rows.append((event.get("timestamp", ""), f"  {when_} {version:8} launch; the one before ran {event['previous_version']}"))
+        elif event.get("event") == "ella_update":
+            parts = [event.get("step", "?")]
+            if event.get("version"):
+                parts.append(event["version"])
+            if event.get("via"):
+                parts.append(f"via {event['via']}")
+            if event.get("bytes"):
+                parts.append(f"{event['bytes'] / 1_048_576:.0f} MB")
+            if event.get("ms") is not None:
+                parts.append(f"in {secs(event['ms'])} s")
+            if event.get("error"):
+                parts.append(f"error: {event['error']}")
+            rows.append((event.get("timestamp", ""), f"  {when_} {version:8} " + " ".join(parts)))
+    if rows:
+        print("\nUpdates:")
+        for _, row in sorted(rows):
+            print(row)
 
 
 def talks(turns):
@@ -423,6 +466,7 @@ def main() -> int:
 
     detail_summary(days)
     launches(events)
+    updates(events)
 
     if recaps:
         # What the recap waits for after a talk: its skills ("scored"), then

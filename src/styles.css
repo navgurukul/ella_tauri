@@ -3871,4 +3871,34 @@ button.step-row__face:hover .step-row__chevron svg { stroke: var(--ink); }
   cursor: pointer;
 }
 .update-toast__dismiss:hover { color: var(--ink); }
+/* What a version brings, opened from its card: the card grows upwards from
+   the corner, and the list takes a line of its own under the rest. */
+.update-toast { flex-wrap: wrap; }
+/* The words take the room, so the card's buttons keep to its right edge with
+   or without Restart beside them. */
+.update-toast > .setup-strip__text { flex: 1 1 0; }
+.update-toast__whats-new {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--violet);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.update-toast__whats-new:hover { color: var(--violet-deep); text-decoration: underline; }
+.update-toast__notes {
+  flex-basis: 100%;
+  max-height: min(240px, 40vh);
+  overflow-y: auto;
+  margin: 2px 0 0;
+  padding: 0 0 0 50px;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.update-toast__notes li + li { margin-top: 6px; }
 

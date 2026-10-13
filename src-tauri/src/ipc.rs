@@ -10,6 +10,7 @@ use crate::{
     },
     error::EllaResult,
     setup::{Setup, SetupProgress},
+    telemetry::{self, UpdateStep, UPDATE_STEPS},
 };
 
 pub struct AppState(pub Arc<AppService>);
@@ -29,6 +30,35 @@ where
         .await
         .map_err(|error| format!("background task failed: {error}"))?
         .map_err(|error| error.to_string())
+}
+
+/// One of the updater's steps, which run in the window, kept in
+/// latency.jsonl as an `ella_update` event. A step the updater does not name
+/// is dropped rather than written, and its words are kept short.
+#[tauri::command]
+pub fn record_update(
+    step: String,
+    version: Option<String>,
+    ms: Option<u64>,
+    bytes: Option<u64>,
+    via: Option<String>,
+    error: Option<String>,
+) {
+    let Some(step) = UPDATE_STEPS.iter().copied().find(|known| *known == step) else {
+        eprintln!("[update] not an update step: {step:?}");
+        return;
+    };
+    let via = via
+        .as_deref()
+        .and_then(|via| ["restart", "close"].into_iter().find(|known| *known == via));
+    telemetry::update_step(&UpdateStep {
+        step,
+        version: version.map(|version| telemetry::brief(&version, 32)),
+        ms,
+        bytes,
+        via,
+        error: error.map(|error| telemetry::brief(&error, 160)),
+    });
 }
 
 #[tauri::command]

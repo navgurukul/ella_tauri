@@ -3,6 +3,7 @@ pub mod curriculum;
 pub mod domain;
 pub mod error;
 pub mod infrastructure;
+mod install;
 mod ipc;
 mod machine;
 pub mod notes;
@@ -164,6 +165,7 @@ pub fn run() {
             ipc::assess_session,
             ipc::levels,
             ipc::fit_page_zoom,
+            ipc::record_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Ella")

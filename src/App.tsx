@@ -22,6 +22,7 @@ import {
   type ApplyUpdate,
   type UpdateProgress,
 } from "./lib/updates";
+import { markWhatsNewSeen, whatsNewAfterUpdate, type WhatsNew } from "./lib/whatsNew";
 import { levelTone } from "./lib/curriculum";
 import type {
   AppSnapshot,
@@ -102,6 +103,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [update, setUpdate] = useState<UpdateProgress | null>(null);
   const [applyUpdate, setApplyUpdate] = useState<ApplyUpdate | null>(null);
+  // This version's notes, once, after an update: see `whatsNewAfterUpdate`.
+  const [whatsNew, setWhatsNew] = useState<WhatsNew | null>(null);
   const setup = useSetup();
   // Set once the setup screen lets the learner in, and never unset: the gate
   // is for the start of a launch, and must never close again over a talk.
@@ -136,11 +139,24 @@ export default function App() {
   // No Restart while the gate is up: a restart in the middle of the model
   // load is the one moment it costs the learner the most, and closing Ella
   // installs the update just the same.
+  // A new version on its way comes first; what this one brought waits for
+  // the gate, and for the learner to put the other card away.
+  const updated: UpdateProgress | null =
+    whatsNew && !gated
+      ? { stage: "updated", version: whatsNew.version, downloadedBytes: 0, totalBytes: 0, notes: whatsNew.notes }
+      : null;
   const updateToast = (
     <UpdateToast
-      progress={update}
+      progress={update ?? updated}
       onRestart={applyUpdate && !gated ? () => void applyUpdate() : undefined}
-      onDismiss={() => setUpdate(null)}
+      onDismiss={() => {
+        if (update) {
+          setUpdate(null);
+        } else if (whatsNew) {
+          markWhatsNewSeen(whatsNew.version);
+          setWhatsNew(null);
+        }
+      }}
     />
   );
 
@@ -154,6 +170,9 @@ export default function App() {
         setSnapshot(data);
         setScreen(data.learner ? "home" : "onboarding");
         void adoptLegacyAvatarColor(data);
+        void whatsNewAfterUpdate(Boolean(data.learner)).then((shown) => {
+          if (active && shown) setWhatsNew(shown);
+        });
       })
       .catch((reason: unknown) => active && setError(errorMessage(reason)));
     return () => {
@@ -648,7 +667,9 @@ function listItemFor(result: SessionSummary, topicId: string, startedAt?: string
 }
 
 /**
- * A new version downloading behind the app, in the corner and out of the way.
+ * A new version downloading behind the app, in the corner and out of the way,
+ * and, once, what the version just installed brought. "What's new" opens the
+ * version's notes, written for the learner (shared/whats-new.json).
  */
 function UpdateToast({
   progress,
@@ -659,35 +680,49 @@ function UpdateToast({
   onRestart?: () => void;
   onDismiss: () => void;
 }) {
+  const [notesOpen, setNotesOpen] = useState(false);
   if (!progress) return null;
 
   const ready = progress.stage === "ready";
+  const updated = progress.stage === "updated";
+  const notes = progress.notes ?? [];
   const percent =
     progress.totalBytes > 0
       ? Math.min(100, Math.round((progress.downloadedBytes / progress.totalBytes) * 100))
       : null;
-  const detail = ready
-    ? installExitsTheApp()
-      ? "Installs when you close Ella"
-      : "Starts next time you open Ella"
-    : percent !== null
-      ? `Version ${progress.version} — ${percent}%`
-      : `Version ${progress.version}`;
+  const detail = updated
+    ? `Version ${progress.version}`
+    : ready
+      ? installExitsTheApp()
+        ? "Installs when you close Ella"
+        : "Starts next time you open Ella"
+      : percent !== null
+        ? `Version ${progress.version} — ${percent}%`
+        : `Version ${progress.version}`;
 
   return (
     <div className="update-toast" aria-live="polite">
-      {ready ? (
+      {ready || updated ? (
         <CircleCheck className="update-toast__icon" size={20} aria-hidden="true" />
       ) : (
         <LoaderCircle className="update-toast__icon spin" size={20} aria-hidden="true" />
       )}
       <div className="setup-strip__text">
-        <strong>{ready ? "Update ready" : "Updating Ella"}</strong>
+        <strong>{updated ? "Ella is updated" : ready ? "Update ready" : "Updating Ella"}</strong>
         <span>{detail}</span>
+        {notes.length > 0 && (
+          <button
+            className="update-toast__whats-new"
+            aria-expanded={notesOpen}
+            onClick={() => setNotesOpen((open) => !open)}
+          >
+            {notesOpen ? "Hide what’s new" : "What’s new"}
+          </button>
+        )}
       </div>
-      {ready ? (
+      {ready || updated ? (
         <>
-          {onRestart && (
+          {ready && onRestart && (
             <button className="update-toast__restart" onClick={onRestart}>
               Restart
             </button>
@@ -702,6 +737,13 @@ function UpdateToast({
             <span style={{ width: `${percent}%` }} />
           </div>
         )
+      )}
+      {notesOpen && notes.length > 0 && (
+        <ul className="update-toast__notes" aria-label={`What’s new in version ${progress.version}`}>
+          {notes.map((note) => (
+            <li key={note}>{note}</li>
+          ))}
+        </ul>
       )}
     </div>
   );

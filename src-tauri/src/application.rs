@@ -20,7 +20,7 @@ use crate::{
     },
     error::{EllaError, EllaResult},
     infrastructure::{
-        audio::{quietest_cut_index, trim_to_speech, VadOutput},
+        audio::{pause_cut_index, quietest_cut_index, trim_to_speech, VadOutput},
         database::{AssessmentWrite, Database},
         engines::{
             trailing_question, GeneratedReply, NextRecap, NextTalk, SpeechSegment, SpeechSink, TutorEngine,
@@ -96,6 +96,39 @@ impl SpeechSink for TurnSpeech {
 const STREAM_CHUNK_TARGET_SECS: usize = 6;
 const STREAM_CUT_SEARCH_SECS: usize = 3;
 
+/// A pause this long after at least `PAUSE_AFTER_SPEECH_MS` of speech is cut
+/// at once, rather than waiting for 6 s to build up. Most answers end in one
+/// before the learner presses stop, so what is left to transcribe once they
+/// do is the pause, which the VAD skips, and not the last 3-6 s of what they
+/// said: on 2026-10-12/13 that took 0.73 s of a slow laptop's 2.7 s wait, and
+/// 1.5 s at the 90th percentile. A mid-sentence pause is cut too, between
+/// words, which is where `quietest_cut_index` aims anyway.
+const PAUSE_CUT_MS: usize = 600;
+const PAUSE_AFTER_SPEECH_MS: usize = 1_000;
+
+/// The most one answer may hold, in characters. Kept for the laptop's model:
+/// a talk's twelve answers have to fit its 4,096 tokens with Ella's
+/// instructions and replies, and its reading time grows with every word.
+const ANSWER_CHARS: usize = 800;
+
+/// A spoken answer cut back to `ANSWER_CHARS`: to its last whole sentence
+/// that fits, or its last whole word when no sentence ends in time. Typed
+/// answers cannot run over (the box stops at 800), and a learner can edit
+/// them; a spoken one was refused whole, after it had been transcribed, and
+/// on 2026-10-12 a B1 tester lost two 57-second answers that way.
+fn within_answer_limit(transcript: &str) -> Option<String> {
+    let text = transcript.trim();
+    let end = text.char_indices().nth(ANSWER_CHARS)?.0;
+    let fits = &text[..end];
+    let cut = fits
+        .rfind(|c: char| matches!(c, '.' | '?' | '!'))
+        .map(|at| at + 1)
+        .filter(|at| *at >= end / 2)
+        .or_else(|| fits.rfind(char::is_whitespace))
+        .unwrap_or(end);
+    Some(fits[..cut].trim_end().to_owned())
+}
+
 struct StreamChunkOutcome {
     text: String,
     engine: String,
@@ -115,6 +148,8 @@ struct StreamChunkOutcome {
     /// What was left when the learner stopped, rather than a chunk sent
     /// while they spoke.
     tail: bool,
+    /// Cut where the learner paused (`PAUSE_CUT_MS`).
+    at_pause: bool,
 }
 
 impl StreamChunkOutcome {
@@ -129,6 +164,7 @@ impl StreamChunkOutcome {
             queued_ms: self.queued_ms.map(|ms| ms.round() as u64),
             attempts: self.attempts,
             done_ms: trace.offset_ms(self.done),
+            cut: self.at_pause.then_some("pause"),
         }
     }
 }
@@ -743,6 +779,7 @@ impl AppService {
                     queued_ms: transcription.queued_ms.map(|ms| ms.round() as u64),
                     attempts: Some(transcription.attempts),
                     done_ms: trace.offset_ms(Instant::now()),
+                    cut: None,
                 };
                 trace.record_pieces(vec![piece]);
                 trace.stage(
@@ -786,6 +823,7 @@ impl AppService {
                     _ => self.engine.transcribe(&vad.samples, sample_rate)?.text,
                 }
             };
+            let transcript = self.spoken_answer(transcript, &mut trace);
             self.run_turn(session_id, &transcript, &mut trace)
         })();
         finish_turn(outcome, trace)
@@ -863,18 +901,35 @@ impl AppService {
                 stream.pending.len(),
             )
             .max(sample_rate as usize); // never dispatch a sub-second chunk
-            let head = stream.pending.drain(..cut).collect::<Vec<i16>>();
-            let index = stream.chunks.len();
-            let engine = Arc::clone(&self.engine);
-            eprintln!(
-                "[LATENCY]     stt-stream> dispatching chunk {index} (~{:.0} ms audio) while learner is still speaking",
-                head.len() as f64 * 1_000.0 / sample_rate as f64
-            );
-            stream.chunks.push(thread::spawn(move || {
-                transcribe_stream_chunk(&engine, index, head, sample_rate)
-            }));
+            self.dispatch_chunk(stream, cut, false);
+        }
+        let enough = sample_rate as usize * (PAUSE_AFTER_SPEECH_MS + PAUSE_CUT_MS) / 1_000;
+        if stream.pending.len() >= enough {
+            if let Some(cut) =
+                pause_cut_index(&stream.pending, sample_rate, PAUSE_CUT_MS, PAUSE_AFTER_SPEECH_MS)
+            {
+                self.dispatch_chunk(stream, cut, true);
+            }
         }
         Ok(())
+    }
+
+    /// Sends the first `cut` samples of what is pending to speech-to-text on a
+    /// thread of their own, while the learner goes on.
+    fn dispatch_chunk(&self, stream: &mut VoiceStream, cut: usize, at_pause: bool) {
+        let sample_rate = stream.sample_rate;
+        let head = stream.pending.drain(..cut).collect::<Vec<i16>>();
+        let index = stream.chunks.len();
+        let engine = Arc::clone(&self.engine);
+        eprintln!(
+            "[LATENCY]     stt-stream> dispatching chunk {index} (~{:.0} ms audio{}) while learner is still speaking",
+            head.len() as f64 * 1_000.0 / sample_rate as f64,
+            if at_pause { ", cut at a pause" } else { "" }
+        );
+        stream.chunks.push(thread::spawn(move || StreamChunkOutcome {
+            at_pause,
+            ..transcribe_stream_chunk(&engine, index, head, sample_rate)
+        }));
     }
 
     pub fn cancel_voice_stream(&self, stream_id: &str) {
@@ -1023,9 +1078,30 @@ impl AppService {
                     }
                 }
             };
+            let transcript = self.spoken_answer(transcript, &mut trace);
             self.run_turn(&stream.session_id, &transcript, &mut trace)
         })();
         finish_turn(outcome, trace)
+    }
+
+    /// A spoken answer as the turn takes it: cut back to `ANSWER_CHARS`
+    /// rather than refused (`within_answer_limit`), noted as `answer_trimmed`.
+    fn spoken_answer(&self, transcript: String, trace: &mut LatencyTrace) -> String {
+        match within_answer_limit(&transcript) {
+            Some(kept) => {
+                trace.stage(
+                    "stt:trimmed",
+                    &format!(
+                        "answer of {} characters cut to its first {}",
+                        transcript.trim().chars().count(),
+                        kept.chars().count()
+                    ),
+                );
+                trace.note("answer_trimmed");
+                kept
+            }
+            None => transcript,
+        }
     }
 
     fn run_turn(
@@ -1038,7 +1114,7 @@ impl AppService {
         if clean.is_empty() {
             return Err(EllaError::Validation("Say or type something first.".into()));
         }
-        if clean.chars().count() > 800 {
+        if clean.chars().count() > ANSWER_CHARS {
             return Err(EllaError::Validation(
                 "Please keep one answer under 800 characters.".into(),
             ));
@@ -2123,6 +2199,7 @@ fn transcribe_stream_chunk(
             attempts: None,
             done: Instant::now(),
             tail: false,
+            at_pause: false,
         };
     }
     let started = Instant::now();
@@ -2166,6 +2243,7 @@ fn transcribe_stream_chunk(
         attempts,
         done: Instant::now(),
         tail: false,
+        at_pause: false,
     }
 }
 
@@ -4273,6 +4351,69 @@ mod telemetry_tests {
             .rev()
             .find(|event| event["event"] == "ella_turn_latency")
             .expect("a turn event was written")
+    }
+
+    #[test]
+    fn a_long_answer_keeps_its_last_whole_sentence_that_fits() {
+        let sentence = "We went to the old market near the station on Sunday morning. ";
+        let long = sentence.repeat(20);
+        let kept = within_answer_limit(&long).expect("over the limit");
+        assert!(kept.chars().count() <= ANSWER_CHARS);
+        assert!(kept.ends_with("morning."), "a whole sentence: {kept:?}");
+        assert!(kept.chars().count() > ANSWER_CHARS - sentence.len());
+
+        let unpunctuated = "and then we walked ".repeat(60);
+        let kept = within_answer_limit(&unpunctuated).unwrap();
+        assert!(kept.chars().count() <= ANSWER_CHARS && kept.ends_with("walked"), "a whole word: {kept:?}");
+
+        assert_eq!(within_answer_limit("I like samosas."), None, "inside the limit");
+        assert_eq!(within_answer_limit(&"é".repeat(ANSWER_CHARS)), None);
+        assert!(within_answer_limit(&"é".repeat(ANSWER_CHARS + 1)).is_some());
+    }
+
+    #[test]
+    fn a_spoken_answer_over_the_limit_is_kept_cut_back_and_says_so() {
+        let service = AppService::new(Database::in_memory().unwrap(), Box::new(Ears));
+        service.save_learner("Asha", Some(14)).unwrap();
+        let session = service.start_session("street-food").unwrap();
+        let mut trace = LatencyTrace::new("voice");
+        let long = "We went to the old market near the station on Sunday morning. ".repeat(20);
+        let kept = service.spoken_answer(long, &mut trace);
+        assert!(kept.chars().count() <= ANSWER_CHARS);
+        let turn = service.run_turn(&session.id, &kept, &mut trace).unwrap();
+        assert_eq!(turn.learner_message.content, kept);
+        trace.finish("ok", None);
+        let event = last_turn();
+        assert!(event["notes"].as_array().unwrap().contains(&serde_json::json!("answer_trimmed")));
+    }
+
+    #[test]
+    fn what_was_said_before_a_pause_is_transcribed_before_the_learner_stops() {
+        let service = AppService::new(Database::in_memory().unwrap(), Box::new(Ears));
+        service.save_learner("Asha", Some(14)).unwrap();
+        let session = service.start_session("street-food").unwrap();
+        let sample_rate = 16_000;
+        let stream = service.begin_voice_stream(&session.id).unwrap();
+        // Two seconds said and a second and a half of quiet, in the window's
+        // half-second pushes, then a moment more of quiet with the press.
+        let mut heard = tone(2, sample_rate);
+        heard.extend(vec![0_i16; sample_rate as usize * 3 / 2]);
+        for push in heard.chunks(sample_rate as usize / 2) {
+            service.push_voice_stream(&stream, push.to_vec(), sample_rate).unwrap();
+        }
+        service
+            .finish_voice_stream_turn(&stream, vec![0; sample_rate as usize / 2], sample_rate, None)
+            .unwrap();
+
+        let event = last_turn();
+        let pieces = event["stt_pieces"].as_array().unwrap();
+        assert_eq!(pieces.len(), 2, "{pieces:?}");
+        assert_eq!((&pieces[0]["part"], &pieces[0]["cut"]), (&serde_json::json!("background"), &serde_json::json!("pause")));
+        assert_eq!(pieces[0]["words"], 3);
+        let said = pieces[0]["audio_ms"].as_u64().unwrap();
+        assert!((2_000..2_400).contains(&said), "the speech and a little after: {said} ms");
+        assert_eq!((&pieces[1]["part"], &pieces[1]["engine"]), (&serde_json::json!("tail"), &serde_json::json!("silence")));
+        assert_eq!(event["learner_words"], 3);
     }
 
     #[test]

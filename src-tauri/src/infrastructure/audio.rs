@@ -117,6 +117,44 @@ pub fn quietest_cut_index(
     best_index + frame_len / 2
 }
 
+/// Where to cut the audio heard so far when it ends in a pause, so that the
+/// speech before the pause can be transcribed while the learner is quiet:
+/// just after the last speech, keeping the quiet after it that the VAD keeps
+/// (`POST_ROLL_MS`). None unless at least `min_speech_ms` of speech (first
+/// voiced frame to last) is followed by at least `min_pause_ms` of quiet.
+///
+/// The noise floor is a low percentile of the frames rather than the opening
+/// ones `trim_to_speech` uses, because audio cut out of a stream may open
+/// mid-word.
+pub fn pause_cut_index(
+    samples: &[i16],
+    sample_rate: u32,
+    min_pause_ms: usize,
+    min_speech_ms: usize,
+) -> Option<usize> {
+    if sample_rate == 0 || samples.is_empty() {
+        return None;
+    }
+    let frame_len = ((sample_rate as usize * FRAME_MS) / 1_000).max(1);
+    let levels = samples.chunks(frame_len).map(rms).collect::<Vec<_>>();
+    let peak = levels.iter().copied().fold(0.0_f64, f64::max);
+    if peak < MIN_SPEECH_RMS {
+        return None;
+    }
+    let mut ordered = levels.clone();
+    ordered.sort_by(|left, right| left.total_cmp(right));
+    let noise_floor = ordered[ordered.len() / 10];
+    let threshold = (noise_floor * 2.5).max(MIN_SPEECH_RMS).min(peak * 0.65);
+    let first = levels.iter().position(|level| *level >= threshold)?;
+    let last = levels.iter().rposition(|level| *level >= threshold)?;
+    let speech_ms = (last + 1 - first) * FRAME_MS;
+    let quiet_ms = (levels.len() - 1 - last) * FRAME_MS;
+    if speech_ms < min_speech_ms || quiet_ms < min_pause_ms {
+        return None;
+    }
+    Some(((last + 1 + POST_ROLL_MS / FRAME_MS) * frame_len).min(samples.len()))
+}
+
 pub fn pcm16_wav(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {
     let mut pcm = Vec::with_capacity(samples.len() * 2);
     for sample in samples {
@@ -149,6 +187,37 @@ pub fn raw_pcm_to_wav(pcm: &[u8], sample_rate: u32, channels: u16) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ms` of a tone loud enough to be speech, then `quiet_ms` of room noise.
+    fn said_then_quiet(ms: usize, quiet_ms: usize) -> Vec<i16> {
+        let speech = (0..16 * ms).map(|index| if index % 32 < 16 { 3_000 } else { -3_000 });
+        let room = (0..16 * quiet_ms).map(|index| if index % 7 == 0 { 40 } else { -40 });
+        speech.chain(room).collect()
+    }
+
+    #[test]
+    fn a_pause_after_enough_speech_is_cut_just_after_the_speech() {
+        let samples = said_then_quiet(1_500, 700);
+        let cut = pause_cut_index(&samples, 16_000, 600, 1_000).expect("a pause");
+        // 1.5 s of speech and the VAD's 180 ms after it, to a 20 ms frame.
+        assert_eq!(cut, 16 * (1_500 + 180));
+    }
+
+    #[test]
+    fn no_cut_in_a_short_pause_after_too_little_speech_or_in_silence() {
+        assert_eq!(pause_cut_index(&said_then_quiet(1_500, 400), 16_000, 600, 1_000), None, "pause too short");
+        assert_eq!(pause_cut_index(&said_then_quiet(600, 900), 16_000, 600, 1_000), None, "one word");
+        assert_eq!(pause_cut_index(&said_then_quiet(0, 2_000), 16_000, 600, 1_000), None, "silence");
+        assert_eq!(pause_cut_index(&said_then_quiet(2_000, 0), 16_000, 600, 1_000), None, "still talking");
+    }
+
+    #[test]
+    fn a_cut_after_quiet_that_opened_the_audio_still_needs_the_speech() {
+        let mut samples = said_then_quiet(0, 800);
+        samples.extend(said_then_quiet(1_200, 700));
+        let cut = pause_cut_index(&samples, 16_000, 600, 1_000).expect("a pause");
+        assert_eq!(cut, 16 * (800 + 1_200 + 180));
+    }
 
     #[test]
     fn vad_trims_silence_but_keeps_roll_around_speech() {

@@ -466,7 +466,10 @@ from slow code:
   (`background`) or after (`tail`), with its audio, the engine that heard it,
   its time, how long it queued behind another piece for Canary, Canary's
   attempts, and when it was done on the turn's clock (`done_ms`, below zero
-  while they were still speaking)
+  while they were still speaking). The window sends the audio every half
+  second; a piece goes once 6 s has built up, or as soon as the learner
+  pauses for 600 ms after at least a second of speech (`cut: "pause"`), so
+  that what is left when they stop is mostly that pause, which the VAD skips
 - `llm_runs`: each generation (`reply`, or a `rewrite`), with the prompt tokens
   and how many the server evaluated rather than took from its cache, its own
   time for them, the tokens written and the time for those, how long the
@@ -476,7 +479,10 @@ from slow code:
   was evaluated
 - `notes`, what happened to the reply on the way (`flagged`,
   `repeated_question`, `repeat_dropped`, `ledger_break`, `audio_ahead_dropped`,
-  `aim_told` and the like), and `tts_path`: `overlapped`, `on_clock` or `failed`
+  `aim_told` and the like, and `answer_trimmed` for a spoken answer over 800
+  characters, kept to its last whole sentence that fits rather than refused;
+  the mic asks the learner to wrap up 45 s after it first hears them), and
+  `tts_path`: `overlapped`, `on_clock` or `failed`
 - `machine`, on Windows: on AC or battery, battery saver, the power mode, the
   CPU's clock and the limit it is held to, how busy the CPU was and how much of
   that was Ella (this process, llama-server, Piper), and the memory free
@@ -501,6 +507,25 @@ system, CPU, cores and memory, and an `ella_engine` line once the model is up,
 with llama.cpp's build and threads, the model's size, the speech-to-text
 engines and how long the launch took to get there.
 
+The launch also says which copy of Ella it is (`install`): the installer that
+made it (`nsis`, `msi`, `app`), the kind of place it runs from (`per_user`,
+`per_machine`, `applications`, `disk_image`, `source`), and `also_at`, where
+another copy sits. Never a path, which holds the user's name. On Windows the
+NSIS installer installs for the user and the MSI for the machine; each updates
+only itself and both write the same app data, so two copies taking turns
+otherwise read as one. `previous_version` is the version the launch before
+ran, when it was another: an update that went through, one that went back, or
+two copies taking turns. `ella_engine` adds `llama_expected`, the llama.cpp
+release the build was made for (`ELLA_LLAMA_TAG` in the release workflow), so
+an engine folder an update did not finish replacing shows.
+
+The updater, which runs in the window, writes an `ella_update` line at each
+step (`step`): `up_to_date`, `found` or `check_failed` once a launch, then
+`downloaded` or `download_failed` with the bytes that arrived, then on a Mac
+`installed`, or on Windows `installing` (`via` the toast's `restart` or the
+window's `close`) or `install_failed`, with the `version` on offer, how long
+the step took and, for a failure, why.
+
 The lines are kept in `telemetry/latency.jsonl` in the app's data folder, on
 every laptop. `npm run telemetry:report -- <path>` prints each day's medians and
 95th percentiles, including when Ella started speaking ("speaks"); a log from
@@ -511,8 +536,10 @@ first replies were cold, how Canary kept up, and how the computer was powered
 and how busy it was with other things. `--turns` also prints every turn, talk
 by talk. A talk's first turn is the one that waits for the talk's instructions
 to be evaluated, and shows it in its `llm_ttft_ms`. The recaps follow, by day:
-when the skills were on screen ("scored") and when all of it was. The report
-reads a file saved through PowerShell's `>`, which is UTF-16.
+when the skills were on screen ("scored") and when all of it was. Launches
+are marked when another copy is installed or the llama-server is another
+build's, and the updater's steps and version changes follow as a timeline.
+The report reads a file saved through PowerShell's `>`, which is UTF-16.
 
 ## Latency on laptops
 
@@ -754,6 +781,16 @@ interrupt, and applies what it finds
 against the public key in `tauri.conf.json` is discarded and the installed
 version keeps running.
 
+**What's new.** Before tagging, add the version's lines to
+[`shared/whats-new.json`](shared/whats-new.json): what changed for the
+learner, in plain words a learner of English can read, never how (no
+telemetry, no internals). The workflow turns them into the release's body
+(`scripts/release-notes.mjs`), which tauri-action also writes into
+`latest.json` as `notes`. The update card then offers "What's new" for the
+version it is downloading, and a learner who has just updated sees "Ella is
+updated", with the same lines, once ([`src/lib/whatsNew.ts`](src/lib/whatsNew.ts)).
+A version with no lines gets no button.
+
 The private half of that key is **not** in the repository. It lives in the
 `TAURI_SIGNING_PRIVATE_KEY` repository secret and in `~/.ella-updater/` on the
 machine that generated it. Losing it means no existing install can ever be
@@ -843,13 +880,20 @@ reply, placement check, judges ──► cloud up? ──yes──► Ella Deskt
   connected. A request it fails sends the requests after it to the laptop for
   30 s, doubled each time it is found still down, up to 5 minutes; a minute when
   it says it is busy, 5 minutes when it has no key, no balance or no budget
-  left today. Each change is an `ella_cloud` line in the telemetry.
+  left today. The reply that finds the wait over has the proxy looked at and
+  waits up to 1.5 s for the answer (`REPLY_LOOK`), so it goes to the cloud if
+  the cloud is back, rather than to the laptop while the look comes back.
+  Each change is an `ella_cloud` line in the telemetry.
 - **A reply** goes to the cloud while it is up, and its sentences go to Piper as
   they arrive, as the local model's do. With no first word in 5 s, or a refusal,
   the same turn goes to the laptop's model, and the time lost is counted in the
   turn's times. A reply cut off partway is written again by the laptop's model,
   and what Piper had of it no longer matches, so it is dropped and the new reply
-  said afresh (`PendingSpeech::matching`).
+  said afresh (`PendingSpeech::matching`). With no first word in 2 s, the
+  laptop's model starts reading the conversation too, as a warm-up does
+  (`HEDGE_AFTER`), so a cloud that never starts leaves it 3 s into the reading
+  rather than at the start; a cloud that answers late still answers, and the
+  laptop's next reply starts from what it read.
 - **The talk's aim.** The reply to a free talk's second answer, and every third
   from there, tells the cloud's model the skill the talk aims at, in Ella
   Mobile's words: ask a question that gives the learner a reason to use it if
@@ -898,7 +942,8 @@ reply, placement check, judges ──► cloud up? ──yes──► Ella Deskt
 - **Telemetry** marks what the cloud did: `backend: "cloud"` on a turn's
   `llm_runs` and an assessment's `judges`, with `failed` (`unanswered` or `cut`)
   on a try that gave no reply, `cloud_fallback` or `cloud_cut` in the turn's
-  `notes`, and `aim_told` on a reply that told the cloud the talk's aim. A
+  `notes`, `aim_told` on a reply that told the cloud the talk's aim, and
+  `laptop_hedged` on one whose slow start had the laptop read along. A
   judge that failed says why in its `error`. `telemetry:report` groups turns the cloud answered, and recaps it
   judged, apart from the laptop's, and says how fast its first word came, how
   much of its prompts DeepSeek had cached, and what its failures cost.

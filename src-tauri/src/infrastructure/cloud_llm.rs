@@ -55,6 +55,14 @@ const BACKOFF_MIN: Duration = Duration::from_secs(30);
 const BACKOFF_MAX: Duration = Duration::from_secs(300);
 /// Left alone after the proxy says it, or DeepSeek, is too busy.
 const BUSY_WAIT: Duration = Duration::from_secs(60);
+/// How long the reply that finds the cloud's wait over waits for the look at
+/// the proxy it sets off (`usable_for_reply`). That reply used to go to the
+/// laptop at once: in all six recoveries testers' laptops saw on
+/// 2026-10-12/13, the cloud was found answering 0.1-1.4 s later, while the
+/// laptop was still reading that turn, for 26 s and 20 s on a slow laptop
+/// when it opened a talk. A laptop that is really offline pays it once a wait,
+/// and the wait doubles to 5 minutes.
+pub const REPLY_LOOK: Duration = Duration::from_millis(1_500);
 /// A judge looks at a cloud that went down this recently itself, rather than
 /// wait out its backoff (`usable_for_judge`)...
 const JUDGE_LOOKS_FOR: Duration = Duration::from_secs(600);
@@ -246,6 +254,28 @@ impl CloudLlm {
         while !self.health().known && started.elapsed() < limit {
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Whether a reply should go to the cloud: `usable`, except that the reply
+    /// that finds the cloud's wait over waits up to `limit` (`REPLY_LOOK`)
+    /// for the look it sets off, instead of going to the laptop at once.
+    pub fn usable_for_reply(self: &Arc<Self>, limit: Duration) -> bool {
+        let due = {
+            let health = self.health();
+            if health.up {
+                return true;
+            }
+            Instant::now() >= health.retry_at
+        };
+        if !due {
+            return false;
+        }
+        self.probe_now();
+        let deadline = Instant::now() + limit;
+        while self.probing.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        self.health().up
     }
 
     /// Whether a request should go to the cloud. While the cloud is down this
@@ -1103,6 +1133,37 @@ mod tests {
             .iter()
             .filter(|path| path.ends_with("/healthz"))
             .count()
+    }
+
+    #[test]
+    fn the_reply_that_finds_the_wait_over_waits_for_its_look_and_goes_to_the_cloud() {
+        let proxy = FakeProxy::start(Chat::Silent(Duration::from_secs(3)));
+        let cloud = proxy.cloud(None);
+        up(&cloud);
+        let _ = cloud.ask(&messages(), ask(false, 300), |_, _| true);
+        let before = looks(&proxy);
+        assert!(!cloud.usable_for_reply(REPLY_LOOK), "inside its wait");
+        assert_eq!(looks(&proxy), before, "no look inside the wait");
+
+        cloud.health().retry_at = Instant::now();
+        assert!(cloud.usable_for_reply(REPLY_LOOK), "the look found it answering");
+        assert_eq!(looks(&proxy), before + 1);
+    }
+
+    #[test]
+    fn a_reply_whose_look_finds_the_cloud_still_down_goes_to_the_laptop() {
+        let proxy = FakeProxy::start(Chat::Silent(Duration::from_secs(3)));
+        let cloud = proxy.cloud(None);
+        up(&cloud);
+        let _ = cloud.ask(&messages(), ask(false, 300), |_, _| true);
+        proxy.healthy.store(false, Ordering::Relaxed);
+        cloud.health().retry_at = Instant::now();
+        assert!(!cloud.usable_for_reply(REPLY_LOOK));
+        // The look that failed starts the next wait: the reply after it does
+        // not look again.
+        let before = looks(&proxy);
+        assert!(!cloud.usable_for_reply(REPLY_LOOK));
+        assert_eq!(looks(&proxy), before);
     }
 
     #[test]
