@@ -308,6 +308,35 @@ def launches(events):
         print(line)
 
 
+def updates(events):
+    """What the updater did, and which version each launch followed, in order.
+    Builds after 0.1.20 write both."""
+    rows = []
+    for event in events:
+        at = local(event)
+        when_ = f"{at:%Y-%m-%d %H:%M}" if at else "?"
+        version = event.get("app_version", "?")
+        if event.get("event") == "ella_launch" and event.get("previous_version"):
+            rows.append((event.get("timestamp", ""), f"  {when_} {version:8} launch; the one before ran {event['previous_version']}"))
+        elif event.get("event") == "ella_update":
+            parts = [event.get("step", "?")]
+            if event.get("version"):
+                parts.append(event["version"])
+            if event.get("via"):
+                parts.append(f"via {event['via']}")
+            if event.get("bytes"):
+                parts.append(f"{event['bytes'] / 1_048_576:.0f} MB")
+            if event.get("ms") is not None:
+                parts.append(f"in {secs(event['ms'])} s")
+            if event.get("error"):
+                parts.append(f"error: {event['error']}")
+            rows.append((event.get("timestamp", ""), f"  {when_} {version:8} " + " ".join(parts)))
+    if rows:
+        print("\nUpdates:")
+        for _, row in sorted(rows):
+            print(row)
+
+
 def talks(turns):
     """Turns grouped into talks: by the talk they name, or by the gaps between
     them for events from before turns named it."""
@@ -432,6 +461,7 @@ def main() -> int:
 
     detail_summary(days)
     launches(events)
+    updates(events)
 
     if recaps:
         # What the recap waits for after a talk: its skills ("scored"), then

@@ -72,16 +72,34 @@ pub fn persist_to(directory: PathBuf) {
         }
         Err(error) => eprintln!("[LATENCY] telemetry dir {} unavailable: {error}", directory.display()),
     }
-    write_launch();
+    write_launch(previous_version(&directory.join("last_version")));
+}
+
+/// The version the last launch ran, when it was another, and this one's kept
+/// in its place. Every copy of Ella on a computer writes to the same app
+/// data, so this is what shows an update that went through, one that went
+/// backwards, or two installed copies taking turns.
+fn previous_version(file: &std::path::Path) -> Option<String> {
+    let previous = fs::read_to_string(file)
+        .ok()
+        .map(|text| text.trim().chars().take(32).collect::<String>())
+        .filter(|text| !text.is_empty());
+    if previous.as_deref() != Some(APP_VERSION) {
+        if let Err(error) = fs::write(file, APP_VERSION) {
+            eprintln!("[LATENCY] could not keep this launch's version in {}: {error}", file.display());
+        }
+    }
+    previous.filter(|previous| previous != APP_VERSION)
 }
 
 /// The launch's `ella_launch` event: the build, and the computer it runs on.
-fn write_launch() {
+fn write_launch(previous_version: Option<String>) {
     write_event(&LaunchEvent {
         header: Header::new("ella_launch", 1),
         computer: machine::describe(),
         machine: machine::state_now(),
         install: install::describe(),
+        previous_version,
     });
 }
 
@@ -140,6 +158,9 @@ struct LaunchEvent {
     /// Which installer made this copy, the kind of place it runs from, and
     /// where else a copy sits: see `install`.
     install: install::Install,
+    /// The version the launch before this one ran, when it was another.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_version: Option<String>,
 }
 
 /// How the engine came up, for the launch's `ella_engine` event.
@@ -214,6 +235,75 @@ pub fn cloud_changed(up: bool, reason: &str) {
         header: Header::new("ella_cloud", 1),
         up,
         reason,
+    });
+}
+
+/// What the updater, which runs in the window, did at one step.
+#[derive(Debug, Default, Serialize)]
+pub struct UpdateStep {
+    /// One of `UPDATE_STEPS`.
+    pub step: &'static str,
+    /// The version on offer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// How long the step took: the check, or the download.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ms: Option<u64>,
+    /// How much of the download arrived.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    /// What set an install going on Windows: `restart`, the toast's button,
+    /// or `close`, the window closing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<&'static str>,
+    /// Why the step failed, in brief.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// The updater's steps, in order:
+/// - `up_to_date`, `found` or `check_failed`, once a launch;
+/// - `downloaded` or `download_failed`;
+/// - `installed` on macOS, which swaps the new copy in for the next launch;
+/// - `installing` on Windows, just before the installer runs and closes Ella,
+///   or `install_failed`.
+///
+/// The next launch's `previous_version` says whether an install went through.
+pub const UPDATE_STEPS: &[&str] = &[
+    "up_to_date",
+    "found",
+    "check_failed",
+    "downloaded",
+    "download_failed",
+    "installed",
+    "installing",
+    "install_failed",
+];
+
+/// `text` trimmed and cut to at most `most` characters, an ellipsis marking a
+/// cut.
+pub fn brief(text: &str, most: usize) -> String {
+    let text = text.trim();
+    match text.char_indices().nth(most) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_owned(),
+    }
+}
+
+/// Writes an `ella_update` event. Until these, a tester who stayed on an old
+/// version for ten launches with a new one out left no trace of why: no
+/// network, a download cut short by closing, or an installer that failed.
+pub fn update_step(step: &UpdateStep) {
+    #[derive(Serialize)]
+    struct UpdateEvent<'a> {
+        #[serde(flatten)]
+        header: Header,
+        #[serde(flatten)]
+        step: &'a UpdateStep,
+    }
+    write_event(&UpdateEvent {
+        header: Header::new("ella_update", 1),
+        step,
     });
 }
 
@@ -819,7 +909,7 @@ mod tests {
 
     #[test]
     fn a_launch_says_what_it_runs_on_and_the_engine_how_it_came_up() {
-        write_launch();
+        write_launch(Some("0.1.19".into()));
         engine_ready(&EngineDetails {
             llm_server: "started",
             llama_threads: Some(4),
@@ -833,11 +923,43 @@ mod tests {
         assert!(launch["os"].is_string());
         assert!(launch["cores_logical"].as_u64().unwrap() >= 1);
         assert_eq!(launch["install"]["place"], "source", "a test runs from target/");
+        assert_eq!(launch["previous_version"], "0.1.19");
         let engine = events.iter().find(|event| event["event"] == "ella_engine").unwrap();
         assert_eq!(engine["launch_id"], launch["launch_id"], "one launch, one id");
         assert_eq!(engine["llama_threads"], 4);
         assert!(engine["since_launch_ms"].is_u64());
         assert!(engine.get("error").is_none());
+    }
+
+    #[test]
+    fn a_launch_names_the_version_before_it_only_when_it_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("last_version");
+        assert_eq!(previous_version(&file), None, "a first launch has none");
+        assert_eq!(fs::read_to_string(&file).unwrap(), APP_VERSION);
+        assert_eq!(previous_version(&file), None, "the same version again");
+        fs::write(&file, "0.1.16\n").unwrap();
+        assert_eq!(previous_version(&file).as_deref(), Some("0.1.16"));
+        assert_eq!(fs::read_to_string(&file).unwrap(), APP_VERSION);
+    }
+
+    #[test]
+    fn an_update_step_is_written_with_only_what_it_has() {
+        update_step(&UpdateStep {
+            step: "download_failed",
+            version: Some("0.1.21".into()),
+            ms: Some(4_200),
+            bytes: Some(1_048_576),
+            error: Some("error sending request".into()),
+            ..UpdateStep::default()
+        });
+        let event = written().pop().unwrap();
+        assert_eq!(event["event"], "ella_update");
+        assert_eq!(event["step"], "download_failed");
+        assert_eq!(event["version"], "0.1.21");
+        assert_eq!(event["bytes"], 1_048_576);
+        assert!(event.get("via").is_none());
+        assert_eq!(event["app_version"], APP_VERSION);
     }
 
     #[test]

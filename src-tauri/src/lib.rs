@@ -165,6 +165,7 @@ pub fn run() {
             ipc::assess_session,
             ipc::levels,
             ipc::fit_page_zoom,
+            ipc::record_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Ella")

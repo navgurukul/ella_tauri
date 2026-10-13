@@ -501,6 +501,25 @@ system, CPU, cores and memory, and an `ella_engine` line once the model is up,
 with llama.cpp's build and threads, the model's size, the speech-to-text
 engines and how long the launch took to get there.
 
+The launch also says which copy of Ella it is (`install`): the installer that
+made it (`nsis`, `msi`, `app`), the kind of place it runs from (`per_user`,
+`per_machine`, `applications`, `disk_image`, `source`), and `also_at`, where
+another copy sits. Never a path, which holds the user's name. On Windows the
+NSIS installer installs for the user and the MSI for the machine; each updates
+only itself and both write the same app data, so two copies taking turns
+otherwise read as one. `previous_version` is the version the launch before
+ran, when it was another: an update that went through, one that went back, or
+two copies taking turns. `ella_engine` adds `llama_expected`, the llama.cpp
+release the build was made for (`ELLA_LLAMA_TAG` in the release workflow), so
+an engine folder an update did not finish replacing shows.
+
+The updater, which runs in the window, writes an `ella_update` line at each
+step (`step`): `up_to_date`, `found` or `check_failed` once a launch, then
+`downloaded` or `download_failed` with the bytes that arrived, then on a Mac
+`installed`, or on Windows `installing` (`via` the toast's `restart` or the
+window's `close`) or `install_failed`, with the `version` on offer, how long
+the step took and, for a failure, why.
+
 The lines are kept in `telemetry/latency.jsonl` in the app's data folder, on
 every laptop. `npm run telemetry:report -- <path>` prints each day's medians and
 95th percentiles, including when Ella started speaking ("speaks"); a log from
@@ -511,8 +530,10 @@ first replies were cold, how Canary kept up, and how the computer was powered
 and how busy it was with other things. `--turns` also prints every turn, talk
 by talk. A talk's first turn is the one that waits for the talk's instructions
 to be evaluated, and shows it in its `llm_ttft_ms`. The recaps follow, by day:
-when the skills were on screen ("scored") and when all of it was. The report
-reads a file saved through PowerShell's `>`, which is UTF-16.
+when the skills were on screen ("scored") and when all of it was. Launches
+are marked when another copy is installed or the llama-server is another
+build's, and the updater's steps and version changes follow as a timeline.
+The report reads a file saved through PowerShell's `>`, which is UTF-16.
 
 ## Latency on laptops
 
