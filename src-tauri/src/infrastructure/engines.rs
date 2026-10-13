@@ -5170,7 +5170,11 @@ impl LocalEngine {
         // The cloud first, when it answers. What a failed attempt cost is
         // counted in this reply's times, since the learner waited through it.
         let mut cloud_ms = 0.0;
-        if let Some(cloud) = self.cloud.as_ref().filter(|cloud| cloud.usable()) {
+        if let Some(cloud) = self
+            .cloud
+            .as_ref()
+            .filter(|cloud| cloud.usable_for_reply(cloud_llm::REPLY_LOOK))
+        {
             let why = if corrective.is_some() { "rewrite" } else { "reply" };
             let mut asked = messages.clone();
             if let Some(aim) = aim {

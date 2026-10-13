@@ -867,7 +867,10 @@ reply, placement check, judges ──► cloud up? ──yes──► Ella Deskt
   connected. A request it fails sends the requests after it to the laptop for
   30 s, doubled each time it is found still down, up to 5 minutes; a minute when
   it says it is busy, 5 minutes when it has no key, no balance or no budget
-  left today. Each change is an `ella_cloud` line in the telemetry.
+  left today. The reply that finds the wait over has the proxy looked at and
+  waits up to 1.5 s for the answer (`REPLY_LOOK`), so it goes to the cloud if
+  the cloud is back, rather than to the laptop while the look comes back.
+  Each change is an `ella_cloud` line in the telemetry.
 - **A reply** goes to the cloud while it is up, and its sentences go to Piper as
   they arrive, as the local model's do. With no first word in 5 s, or a refusal,
   the same turn goes to the laptop's model, and the time lost is counted in the
