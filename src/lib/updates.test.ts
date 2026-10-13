@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // stand in for the Tauri updater and read what was recorded.
 const tauri = vi.hoisted(() => ({
   check: vi.fn(),
-  invoke: vi.fn(async () => undefined),
+  invoke: vi.fn(async (_command: string, _args?: Record<string, unknown>): Promise<void> => undefined),
   relaunch: vi.fn(async () => undefined),
   closeHandler: null as (() => Promise<void>) | null,
 }));
@@ -28,7 +28,7 @@ type Recorded = { step: string; version: string | null; bytes: number | null; vi
 function steps(): Recorded[] {
   return tauri.invoke.mock.calls
     .filter(([command]) => command === "record_update")
-    .map(([, args]) => args as Recorded);
+    .map(([, args]) => args as unknown as Recorded);
 }
 
 function release(options: { download?: () => Promise<void>; install?: () => Promise<void> } = {}) {
