@@ -6,6 +6,8 @@
 # the only way a Windows build gets made.
 #
 # Cutting a release:
+#   # add the version's lines for the learner to shared/whats-new.json: the
+#   # update card's "What's new" (see scripts/release-notes.mjs)
 #   npm version patch --no-git-tag-version   # keep package.json, Cargo.toml
 #   # and src-tauri/tauri.conf.json on the same version
 #   git tag v0.1.1 && git push origin main --tags
@@ -91,6 +93,19 @@ jobs:
           ELLA_PIPER_VOICE_URL: ${{ secrets.ELLA_PIPER_VOICE_URL }}
         run: ./scripts/fetch-windows-engines.ps1
 
+      # The release's body, and latest.json's `notes`, which every job
+      # rewrites: what the update card shows under "What's new", from
+      # shared/whats-new.json (scripts/release-notes.mjs).
+      - name: Release notes
+        id: notes
+        shell: bash
+        run: |
+          {
+            echo 'body<<ELLA_RELEASE_NOTES'
+            node scripts/release-notes.mjs
+            echo 'ELLA_RELEASE_NOTES'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and publish
         uses: tauri-apps/tauri-action@v1
         env:
@@ -102,16 +117,7 @@ jobs:
         with:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: "Ella __VERSION__"
-          releaseBody: |
-            Windows installer (`-setup.exe`) and Mac apps for Ella: `aarch64.dmg`
-            for Apple Silicon, `x64.dmg` for Intel Macs.
-
-            On first launch Ella downloads about 2.3 GB of speech and language
-            models, once, resuming if the connection drops. Keep about 3 GB free.
-
-            Neither build is code-signed, so the first launch is blocked once:
-            - Windows: on the SmartScreen warning, choose **More info** then **Run anyway**.
-            - Mac: open the app once, then choose **Open Anyway** in System Settings → Privacy & Security.
+          releaseBody: ${{ steps.notes.outputs.body }}
           # Publishing on tag: see the note at the top before widening the
           # audience beyond the team.
           releaseDraft: false
@@ -166,6 +172,19 @@ jobs:
       # Not signed or notarized by Apple: there is no Developer ID yet, so
       # Gatekeeper blocks the first launch until the tester allows it. The
       # updater signature below is separate and still required.
+      # The release's body, and latest.json's `notes`, which every job
+      # rewrites: what the update card shows under "What's new", from
+      # shared/whats-new.json (scripts/release-notes.mjs).
+      - name: Release notes
+        id: notes
+        shell: bash
+        run: |
+          {
+            echo 'body<<ELLA_RELEASE_NOTES'
+            node scripts/release-notes.mjs
+            echo 'ELLA_RELEASE_NOTES'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and publish
         uses: tauri-apps/tauri-action@v1
         env:
@@ -175,6 +194,7 @@ jobs:
         with:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: "Ella __VERSION__"
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           uploadUpdaterJson: true
@@ -220,6 +240,19 @@ jobs:
           ELLA_PIPER_VOICE_URL: ${{ secrets.ELLA_PIPER_VOICE_URL }}
         run: ./scripts/fetch-macos-engines.sh
 
+      # The release's body, and latest.json's `notes`, which every job
+      # rewrites: what the update card shows under "What's new", from
+      # shared/whats-new.json (scripts/release-notes.mjs).
+      - name: Release notes
+        id: notes
+        shell: bash
+        run: |
+          {
+            echo 'body<<ELLA_RELEASE_NOTES'
+            node scripts/release-notes.mjs
+            echo 'ELLA_RELEASE_NOTES'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and publish
         uses: tauri-apps/tauri-action@v1
         env:
@@ -229,6 +262,7 @@ jobs:
         with:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: "Ella __VERSION__"
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           uploadUpdaterJson: true

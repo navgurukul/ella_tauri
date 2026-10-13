@@ -31,9 +31,10 @@ function steps(): Recorded[] {
     .map(([, args]) => args as unknown as Recorded);
 }
 
-function release(options: { download?: () => Promise<void>; install?: () => Promise<void> } = {}) {
+function release(options: { download?: () => Promise<void>; install?: () => Promise<void>; body?: string } = {}) {
   return {
     version: "0.1.21",
+    body: options.body,
     download: vi.fn(async (progress: (event: unknown) => void) => {
       progress({ event: "Started", data: { contentLength: 100 } });
       progress({ event: "Progress", data: { chunkLength: 100 } });
@@ -124,6 +125,18 @@ describe("the updater's steps in latency.jsonl", () => {
     expect(steps().map((recorded) => recorded.step)).toEqual(["found", "downloaded", "installed"]);
     await apply?.();
     expect(tauri.relaunch).toHaveBeenCalledOnce();
+  });
+
+  it("hands the card what the release says is new, in the learner's words", async () => {
+    onWindows(true);
+    tauri.check.mockResolvedValueOnce(
+      release({ body: "## What's new in Ella 0.1.21\n\n- Ella answers sooner.\n\n## Installing\n- Windows: run it." }),
+    );
+    const report = vi.fn();
+    await downloadUpdateInBackground(report);
+    expect(report).toHaveBeenLastCalledWith(
+      expect.objectContaining({ stage: "ready", version: "0.1.21", notes: ["Ella answers sooner."] }),
+    );
   });
 
   it("goes on with the update when the step cannot be written", async () => {

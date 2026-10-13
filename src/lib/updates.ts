@@ -24,12 +24,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
+import { whatsNewFrom } from "./whatsNew";
 
 export interface UpdateProgress {
-  stage: "downloading" | "ready";
+  /** `updated` is the card after an update, which App shows itself. */
+  stage: "downloading" | "ready" | "updated";
   version: string;
   downloadedBytes: number;
   totalBytes: number;
+  /** What the version brings, in the learner's words, when its notes say. */
+  notes?: string[];
 }
 
 /** Applies a downloaded update now: installs and restarts into it. On Windows,
@@ -114,19 +118,20 @@ export async function downloadUpdateInBackground(
   }
 
   const version = update.version;
+  const notes = whatsNewFrom(update.body);
   void record({ step: "found", version, ms: Date.now() - checking });
   let downloaded = 0;
   let total = 0;
   const downloading = Date.now();
   try {
-    report({ stage: "downloading", version, downloadedBytes: 0, totalBytes: 0 });
+    report({ stage: "downloading", version, downloadedBytes: 0, totalBytes: 0, notes });
     await update.download((event) => {
       if (event.event === "Started") {
         total = event.data.contentLength ?? 0;
       } else if (event.event === "Progress") {
         downloaded += event.data.chunkLength;
       }
-      report({ stage: "downloading", version, downloadedBytes: downloaded, totalBytes: total });
+      report({ stage: "downloading", version, downloadedBytes: downloaded, totalBytes: total, notes });
     });
   } catch (reason) {
     // Tauri only swaps the installed app once the download verifies against
@@ -188,6 +193,6 @@ export async function downloadUpdateInBackground(
     });
   }
 
-  report({ stage: "ready", version, downloadedBytes: total, totalBytes: total });
+  report({ stage: "ready", version, downloadedBytes: total, totalBytes: total, notes });
   return apply;
 }

@@ -781,6 +781,16 @@ interrupt, and applies what it finds
 against the public key in `tauri.conf.json` is discarded and the installed
 version keeps running.
 
+**What's new.** Before tagging, add the version's lines to
+[`shared/whats-new.json`](shared/whats-new.json): what changed for the
+learner, in plain words a learner of English can read, never how (no
+telemetry, no internals). The workflow turns them into the release's body
+(`scripts/release-notes.mjs`), which tauri-action also writes into
+`latest.json` as `notes`. The update card then offers "What's new" for the
+version it is downloading, and a learner who has just updated sees "Ella is
+updated", with the same lines, once ([`src/lib/whatsNew.ts`](src/lib/whatsNew.ts)).
+A version with no lines gets no button.
+
 The private half of that key is **not** in the repository. It lives in the
 `TAURI_SIGNING_PRIVATE_KEY` repository secret and in `~/.ella-updater/` on the
 machine that generated it. Losing it means no existing install can ever be
