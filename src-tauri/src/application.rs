@@ -20,7 +20,7 @@ use crate::{
     },
     error::{EllaError, EllaResult},
     infrastructure::{
-        audio::{quietest_cut_index, trim_to_speech, VadOutput},
+        audio::{pause_cut_index, quietest_cut_index, trim_to_speech, VadOutput},
         database::{AssessmentWrite, Database},
         engines::{
             trailing_question, GeneratedReply, NextRecap, NextTalk, SpeechSegment, SpeechSink, TutorEngine,
@@ -96,6 +96,16 @@ impl SpeechSink for TurnSpeech {
 const STREAM_CHUNK_TARGET_SECS: usize = 6;
 const STREAM_CUT_SEARCH_SECS: usize = 3;
 
+/// A pause this long after at least `PAUSE_AFTER_SPEECH_MS` of speech is cut
+/// at once, rather than waiting for 6 s to build up. Most answers end in one
+/// before the learner presses stop, so what is left to transcribe once they
+/// do is the pause, which the VAD skips, and not the last 3-6 s of what they
+/// said: on 2026-10-12/13 that took 0.73 s of a slow laptop's 2.7 s wait, and
+/// 1.5 s at the 90th percentile. A mid-sentence pause is cut too, between
+/// words, which is where `quietest_cut_index` aims anyway.
+const PAUSE_CUT_MS: usize = 600;
+const PAUSE_AFTER_SPEECH_MS: usize = 1_000;
+
 struct StreamChunkOutcome {
     text: String,
     engine: String,
@@ -115,6 +125,8 @@ struct StreamChunkOutcome {
     /// What was left when the learner stopped, rather than a chunk sent
     /// while they spoke.
     tail: bool,
+    /// Cut where the learner paused (`PAUSE_CUT_MS`).
+    at_pause: bool,
 }
 
 impl StreamChunkOutcome {
@@ -129,6 +141,7 @@ impl StreamChunkOutcome {
             queued_ms: self.queued_ms.map(|ms| ms.round() as u64),
             attempts: self.attempts,
             done_ms: trace.offset_ms(self.done),
+            cut: self.at_pause.then_some("pause"),
         }
     }
 }
@@ -743,6 +756,7 @@ impl AppService {
                     queued_ms: transcription.queued_ms.map(|ms| ms.round() as u64),
                     attempts: Some(transcription.attempts),
                     done_ms: trace.offset_ms(Instant::now()),
+                    cut: None,
                 };
                 trace.record_pieces(vec![piece]);
                 trace.stage(
@@ -863,18 +877,35 @@ impl AppService {
                 stream.pending.len(),
             )
             .max(sample_rate as usize); // never dispatch a sub-second chunk
-            let head = stream.pending.drain(..cut).collect::<Vec<i16>>();
-            let index = stream.chunks.len();
-            let engine = Arc::clone(&self.engine);
-            eprintln!(
-                "[LATENCY]     stt-stream> dispatching chunk {index} (~{:.0} ms audio) while learner is still speaking",
-                head.len() as f64 * 1_000.0 / sample_rate as f64
-            );
-            stream.chunks.push(thread::spawn(move || {
-                transcribe_stream_chunk(&engine, index, head, sample_rate)
-            }));
+            self.dispatch_chunk(stream, cut, false);
+        }
+        let enough = sample_rate as usize * (PAUSE_AFTER_SPEECH_MS + PAUSE_CUT_MS) / 1_000;
+        if stream.pending.len() >= enough {
+            if let Some(cut) =
+                pause_cut_index(&stream.pending, sample_rate, PAUSE_CUT_MS, PAUSE_AFTER_SPEECH_MS)
+            {
+                self.dispatch_chunk(stream, cut, true);
+            }
         }
         Ok(())
+    }
+
+    /// Sends the first `cut` samples of what is pending to speech-to-text on a
+    /// thread of their own, while the learner goes on.
+    fn dispatch_chunk(&self, stream: &mut VoiceStream, cut: usize, at_pause: bool) {
+        let sample_rate = stream.sample_rate;
+        let head = stream.pending.drain(..cut).collect::<Vec<i16>>();
+        let index = stream.chunks.len();
+        let engine = Arc::clone(&self.engine);
+        eprintln!(
+            "[LATENCY]     stt-stream> dispatching chunk {index} (~{:.0} ms audio{}) while learner is still speaking",
+            head.len() as f64 * 1_000.0 / sample_rate as f64,
+            if at_pause { ", cut at a pause" } else { "" }
+        );
+        stream.chunks.push(thread::spawn(move || StreamChunkOutcome {
+            at_pause,
+            ..transcribe_stream_chunk(&engine, index, head, sample_rate)
+        }));
     }
 
     pub fn cancel_voice_stream(&self, stream_id: &str) {
@@ -2123,6 +2154,7 @@ fn transcribe_stream_chunk(
             attempts: None,
             done: Instant::now(),
             tail: false,
+            at_pause: false,
         };
     }
     let started = Instant::now();
@@ -2166,6 +2198,7 @@ fn transcribe_stream_chunk(
         attempts,
         done: Instant::now(),
         tail: false,
+        at_pause: false,
     }
 }
 
@@ -4273,6 +4306,35 @@ mod telemetry_tests {
             .rev()
             .find(|event| event["event"] == "ella_turn_latency")
             .expect("a turn event was written")
+    }
+
+    #[test]
+    fn what_was_said_before_a_pause_is_transcribed_before_the_learner_stops() {
+        let service = AppService::new(Database::in_memory().unwrap(), Box::new(Ears));
+        service.save_learner("Asha", Some(14)).unwrap();
+        let session = service.start_session("street-food").unwrap();
+        let sample_rate = 16_000;
+        let stream = service.begin_voice_stream(&session.id).unwrap();
+        // Two seconds said and a second and a half of quiet, in the window's
+        // half-second pushes, then a moment more of quiet with the press.
+        let mut heard = tone(2, sample_rate);
+        heard.extend(vec![0_i16; sample_rate as usize * 3 / 2]);
+        for push in heard.chunks(sample_rate as usize / 2) {
+            service.push_voice_stream(&stream, push.to_vec(), sample_rate).unwrap();
+        }
+        service
+            .finish_voice_stream_turn(&stream, vec![0; sample_rate as usize / 2], sample_rate, None)
+            .unwrap();
+
+        let event = last_turn();
+        let pieces = event["stt_pieces"].as_array().unwrap();
+        assert_eq!(pieces.len(), 2, "{pieces:?}");
+        assert_eq!((&pieces[0]["part"], &pieces[0]["cut"]), (&serde_json::json!("background"), &serde_json::json!("pause")));
+        assert_eq!(pieces[0]["words"], 3);
+        let said = pieces[0]["audio_ms"].as_u64().unwrap();
+        assert!((2_000..2_400).contains(&said), "the speech and a little after: {said} ms");
+        assert_eq!((&pieces[1]["part"], &pieces[1]["engine"]), (&serde_json::json!("tail"), &serde_json::json!("silence")));
+        assert_eq!(event["learner_words"], 3);
     }
 
     #[test]

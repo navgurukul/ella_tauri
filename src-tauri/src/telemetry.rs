@@ -397,6 +397,10 @@ pub struct SttPiece {
     /// When it was done, from the turn's start. Below zero for a piece done
     /// while the learner was still speaking, which kept it off the wait.
     pub done_ms: i64,
+    /// `pause` for a background piece cut where the learner paused, rather
+    /// than once 6 s had built up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cut: Option<&'static str>,
 }
 
 /// One generation the reply took: the reply itself, and any rewrite.

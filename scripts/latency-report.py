@@ -218,6 +218,8 @@ def detail_summary(days):
         factor = [f for f in map(canary_factor, pieces) if f is not None]
         queued = sum(1 for piece in pieces if (piece.get("queued_ms") or 0) >= 100)
         engines = Counter(piece.get("engine") for piece in pieces)
+        at_pause = sum(1 for piece in pieces if piece.get("cut") == "pause")
+        tails = [piece["ms"] for piece in pieces if piece.get("part") == "tail" and piece.get("ms") is not None]
         machines = [e["machine"] for e in events if e.get("machine")]
         battery = sum(1 for m in machines if m.get("on_ac") is False)
         saver = sum(1 for m in machines if m.get("battery_saver"))
@@ -256,7 +258,10 @@ def detail_summary(days):
         if pieces:
             speed = f"Canary {median(factor):.2f} s a second of speech, " if factor else ""
             print(
-                f"  speech   {speed}{len(pieces)} pieces, {queued} waited for another; "
+                f"  speech   {speed}{len(pieces)} pieces, {queued} waited for another"
+                + (f", {at_pause} cut at a pause" if at_pause else "")
+                + (f"; the last piece took {fmt(median(tails))} ms (p90 {fmt(pct(tails, 90))})" if tails else "")
+                + "; "
                 + ", ".join(f"{name} {count}" for name, count in engines.most_common())
             )
         if machines:

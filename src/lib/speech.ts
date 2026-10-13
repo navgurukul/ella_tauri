@@ -68,8 +68,10 @@ export interface SpeechQueueCallbacks extends SpeechPlaybackCallbacks {
   onSpokenWord?: (index: number) => void;
 }
 
-/** How often accumulated audio is downsampled and handed to onChunk. */
-const CHUNK_PUSH_INTERVAL_MS = 1000;
+/** How often accumulated audio is downsampled and handed to onChunk. Half a
+ * second, so the backend finds a pause (`PAUSE_CUT_MS`, 600 ms) soon after it
+ * begins and can start on the words before it while the learner is quiet. */
+const CHUNK_PUSH_INTERVAL_MS = 500;
 
 export function createVoiceCapture(): VoiceCapture {
   let stream: MediaStream | null = null;

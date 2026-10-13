@@ -466,7 +466,10 @@ from slow code:
   (`background`) or after (`tail`), with its audio, the engine that heard it,
   its time, how long it queued behind another piece for Canary, Canary's
   attempts, and when it was done on the turn's clock (`done_ms`, below zero
-  while they were still speaking)
+  while they were still speaking). The window sends the audio every half
+  second; a piece goes once 6 s has built up, or as soon as the learner
+  pauses for 600 ms after at least a second of speech (`cut: "pause"`), so
+  that what is left when they stop is mostly that pause, which the VAD skips
 - `llm_runs`: each generation (`reply`, or a `rewrite`), with the prompt tokens
   and how many the server evaluated rather than took from its cache, its own
   time for them, the tokens written and the time for those, how long the
