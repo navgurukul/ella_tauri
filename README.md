@@ -479,7 +479,10 @@ from slow code:
   was evaluated
 - `notes`, what happened to the reply on the way (`flagged`,
   `repeated_question`, `repeat_dropped`, `ledger_break`, `audio_ahead_dropped`,
-  `aim_told` and the like), and `tts_path`: `overlapped`, `on_clock` or `failed`
+  `aim_told` and the like, and `answer_trimmed` for a spoken answer over 800
+  characters, kept to its last whole sentence that fits rather than refused;
+  the mic asks the learner to wrap up 45 s after it first hears them), and
+  `tts_path`: `overlapped`, `on_clock` or `failed`
 - `machine`, on Windows: on AC or battery, battery saver, the power mode, the
   CPU's clock and the limit it is held to, how busy the CPU was and how much of
   that was Ella (this process, llama-server, Piper), and the memory free

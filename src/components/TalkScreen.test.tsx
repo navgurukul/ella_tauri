@@ -72,6 +72,31 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("a long answer", () => {
+  it("is asked to wrap up 45 seconds after the mic first heard it", async () => {
+    const clock = handClock();
+    const mic = fakeMic();
+    const said = linesSaid();
+    await openTalk();
+    finish(said[0]);
+    await screen.findByRole("button", { name: "Stop and send" });
+
+    speakInto(mic, clock);
+    clock.advance(44_000);
+    speakInto(mic, clock);
+    // The screen looks twice a second.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 600)));
+    expect(screen.queryByText(/time to wrap up/i)).not.toBeInTheDocument();
+
+    clock.advance(1_000);
+    speakInto(mic, clock);
+    expect(await screen.findByText(/time to wrap up/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop and send" }));
+    await waitFor(() => expect(screen.queryByText(/time to wrap up/i)).not.toBeInTheDocument());
+  });
+});
+
 describe("the mic after Ella speaks", () => {
   it("opens by itself once Ella has finished her line", async () => {
     const mic = fakeMic();

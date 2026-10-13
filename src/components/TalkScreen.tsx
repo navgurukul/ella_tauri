@@ -63,6 +63,11 @@ const HEARD_GAP_MS = 250;
 // After a press the mic held back, further presses are held back too for this
 // long: a double-click, or a click and Space together, is one press.
 const HELD_PRESS_MS = 800;
+// After this long since the mic first heard the learner, a nudge asks them to
+// finish. An answer keeps its first 800 characters (`ANSWER_CHARS` in
+// application.rs), which a fast speaker fills in about a minute; past that,
+// the rest is cut. On 2026-10-12 a B1 tester's 57-second answers ran over.
+const WRAP_UP_AFTER_MS = 45_000;
 
 export function TalkScreen({
   session,
@@ -93,6 +98,7 @@ export function TalkScreen({
   // Shown while listening if the mic has picked up nothing but quiet for a
   // while - a nudge before the recording ever reaches the "no words" path.
   const [showSpeakUpHint, setShowSpeakUpHint] = useState(false);
+  const [wrapUp, setWrapUp] = useState(false);
   const lastSoundAt = useRef(0);
   const [sending, setSending] = useState(false);
   const [micStarting, setMicStarting] = useState(false);
@@ -138,6 +144,8 @@ export function TalkScreen({
   // nobody the meter misses is ever stuck.
   const openedByItself = useRef(false);
   const heard = useRef(false);
+  // When the mic first heard the learner this time it opened, for `WRAP_UP_AFTER_MS`.
+  const heardAt = useRef<number | null>(null);
   const loudSince = useRef(0);
   const lastLoudAt = useRef(Number.NEGATIVE_INFINITY);
   /** When a press was held back, while the mic is still waiting to hear. */
@@ -258,10 +266,13 @@ export function TalkScreen({
   useEffect(() => {
     if (state !== "listening") {
       setShowSpeakUpHint(false);
+      setWrapUp(false);
       return;
     }
     const id = window.setInterval(() => {
-      setShowSpeakUpHint(performance.now() - lastSoundAt.current >= SPEAK_UP_DELAY_MS);
+      const now = performance.now();
+      setShowSpeakUpHint(now - lastSoundAt.current >= SPEAK_UP_DELAY_MS);
+      setWrapUp(heardAt.current !== null && now - heardAt.current >= WRAP_UP_AFTER_MS);
     }, 500);
     return () => window.clearInterval(id);
   }, [state]);
@@ -279,6 +290,7 @@ export function TalkScreen({
     lastLoudAt.current = now;
     if (!heard.current && now - loudSince.current >= HEARD_MS) {
       heard.current = true;
+      heardAt.current = now;
       if (heldPressAt.current !== null) setHoldingForAnswer(false);
     }
   }
@@ -541,6 +553,7 @@ export function TalkScreen({
     setState("resting");
     openedByItself.current = byItself;
     heard.current = false;
+    heardAt.current = null;
     loudSince.current = 0;
     lastLoudAt.current = Number.NEGATIVE_INFINITY;
     heldPressAt.current = null;
@@ -1003,6 +1016,11 @@ export function TalkScreen({
             {showSpeakUpHint && !holdingForAnswer && (
               <span className="pill pill--nudge" role="status" aria-live="polite">
                 Speak up to continue the conversation
+              </span>
+            )}
+            {wrapUp && !showSpeakUpHint && (
+              <span className="pill pill--nudge" role="status" aria-live="polite">
+                Time to wrap up. Finish your sentence, then press the mic.
               </span>
             )}
             <div className="mic-wrap">
