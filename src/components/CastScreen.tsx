@@ -2,7 +2,7 @@ import { EllaMascot, type EllaState } from "./EllaMascot";
 import { PartnerConversation } from "./PartnerConversation";
 import { MicGlyph } from "./HomeScreen";
 import { castFor } from "../lib/presentation";
-import type { CastGoal, CastId, Learner } from "../types";
+import type { CastGoal, CastId, Learner, MentorLesson } from "../types";
 
 /**
  * Talk partners: Ella as the learner's mentor, then the cast they practise
@@ -11,12 +11,17 @@ import type { CastGoal, CastId, Learner } from "../types";
  */
 export function CastScreen({
   learner,
+  lesson,
   busy,
   onStartGoal,
+  onLesson,
 }: {
   learner: Learner | null | undefined;
+  /** The lesson Ella has ready, which her card offers; null when she has none. */
+  lesson: MentorLesson | null;
   busy: boolean;
   onStartGoal: (goal: CastGoal, partner: CastId) => void;
+  onLesson: (lesson: MentorLesson) => void;
 }) {
   const cast = castFor(learner?.age);
 
@@ -34,11 +39,28 @@ export function CastScreen({
           <p className="eyebrow eyebrow--violet">Your mentor</p>
           <h2 className="display mentor__name">Ella</h2>
           <p className="mentor__tagline">Learns from every talk you have, and teaches from it.</p>
-          {/* Nothing reviews a finished talk yet, so there is never a lesson to
-              offer; this is the design's "nothing to fix" state. */}
-          <p className="mentor__note">
-            Nothing to fix yet. When Ella spots a pattern, she pops up on Home with a short lesson.
-          </p>
+          {/* Her lesson, once she has one ready: a skill stuck in two talks
+              running, or the next one after two good talks (`lesson.rs`).
+              Until then, the design's "nothing to fix" state. */}
+          {lesson ? (
+            <>
+              <p className="mentor__note">
+                <strong>{lesson.title}.</strong> {lesson.detail}
+              </p>
+              <button
+                className="btn btn--violet mentor__start"
+                disabled={busy}
+                onClick={() => onLesson(lesson)}
+              >
+                <MicGlyph size={15} />
+                Start the lesson
+              </button>
+            </>
+          ) : (
+            <p className="mentor__note">
+              Nothing to fix yet. When Ella spots a pattern, she pops up on Home with a short lesson.
+            </p>
+          )}
         </div>
         <EllaMascot variant="mentor" className="ella--mentor" decorative />
       </section>

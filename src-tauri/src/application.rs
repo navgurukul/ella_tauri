@@ -13,21 +13,23 @@ use crate::{
     domain::{
         chores, find_character, find_chore, topics, Advance, AppSnapshot, Assessment,
         ChoreContext, ChoreRecap, Fix, Focus, LedgerTurn, AudioPayload, LedgerView, Learner, LearnerProfile,
-        LearnerProgress, LevelSkillView, LevelState, LevelView, Message, PhonemeSpan, Pitch,
-        PlacementBrief, PlacementReading, Readiness, Scorable, Session, SessionSummary,
+        LearnerProgress, LessonTurn, LevelSkillView, LevelState, LevelView, MentorLesson, Message, PhonemeSpan,
+        Pitch, PlacementBrief, PlacementReading, Readiness, Scorable, Session, SessionSummary,
         SpeechStreamEvent, SpokenLine, Standing, StepView, TalkNotes, TurnSignal, WinCondition,
         Speaker, Topic, TurnResult, TutorRequest, WordSpan,
     },
     error::{EllaError, EllaResult},
     infrastructure::{
         audio::{pause_cut_index, quietest_cut_index, trim_to_speech, VadOutput},
-        database::{AssessmentWrite, Database},
+        database::{AssessmentWrite, CurriculumReader, Database, LessonMark},
         engines::{
             trailing_question, GeneratedReply, NextRecap, NextTalk, SpeechSegment, SpeechSink, TutorEngine,
             FREE_TOPIC_TURNS,
         },
+        lesson_prompt::{self, LessonAsk},
         safety,
     },
+    lesson::{self, LessonPlan},
     notes,
     progress::{self, ProgressMap, SkillProgress},
     telemetry::{AssessmentTrace, LatencyTrace, SttPiece},
@@ -36,6 +38,8 @@ use crate::{
 /// The placement chat is a session like any other, marked with this kind. Its
 /// topic id and label are what Home's list shows if it is ever left open.
 const PLACEMENT_KIND: &str = "placement";
+/// Ella's lesson is a session like any other too, marked with this kind.
+const LESSON_KIND: &str = "lesson";
 pub const PLACEMENT_TOPIC_ID: &str = "placement";
 const PLACEMENT_LABEL: &str = "First talk";
 
@@ -280,10 +284,27 @@ impl AppService {
             (Vec::new(), LearnerProgress::default(), None)
         };
         let (topics, tomorrow_topic) = self.offering(learner.as_ref())?;
+        let mut lesson = None;
         if let Some(learner) = &learner {
-            if let Err(error) = self.prepare_next_talk(learner, recent_sessions.is_empty(), topics.first()) {
+            // Today's talk is Ella's lesson, once she has one ready.
+            let ready = self.lesson_now(learner, topics.first()).unwrap_or_else(|error| {
+                eprintln!("[lesson] could not tell whether a lesson is ready: {error}");
+                None
+            });
+            if let Err(error) = self.prepare_next_talk(
+                learner,
+                recent_sessions.is_empty(),
+                topics.first(),
+                ready.as_ref().map(|(_, ask)| ask),
+            ) {
                 eprintln!("[engines] could not tell what to get ready next: {error}");
             }
+            lesson = ready.zip(topics.first().cloned()).map(|((plan, _), topic)| MentorLesson {
+                title: plan.target.skill.label.clone(),
+                detail: lesson::detail(&plan),
+                topic,
+                overdue: plan.overdue,
+            });
         }
         Ok(AppSnapshot {
             topics,
@@ -293,8 +314,47 @@ impl AppService {
             recent_sessions,
             progress,
             standing,
+            lesson,
             engine_status: self.engine.status(),
         })
+    }
+
+    /// The lesson Ella has ready for the learner where they stand, and what
+    /// it is asked with, in `today`: Home's Today's talk, which the lesson
+    /// opens in, as on the phone. `None` when she has none, or there is no
+    /// talk to open it in.
+    ///
+    /// Offered only while Ella can teach it (`TutorEngine::teaches_lessons`):
+    /// otherwise it waits, and Today's talk is a talk.
+    fn lesson_now(&self, learner: &Learner, today: Option<&Topic>) -> EllaResult<Option<(LessonPlan, LessonAsk)>> {
+        let Some(topic) = today else {
+            return Ok(None);
+        };
+        if !self.engine.teaches_lessons() {
+            return Ok(None);
+        }
+        let (position, _) = self.placement()?;
+        let Some(plan) = self.lesson_plan(&position)? else {
+            return Ok(None);
+        };
+        Ok(lesson_ask(learner, topic, &position.level, &plan).map(|ask| (plan, ask)))
+    }
+
+    /// Whether a talk starting now goes past a lesson Ella offers: one she has
+    /// ready and can teach now. One she cannot teach was never offered, so a
+    /// talk had while it waits does not make it overdue.
+    fn lesson_waiting(&self, position: &Position) -> EllaResult<bool> {
+        Ok(self.engine.teaches_lessons() && self.lesson_plan(position)?.is_some())
+    }
+
+    /// `lesson::plan` for a learner at `position`, from what the database
+    /// keeps.
+    fn lesson_plan(&self, position: &Position) -> EllaResult<Option<LessonPlan>> {
+        let in_play = keys_of(&progress::skills_in_play(position));
+        let known = progress::by_key(&self.database.skill_progress(&in_play)?);
+        let cadence = self.database.lesson_cadence()?;
+        let recent = self.database.recent_targets()?;
+        Ok(lesson::plan(position, &known, &cadence, &recent, &today()))
     }
 
     /// The topics Home offers: every one written for the learner's level, in
@@ -331,13 +391,23 @@ impl AppService {
     /// learner's step. Their instructions are the same until the step changes,
     /// so this is model work once a step, done while the learner reads the
     /// recap that moved them on.
-    fn prepare_next_talk(&self, learner: &Learner, never_talked: bool, today: Option<&Topic>) -> EllaResult<()> {
+    ///
+    /// Once Ella has a lesson ready, Today's talk is that lesson (`lesson`),
+    /// and it is the lesson that is got ready: its instructions, and the line
+    /// it opens with.
+    fn prepare_next_talk(
+        &self,
+        learner: &Learner,
+        never_talked: bool,
+        today: Option<&Topic>,
+        lesson: Option<&LessonAsk>,
+    ) -> EllaResult<()> {
         let (next, recap) = if never_talked && !self.database.placed()? {
             let next = NextTalk::Placement {
                 learner_name: learner.name.clone(),
                 age: learner.age,
             };
-            (next, NextRecap::Placement)
+            (Some(next), NextRecap::Placement)
         } else {
             let Some(topic) = today else {
                 return Ok(());
@@ -346,15 +416,23 @@ impl AppService {
             let recap = NextRecap::Talk {
                 skills: scorable(&progress::skills_in_play(&position)),
             };
-            let next = NextTalk::Topic {
-                learner_name: learner.name.clone(),
-                topic_id: topic.id.clone(),
-                topic_label: topic.label.clone(),
-                level: position.level,
+            let next = match lesson {
+                Some(ask) => {
+                    self.engine.prepare_lesson(ask);
+                    None
+                }
+                None => Some(NextTalk::Topic {
+                    learner_name: learner.name.clone(),
+                    topic_id: topic.id.clone(),
+                    topic_label: topic.label.clone(),
+                    level: position.level,
+                }),
             };
             (next, recap)
         };
-        self.engine.prepare(&next);
+        if let Some(next) = &next {
+            self.engine.prepare(next);
+        }
         self.engine.prepare_recap(&recap);
         Ok(())
     }
@@ -522,6 +600,11 @@ impl AppService {
             level: position.level.clone(),
             focus: target.as_deref().and_then(focus_for),
         };
+        // Whether Ella had a lesson waiting: one gone past makes it overdue.
+        let waiting = LessonMark {
+            ready: self.lesson_waiting(&position)?,
+            strengths: None,
+        };
         let started_at = now();
         let opening = Message {
             id: Uuid::new_v4().to_string(),
@@ -545,6 +628,61 @@ impl AppService {
             None,
             target.as_deref(),
             Some(&position.level),
+            &waiting,
+        )?;
+        Ok(session)
+    }
+
+    /// Ella's lesson: the one she has ready, in today's talk, as Home's
+    /// Today's talk and the mentor card offer it. It aims at the skill she
+    /// has ready, the one the learner is stuck on or the next one, and
+    /// teaches it rather than quietly aiming at it.
+    ///
+    /// Once she has nothing ready, as when the talk just scored showed the
+    /// stuck skill after all, it is today's talk, as an ordinary talk.
+    pub fn start_lesson(&self) -> EllaResult<Session> {
+        let learner = self.database.signed_in_learner()?.ok_or_else(|| {
+            EllaError::Conflict("Tell Ella your name before starting a conversation.".into())
+        })?;
+        let (topics, _) = self.offering(Some(&learner))?;
+        let topic = topics
+            .into_iter()
+            .next()
+            .ok_or_else(|| EllaError::Conflict("Ella has no talk to give her lesson in just now.".into()))?;
+        let (position, _) = self.placement()?;
+        let Some((plan, ask)) = self
+            .lesson_plan(&position)?
+            .and_then(|plan| lesson_ask(&learner, &topic, &position.level, &plan).map(|ask| (plan, ask)))
+        else {
+            return self.start_session(&topic.id);
+        };
+        let started_at = now();
+        let opening = Message {
+            id: Uuid::new_v4().to_string(),
+            speaker: Speaker::Ella,
+            content: self.engine.lesson_opening(&ask)?,
+            turn: 0,
+            created_at: started_at.clone(),
+        };
+        let session = Session {
+            id: Uuid::new_v4().to_string(),
+            topic_id: topic.id,
+            topic_label: topic.label,
+            status: "active".into(),
+            started_at,
+            completed_at: None,
+            messages: vec![opening.clone()],
+        };
+        self.database.create_session(
+            &session,
+            &opening,
+            Some(LESSON_KIND),
+            Some(&plan.target.key),
+            Some(&position.level),
+            &LessonMark {
+                ready: true,
+                strengths: plan.strengths,
+            },
         )?;
         Ok(session)
     }
@@ -574,8 +712,14 @@ impl AppService {
             completed_at: None,
             messages: vec![opening.clone()],
         };
-        self.database
-            .create_session(&session, &opening, Some(PLACEMENT_KIND), None, None)?;
+        self.database.create_session(
+            &session,
+            &opening,
+            Some(PLACEMENT_KIND),
+            None,
+            None,
+            &LessonMark::default(),
+        )?;
         Ok(session)
     }
 
@@ -647,6 +791,7 @@ impl AppService {
             completed_at: None,
             messages: vec![opening.clone()],
         };
+        let waiting = self.lesson_waiting(&position)?;
         self.database.create_chore_session(
             &session,
             &opening,
@@ -655,6 +800,7 @@ impl AppService {
             ledger_opening,
             &position.level,
             &now(),
+            waiting,
         )?;
         Ok(session)
     }
@@ -1154,6 +1300,21 @@ impl AppService {
         // A chore session carries a character, a setting and a hidden brief; a
         // free-topic session carries none of that and behaves exactly as before.
         let chore_context = self.chore_context_for(session_id, &level)?;
+        // Ella's lesson teaches its skill, paced by her judgement of each
+        // answer so far. One whose skill the curriculum no longer has carries
+        // on as a talk.
+        let lesson = match curriculum_meta.kind.as_deref() {
+            Some(LESSON_KIND) => match curriculum_meta.target_skill.as_deref().and_then(strand_of) {
+                Some(strand) => Some(LessonTurn {
+                    strand,
+                    strengths: curriculum_meta.lesson_strengths.clone(),
+                    age: learner.age,
+                    judged: self.database.lesson_judgements(session_id)?,
+                }),
+                None => None,
+            },
+            _ => None,
+        };
         let flagged = safety::flagged(clean);
         // A placement answer the filter flagged never ends the chat: the reply
         // to it asks the dodged question again, which only makes sense if the
@@ -1167,6 +1328,7 @@ impl AppService {
         let (talk, topic) = match (&brief, &chore_context) {
             (Some(_), _) => ("placement", session.topic_id.as_str()),
             (None, Some(context)) => ("chore", context.chore_id.as_str()),
+            (None, None) if lesson.is_some() => (LESSON_KIND, session.topic_id.as_str()),
             (None, None) => ("free", session.topic_id.as_str()),
         };
         trace.record_talk(session_id, talk, topic, &level, turn);
@@ -1185,6 +1347,7 @@ impl AppService {
             chore: chore_context.clone(),
             pitch,
             placement: brief.clone(),
+            lesson: lesson.clone(),
         };
         let mut generated = if flagged {
             // Skip the model entirely: a live session showed it does not
@@ -1247,8 +1410,15 @@ impl AppService {
         };
 
         let db_persist_started = Instant::now();
-        self.database
-            .persist_turn(session_id, &learner_message, &ella_message, trace.spoken_ms())?;
+        // Her judgement of the answer, which the lesson's next reply is paced by.
+        let skill_used = lesson.as_ref().and(generated.marks.used);
+        self.database.persist_turn(
+            session_id,
+            &learner_message,
+            &ella_message,
+            trace.spoken_ms(),
+            skill_used,
+        )?;
         trace.stage(
             "db:turn-persisted",
             &format!(
@@ -1375,11 +1545,15 @@ impl AppService {
         //
         // The placement chat closes on its goodbye, and its level is read
         // afterwards, by `assess_session`, while Ella is still saying it.
+        //
+        // Ella's lesson closes on her goodbye: by the eighth answer, or once
+        // its ending has begun and she says goodbye of her own accord.
         let conversation_over = match (&brief, chore_context.as_ref()) {
             (Some(brief), _) => brief.closing,
             (None, Some(context)) => {
                 turn >= context.max_turns || ledger_view.as_ref().is_some_and(|ledger| ledger.agreed)
             }
+            (None, None) if lesson.is_some() => lesson_over(turn, generated.marks.goodbye),
             (None, None) => turn >= FREE_TOPIC_TURNS,
         };
         trace.record_talk_over(conversation_over);
@@ -1742,7 +1916,8 @@ impl AppService {
         let kept = if placement {
             self.assess_placement(&learner, &session)
         } else {
-            self.assess_talk(&session, meta.target_skill, answers > 0, scored, &mut trace)
+            let lesson = meta.kind.as_deref() == Some(LESSON_KIND);
+            self.assess_talk(&session, meta.target_skill, lesson, answers > 0, scored, &mut trace)
         };
         let assessment = kept.and_then(|kept| read_assessment(&kept));
         match &assessment {
@@ -1818,6 +1993,7 @@ impl AppService {
                 position: moved,
                 placed: reading.is_some(),
                 assessment: to_json(&assessment)?,
+                counted: false,
             })
         })
     }
@@ -1826,10 +2002,17 @@ impl AppService {
     /// everything they change are committed together, and handed to `scored`;
     /// then the one fix is looked for and filled in. The model reads the talk
     /// for both under one hold, so nothing less urgent gets it in between.
+    ///
+    /// A talk that counted is one Ella's lessons are counted by, and any talk
+    /// but a lesson keeps the skill of the lesson it leaves ready, so the
+    /// lesson teaches what Home names (`crate::lesson`). A lesson whose skill
+    /// did not show does not count that as a miss: it was taught, not gone
+    /// past.
     fn assess_talk(
         &self,
         session: &Session,
         target: Option<String>,
+        lesson: bool,
         spoke: bool,
         scored: &dyn Fn(&Assessment),
         trace: &mut AssessmentTrace,
@@ -1857,12 +2040,26 @@ impl AppService {
             checked: false,
         });
         let has_notes = notes.is_some();
+        // A successful talk: scored, and long enough for notes.
+        let counted = scores.is_some() && has_notes;
         let today = today();
+        let keep_day = today.clone();
         let topic_id = session.topic_id.clone();
         let session_id = session.id.clone();
         let committed = Cell::new(false);
         let committed_here = &committed;
-        let kept = self.database.commit_assessment(&session.id, move |store| {
+        let keep = move |store: &CurriculumReader<'_>| -> EllaResult<Option<String>> {
+            if lesson {
+                return Ok(None);
+            }
+            // Where this talk left the learner, which may be a step on.
+            let position = store.position()?.and_then(known_position).unwrap_or_else(curriculum::start);
+            let known = progress::by_key(&store.skill_progress(&keys_of(&progress::skills_in_play(&position)))?);
+            let cadence = store.lesson_cadence()?;
+            let plan = lesson::plan(&position, &known, &cadence, &store.recent_targets()?, &keep_day);
+            Ok(lesson::skill_to_keep(plan.as_ref(), &cadence))
+        };
+        let kept = self.database.commit_assessment_then(&session.id, move |store| {
             committed_here.set(true);
             // Where the learner stands as the transaction sees it: another
             // talk may have moved them since this one's skills were picked.
@@ -1874,6 +2071,7 @@ impl AppService {
                 position: None,
                 placed: false,
                 assessment: String::new(),
+                counted,
             };
             let mut advanced = None;
             let mut grown = Vec::new();
@@ -1883,7 +2081,7 @@ impl AppService {
                 keys.extend(scores.keys().cloned());
                 keys.extend(target.clone());
                 let before = store.skill_progress(&distinct(keys))?;
-                let after = progress::apply_scores(&before, scores, target.as_deref(), &topic_id, &today);
+                let after = progress::apply_scores(&before, scores, target.as_deref(), &topic_id, &today, lesson);
                 grown = progress::grown_skills(&before, &after, scores, target.as_deref());
                 write.skills = after
                     .iter()
@@ -1920,7 +2118,7 @@ impl AppService {
             };
             write.assessment = to_json(&assessment)?;
             Ok(write)
-        })?;
+        }, keep)?;
         trace.scored();
         // A talk too short for notes has no fix to look for. One whose
         // assessment another ask kept while this one read it has that ask to
@@ -2083,6 +2281,37 @@ fn focus_for(target: &str) -> Option<Focus> {
         step_focus: step.focus.clone(),
         skill: skill.text.clone(),
     })
+}
+
+/// Whether the skill a lesson aims at is grammar, vocabulary or fluency,
+/// each taught its own way.
+fn strand_of(target: &str) -> Option<curriculum::Strand> {
+    curriculum::skill_at(target).map(|(_, _, skill)| skill.strand)
+}
+
+/// What Ella's lesson in `topic` is asked with, the same for its opening and
+/// every reply after it (`engines::lesson_ask` reads a turn's back the same
+/// way). `None` for a skill the curriculum no longer has.
+fn lesson_ask(learner: &Learner, topic: &Topic, level: &str, plan: &LessonPlan) -> Option<LessonAsk> {
+    Some(LessonAsk {
+        learner_name: learner.name.clone(),
+        age: learner.age,
+        topic_id: topic.id.clone(),
+        topic_label: topic.label.clone(),
+        level: level.to_owned(),
+        focus: focus_for(&plan.target.key)?,
+        strand: plan.target.skill.strand,
+        strengths: plan.strengths.clone(),
+    })
+}
+
+/// Whether the reply to the learner's `turn`-th answer ends Ella's lesson:
+/// by the eighth answer, its goodbye whatever was said; before that, a
+/// goodbye she marked once the ending has begun. One she marks earlier, as
+/// when the learner says they have to go, leaves the lesson open for End
+/// talk rather than risk closing one she never meant to.
+fn lesson_over(turn: u32, goodbye: bool) -> bool {
+    turn >= lesson_prompt::LESSON_GOODBYE_BY || (goodbye && turn > lesson_prompt::LESSON_ENDING_AT)
 }
 
 fn keys_of(placed: &[progress::Placed]) -> Vec<String> {
@@ -2722,6 +2951,7 @@ mod tests {
         let snapshot_keys = vec![
             "engine_status",
             "learner",
+            "lesson",
             "progress",
             "recent_sessions",
             "saved_learner",
@@ -2733,6 +2963,7 @@ mod tests {
         let fresh = serde_json::to_value(service.bootstrap().unwrap()).unwrap();
         assert_eq!(keys(&fresh), snapshot_keys, "no `learners` any more");
         assert_eq!(fresh["learner"], serde_json::Value::Null);
+        assert_eq!(fresh["lesson"], serde_json::Value::Null);
         assert_eq!(fresh["saved_learner"], serde_json::Value::Null);
         assert_eq!(fresh["standing"], serde_json::Value::Null);
         assert_eq!(
@@ -2991,6 +3222,10 @@ mod curriculum_flow_tests {
         written: Vec<usize>,
         /// How many times an assessment kept the model for itself.
         holds: usize,
+        /// The lessons it was asked to get ready, in order.
+        lessons_prepared: Vec<LessonAsk>,
+        /// The lessons it was asked to open, in order.
+        lessons_opened: Vec<LessonAsk>,
     }
 
     /// A model that always answers the same: ready or not, one level, and the
@@ -3004,6 +3239,12 @@ mod curriculum_flow_tests {
         fail_next_reply: Arc<std::sync::atomic::AtomicBool>,
         /// Whether a correction comes back unreadable.
         correct_fails: bool,
+        /// Its judgement of every answer in a lesson.
+        lesson_used: Option<bool>,
+        /// The answer from which it says goodbye in a lesson.
+        goodbye_from: u32,
+        /// Whether it can teach a lesson now, as the cloud answering says.
+        teaches: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl Judge {
@@ -3015,6 +3256,9 @@ mod curriculum_flow_tests {
                 confidence: 0.95,
                 fail_next_reply: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 correct_fails: false,
+                lesson_used: Some(true),
+                goodbye_from: u32::MAX,
+                teaches: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             }
         }
     }
@@ -3040,11 +3284,30 @@ mod curriculum_flow_tests {
             self.heard.lock().unwrap().pitches.push(pitch.clone());
             Ok(format!("Hi {learner_name}, let us talk about {}.", topic.label))
         }
+        fn teaches_lessons(&self) -> bool {
+            self.teaches.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn prepare_lesson(&self, ask: &LessonAsk) {
+            self.heard.lock().unwrap().lessons_prepared.push(ask.clone());
+        }
+        fn lesson_opening(&self, ask: &LessonAsk) -> EllaResult<String> {
+            self.heard.lock().unwrap().lessons_opened.push(ask.clone());
+            Ok(format!("Hi {}! Today we will practise something new. What did you do yesterday?", ask.learner_name))
+        }
         fn reply(&self, request: &TutorRequest) -> EllaResult<GeneratedReply> {
             if self.fail_next_reply.swap(false, std::sync::atomic::Ordering::SeqCst) {
                 return Err(EllaError::Engine("the model fell over".into()));
             }
             self.heard.lock().unwrap().requests.push(request.clone());
+            if request.lesson.is_some() {
+                return Ok(GeneratedReply {
+                    marks: crate::infrastructure::lesson_prompt::Marks {
+                        used: self.lesson_used,
+                        goodbye: request.turn >= self.goodbye_from,
+                    },
+                    ..GeneratedReply::plain("Nice one! What else did you do?".into(), 1.0, 1.0)
+                });
+            }
             let text = match &request.placement {
                 Some(brief) if brief.closing => "Thank you, I loved hearing about your family.",
                 _ => "That sounds lovely. What else do you enjoy?",
@@ -3215,6 +3478,7 @@ mod curriculum_flow_tests {
                     position: Some(position),
                     placed: true,
                     assessment: "null".into(),
+                    counted: false,
                 })
             })
             .unwrap();
@@ -3625,6 +3889,226 @@ mod curriculum_flow_tests {
         assert_ne!(next_target, target);
     }
 
+    /// Three answers long enough for notes, then scored: a talk Ella's
+    /// lessons count.
+    const LONG_TALK: [&str; 3] = [
+        "Yesterday I walked to the market with my brother",
+        "We bought red apples and some fresh bananas",
+        "Then my mother made a sweet banana cake",
+    ];
+
+    fn counted_talk(service: &AppService, topic_id: &str) -> Assessment {
+        let session = service.start_session(topic_id).unwrap();
+        for answer in LONG_TALK {
+            service.send_text_turn(&session.id, answer).unwrap();
+        }
+        service.complete_session(&session.id).unwrap();
+        service.assess_session(&session.id).unwrap()
+    }
+
+    #[test]
+    fn two_successful_talks_leave_a_lesson_ready_as_todays_talk() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let service = judged(Judge::new(&heard));
+        place_at(&service, "A1", 1);
+        assert!(service.bootstrap().unwrap().lesson.is_none());
+
+        // One too short for notes does not count; nor does the first alone.
+        let (short, _) = talk_of(&service, &["Yes", "Market"]);
+        service.assess_session(&short).unwrap();
+        let first = counted_talk(&service, "street-food");
+        assert!(service.bootstrap().unwrap().lesson.is_none());
+        let second = counted_talk(&service, "a2-cricket");
+
+        let snapshot = service.bootstrap().unwrap();
+        let lesson = snapshot.lesson.expect("two successful talks since the last lesson");
+        assert_eq!(lesson.topic, snapshot.topics[0], "in today's talk");
+        assert!(!lesson.overdue);
+        let grown: Vec<String> = second
+            .skills
+            .iter()
+            .chain(&first.skills)
+            .map(|skill| skill.label.clone())
+            .collect();
+        assert!(
+            lesson.detail.starts_with("You did well with ") && grown.iter().any(|label| lesson.detail.contains(&label.to_lowercase())),
+            "{}",
+            lesson.detail
+        );
+        // Home gets the lesson ready, not today's talk.
+        let heard = heard.lock().unwrap();
+        let ask = heard.lessons_prepared.last().expect("the lesson is got ready");
+        assert_eq!(ask.topic_id, snapshot.topics[0].id);
+        assert!(ask.strengths.as_ref().is_some_and(|strengths| !strengths.is_empty()));
+        assert!(!ask.strengths.as_ref().unwrap().contains(&lesson.title), "never praises what it teaches");
+    }
+
+    #[test]
+    fn the_lesson_teaches_its_skill_judges_each_answer_and_closes_on_its_goodbye() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let service = judged(Judge::new(&heard));
+        place_at(&service, "A1", 1);
+        counted_talk(&service, "street-food");
+        counted_talk(&service, "a2-cricket");
+        let offered = service.bootstrap().unwrap().lesson.unwrap();
+
+        let session = service.start_lesson().unwrap();
+        let meta = service.database.session_curriculum(&session.id).unwrap();
+        assert_eq!(meta.kind.as_deref(), Some(LESSON_KIND));
+        let target = meta.target_skill.unwrap();
+        assert_eq!(curriculum::skill_at(&target).unwrap().2.label, offered.title, "teaches what Home named");
+        assert_eq!(session.topic_id, offered.topic.id);
+        assert!(session.messages[0].content.starts_with("Hi Asha! Today we will practise"));
+        let opened = heard.lock().unwrap().lessons_opened.last().unwrap().clone();
+        assert_eq!(opened.focus.skill, curriculum::skill_at(&target).unwrap().2.text);
+
+        for turn in 1..=lesson_prompt::LESSON_GOODBYE_BY {
+            let result = service.send_text_turn(&session.id, "I walked to school yesterday").unwrap();
+            let request = heard.lock().unwrap().requests.last().unwrap().clone();
+            let lesson = request.lesson.expect("every turn is the lesson's");
+            assert_eq!(lesson.judged.len() as u32, turn - 1, "her judgement of every earlier answer");
+            assert!(lesson.judged.values().all(|used| *used));
+            assert_eq!(request.pitch.focus.as_ref().unwrap().skill, opened.focus.skill);
+            assert_eq!(
+                result.session_summary.is_some(),
+                turn == lesson_prompt::LESSON_GOODBYE_BY,
+                "it closes on its goodbye at the eighth answer, not the free talk's sixth"
+            );
+        }
+
+        // Taken: the count starts again, and nothing is ready.
+        service.assess_session(&session.id).unwrap();
+        assert!(service.bootstrap().unwrap().lesson.is_none());
+    }
+
+    #[test]
+    fn a_goodbye_she_marks_once_the_ending_has_begun_closes_the_lesson() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let service = judged(Judge {
+            goodbye_from: 3,
+            ..Judge::new(&heard)
+        });
+        place_at(&service, "A1", 1);
+        counted_talk(&service, "street-food");
+        counted_talk(&service, "a2-cricket");
+        let session = service.start_lesson().unwrap();
+        for turn in 1..=lesson_prompt::LESSON_ENDING_AT + 1 {
+            let result = service.send_text_turn(&session.id, "I learned to say what I did").unwrap();
+            assert_eq!(
+                result.session_summary.is_some(),
+                turn > lesson_prompt::LESSON_ENDING_AT,
+                "turn {turn}: an early goodbye leaves the lesson open"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stuck_skill_has_a_lesson_ready_and_a_lesson_on_it_starts_its_count_again() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let service = judged(Judge {
+            confidence: 0.0,
+            ..Judge::new(&heard)
+        });
+        place_at(&service, "A1", 1);
+        let stuck = curriculum::skill_key("A1", "U1-FLU-01");
+        give(&service, vec![SkillProgress { misses: 2, ..SkillProgress::fresh(&stuck) }]);
+
+        let lesson = service.bootstrap().unwrap().lesson.expect("a stuck skill is enough");
+        assert_eq!(lesson.title, curriculum::skill_at(&stuck).unwrap().2.label);
+        assert_eq!(lesson.detail, lesson::STUCK_DETAIL);
+        assert_eq!(heard.lock().unwrap().lessons_prepared.last().unwrap().strengths, None);
+
+        let session = service.start_lesson().unwrap();
+        for answer in LONG_TALK {
+            service.send_text_turn(&session.id, answer).unwrap();
+        }
+        service.complete_session(&session.id).unwrap();
+        service.assess_session(&session.id).unwrap();
+        let after = service.database.skill_progress(&[stuck.clone()]).unwrap();
+        assert_eq!(after[0].misses, 0, "taught, not gone past");
+        assert!(service.bootstrap().unwrap().lesson.is_none());
+    }
+
+    #[test]
+    fn a_talk_that_goes_past_a_waiting_lesson_makes_it_overdue() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        // Sure enough to count, not so sure that three talks own a skill.
+        let service = judged(Judge {
+            confidence: 0.75,
+            ..Judge::new(&heard)
+        });
+        place_at(&service, "A1", 1);
+        counted_talk(&service, "street-food");
+        counted_talk(&service, "a2-cricket");
+        let waiting = service.bootstrap().unwrap().lesson.unwrap();
+        assert!(!waiting.overdue);
+
+        // Opened and left: it was not gone past.
+        let left = service.start_session("booking-a-cab").unwrap();
+        service.complete_session(&left.id).unwrap();
+        service.assess_session(&left.id).unwrap();
+        assert!(!service.bootstrap().unwrap().lesson.unwrap().overdue);
+
+        counted_talk(&service, "booking-a-cab");
+        let overdue = service.bootstrap().unwrap().lesson.unwrap();
+        assert!(overdue.overdue);
+        assert_eq!(overdue.title, waiting.title, "the skill Home named is kept");
+    }
+
+    #[test]
+    fn a_lesson_waits_while_ella_cannot_teach_it_and_a_talk_meanwhile_does_not_go_past_it() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let judge = Judge {
+            confidence: 0.75,
+            ..Judge::new(&heard)
+        };
+        let teaches = Arc::clone(&judge.teaches);
+        let service = judged(judge);
+        place_at(&service, "A1", 1);
+        counted_talk(&service, "street-food");
+        counted_talk(&service, "a2-cricket");
+
+        // Offline: Today's talk is a talk, and that is what is got ready.
+        teaches.store(false, std::sync::atomic::Ordering::SeqCst);
+        let offline = service.bootstrap().unwrap();
+        assert!(offline.lesson.is_none());
+        assert!(heard.lock().unwrap().lessons_prepared.is_empty());
+        assert!(matches!(heard.lock().unwrap().prepared.last(), Some(NextTalk::Topic { .. })));
+        counted_talk(&service, "booking-a-cab");
+
+        // Back online: offered, and not overdue for the talk had while it
+        // could not be.
+        teaches.store(true, std::sync::atomic::Ordering::SeqCst);
+        let online = service.bootstrap().unwrap().lesson.expect("offered again");
+        assert!(!online.overdue);
+    }
+
+    #[test]
+    fn without_a_lesson_ready_starting_one_opens_todays_talk() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let service = judged(Judge::new(&heard));
+        place_at(&service, "A1", 1);
+        let session = service.start_lesson().unwrap();
+        let meta = service.database.session_curriculum(&session.id).unwrap();
+        assert_eq!(meta.kind, None, "an ordinary talk");
+        assert_eq!(session.topic_id, service.bootstrap().unwrap().topics[0].id);
+        assert!(heard.lock().unwrap().lessons_opened.is_empty());
+    }
+
+    #[test]
+    fn demo_mode_counts_no_talk_so_never_has_a_lesson_by_talks() {
+        let service = demo();
+        for _ in 0..3 {
+            let session = service.start_session("street-food").unwrap();
+            for answer in LONG_TALK {
+                service.send_text_turn(&session.id, answer).unwrap();
+            }
+            service.complete_session(&session.id).unwrap();
+            service.assess_session(&session.id).unwrap();
+        }
+        assert!(service.bootstrap().unwrap().lesson.is_none(), "nothing scored, nothing counted");
+    }
+
     #[test]
     fn talks_that_show_every_skill_finish_the_step_and_move_the_learner_on() {
         let heard = Arc::new(Mutex::new(Heard::default()));
@@ -3771,6 +4255,7 @@ mod curriculum_flow_tests {
                     position: None,
                     placed: false,
                     assessment: "null".into(),
+                    counted: false,
                 })
             })
             .unwrap();
@@ -4070,6 +4555,138 @@ mod curriculum_flow_tests {
             "== its first answer waited {:.1} s for its first token",
             timings.llm_ttft_ms.unwrap_or_default() as f64 / 1_000.0
         );
+    }
+
+    /// Three of Ella's lessons, each to its goodbye, with a learner who gets
+    /// it wrong first, gets it right, answers in a word, explains the pattern
+    /// and says what they learned: grammar on a stuck skill, vocabulary that
+    /// builds on two good talks, and fluency after talks where nothing grew.
+    /// Prints each lesson, Ella's mark on every answer, and how long each
+    /// reply took; there is no right wording to assert. Against the cloud,
+    /// with the laptop's server pointed somewhere that does not answer:
+    ///
+    /// ELLA_CLOUD=on ELLA_CLOUD_TOKEN_FILE=<a file of its own> ELLA_LLM_BASE_URL=http://127.0.0.1:9/v1 \
+    ///   cargo test --lib live_model_teaches -- --ignored --nocapture
+    ///
+    /// or against llama-server alone, as above with its own address.
+    #[test]
+    #[ignore]
+    fn live_model_teaches_three_lessons() {
+        use crate::infrastructure::engines::{EnginePaths, LocalEngine};
+        assert!(std::env::var("ELLA_LLM_BASE_URL").is_ok(), "point ELLA_LLM_BASE_URL at llama-server");
+        std::env::set_var("ELLA_PIPER_DAEMON", "0");
+        let lessons: [(&str, u8, &str, Option<&[&str]>, [&str; 8]); 3] = [
+            (
+                "A2",
+                1,
+                "U1-GRA-01",
+                None,
+                [
+                    "I live in Pune since five years.",
+                    "I have lived in Pune for five years.",
+                    "I have eaten vada pav many times there.",
+                    "Yes.",
+                    "I have been to the market today with my mother.",
+                    "Because it started before and it is still true now.",
+                    "I learned to say have and the third form for things that are still true.",
+                    "Bye Ella, thank you!",
+                ],
+            ),
+            (
+                "B1",
+                1,
+                "U1-VOC-02",
+                Some(&["Second conditional", "Complex ideas"]),
+                [
+                    "Last year I did a decision to study engineering.",
+                    "I made a decision to study engineering.",
+                    "When I travel alone I take a risk sometimes.",
+                    "Pay attention.",
+                    "My teacher always tells us to pay attention in class.",
+                    "Because make a decision sounds natural, and do a decision does not.",
+                    "I learned that some words go together, like make a decision and take a risk.",
+                    "Okay, see you!",
+                ],
+            ),
+            (
+                "A2",
+                2,
+                "U2-FLU-01",
+                Some(&[]),
+                [
+                    "Last week I went to my cousin wedding.",
+                    "First we reached the hall, then we ate, and after that we danced.",
+                    "It was fun.",
+                    "My uncle fell down while dancing and everyone laughed, and now we tell that story every time we meet.",
+                    "Yes.",
+                    "I said what happened first and what happened next.",
+                    "I learned to tell a story in order, with first, then and in the end.",
+                    "Thank you Ella.",
+                ],
+            ),
+        ];
+        for (level, step, skill_id, strengths, answers) in lessons {
+            let service = AppService::new(
+                Database::in_memory().unwrap(),
+                Box::new(LocalEngine::from_environment(EnginePaths::default())),
+            );
+            service.save_learner("Aarav", Some(15)).unwrap();
+            place_at(&service, level, step);
+            let key = curriculum::skill_key(level, skill_id);
+            match strengths {
+                // Stuck: missed in two talks running.
+                None => give(&service, vec![SkillProgress { misses: 2, ..SkillProgress::fresh(&key) }]),
+                // Two talks that counted, the newer keeping the skill.
+                Some(grew) => {
+                    for keep in [None, Some(key.clone())] {
+                        let session = service.start_placement().unwrap();
+                        service.complete_session(&session.id).unwrap();
+                        let skills: Vec<serde_json::Value> =
+                            grew.iter().map(|label| serde_json::json!({"label": label, "count": 1})).collect();
+                        service
+                            .database
+                            .commit_assessment_then(
+                                &session.id,
+                                |_| {
+                                    Ok(AssessmentWrite {
+                                        skills: Vec::new(),
+                                        position: None,
+                                        placed: false,
+                                        assessment: serde_json::json!({ "skills": skills }).to_string(),
+                                        counted: true,
+                                    })
+                                },
+                                move |_| Ok(keep),
+                            )
+                            .unwrap();
+                    }
+                }
+            }
+            let offered = service.bootstrap().unwrap().lesson.expect("a lesson is ready");
+            println!("\n=== {level} step {step}: {} — {}", offered.title, offered.detail);
+            let started = Instant::now();
+            let lesson = service.start_lesson().unwrap();
+            assert_eq!(service.database.session_curriculum(&lesson.id).unwrap().target_skill.as_deref(), Some(key.as_str()));
+            println!("  [{:>5.1} s] ella     {}", started.elapsed().as_secs_f64(), lesson.messages[0].content);
+            for answer in answers {
+                println!("              learner  {answer}");
+                let asked = Instant::now();
+                let turn = service.send_text_turn(&lesson.id, answer).unwrap();
+                let reply = &turn.ella_message.content;
+                assert!(!reply.contains('['), "a mark was said: {reply}");
+                let judged = service.database.lesson_judgements(&lesson.id).unwrap();
+                let mark = match judged.get(&turn.learner_message.id) {
+                    Some(true) => "USED    ",
+                    Some(false) => "NOT USED",
+                    None => "unmarked",
+                };
+                println!("  [{:>5.1} s] {mark} {reply}", asked.elapsed().as_secs_f64());
+                if turn.session_summary.is_some() {
+                    println!("  -- closed after answer {}", turn.learner_message.turn);
+                    break;
+                }
+            }
+        }
     }
 
     #[test]

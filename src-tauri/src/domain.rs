@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// The one learner on this laptop. There is only ever one, so there is no id
@@ -206,7 +208,27 @@ pub struct AppSnapshot {
     pub progress: LearnerProgress,
     /// Where the learner stands in the curriculum; `None` when signed out.
     pub standing: Option<Standing>,
+    /// The lesson Ella, as mentor, has ready: Home's Today's talk is then
+    /// that lesson, and the mentor card on Talk partners offers it. `None`
+    /// when she has none, and when signed out.
+    pub lesson: Option<MentorLesson>,
     pub engine_status: EngineStatus,
+}
+
+/// The lesson Ella has ready, as Home's Today's talk and the mentor card show
+/// it (Ella Mobile's `lessonView`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MentorLesson {
+    /// The skill it teaches, by the name the recap gives it: "Past time words".
+    pub title: String,
+    /// What Ella can honestly say about it: what she noticed, what grew, or,
+    /// when nothing did, just that two talks have been had (`lesson::detail`).
+    pub detail: String,
+    /// The talk "Start the lesson" opens it in: today's, as Home offers it.
+    pub topic: Topic,
+    /// The learner went past it in a talk since it was ready. The window then
+    /// asks them to talk to Ella first before any other talk.
+    pub overdue: bool,
 }
 
 /// Where the learner stands in the curriculum, as the window shows it: a
@@ -626,6 +648,24 @@ pub struct TutorRequest {
     /// `Some` for a turn of the placement chat, which asks its own questions
     /// instead of playing a scene.
     pub placement: Option<PlacementBrief>,
+    /// `Some` for a turn of Ella's lesson, which teaches `pitch`'s skill
+    /// instead of quietly aiming at it.
+    pub lesson: Option<LessonTurn>,
+}
+
+/// A turn of Ella's lesson: how its skill is taught, what she praises, and
+/// her judgement of each answer so far, which the lesson is paced by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LessonTurn {
+    pub strand: crate::curriculum::Strand,
+    /// `None` for a lesson on a stuck skill; otherwise the skills she praises,
+    /// by the recap's labels, none when nothing grew.
+    pub strengths: Option<Vec<String>>,
+    pub age: Option<u8>,
+    /// Whether each of the learner's earlier answers used the skill well, as
+    /// she judged it, by the answer's message id. One she did not judge is
+    /// left out.
+    pub judged: HashMap<String, bool>,
 }
 
 /// Every topic, in the catalogue's order.

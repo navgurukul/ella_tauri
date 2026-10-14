@@ -3,6 +3,7 @@ pub mod cloud_llm;
 pub mod database;
 pub mod engine_manager;
 pub mod engines;
+pub mod lesson_prompt;
 pub mod model_queue;
 pub mod models;
 pub mod safety;

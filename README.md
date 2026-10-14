@@ -133,8 +133,17 @@ design's window chrome — title bar and traffic lights — is left to the OS.
   yet it asks for a name and goes straight in. "Let's start" after a log out
   is the same learner onboarding again: `save_learner` signs them in and their
   history stays theirs.
-- The design shows framing the Rust backend does not model yet — a mentor
-  lesson, the badges' names and colours, the cast's names. All of it is resolved in
+- **Ella, as mentor**, shows a lesson she has ready, while she can teach it
+  (online), in two places, as on Ella Mobile: Home's Today's talk becomes Today's lesson, on the skill it teaches
+  with what she can honestly say about it, and the "Your mentor" card on Talk
+  partners offers "Start the lesson" where it said "Nothing to fix yet". Once
+  the learner has gone past a waiting lesson in a talk, every way into another
+  talk (Home's topics, View all, a partner's goal, a badge, the recap's Try
+  again) first shows "Let's have a chat first": Talk with Ella opens the
+  lesson, Continue with the topic or partner they picked opens that, and
+  closing it opens neither. See [Ella's lessons](#ellas-lessons).
+- The design shows framing the Rust backend does not model yet — the badges'
+  names and colours, the cast's names. All of it is resolved in
   [`src/lib/presentation.ts`](src/lib/presentation.ts), which derives what it can
   from `AppSnapshot` and marks the rest `PLACEHOLDER`. The streak, the week
   strip, talks, answers and time spoken, and every badge all come from
@@ -203,6 +212,8 @@ number on the ladder, 1 to 6.
   or after Step 5 to Step 1 of the next level. If every skill left has missed
   twice running, the next step's skills join in. See
   [`progress.rs`](src-tauri/src/progress.rs).
+- **Ella has a lesson ready** when a skill is stuck, or every two successful
+  talks: see [Ella's lessons](#ellas-lessons).
 - **A level's page** shows where each skill stands, as Ella Mobile's does (the
   final design, 2a, of "Ella Level Skills Options"). On the learner's own
   level, the steps behind them are short rows that open on their skills, and
@@ -213,8 +224,8 @@ number on the ladder, 1 to 6.
   in; or Not started. The first circle fills once a skill shows in a talk, the
   second once it passes, and a hint says what it needs next. Other levels are
   rows too, done ones opening on their skills. Ella Mobile's card for the skill
-  Ella is teaching is left out: the laptop has no lessons, and a talk's aim is
-  never told to the model, so she teaches no one skill.
+  Ella is teaching is not here yet: her lessons are offered on Home and Talk
+  partners.
 - **The recap** (the Ella Desktop Recap design) follows every talk across the
   whole window: Ella cheering, or for a chore the talk partner with whether the
   goal was met, its badge and their last line; then Ella's notes — what went
@@ -310,6 +321,74 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib live_model -- --ignored --
 A test build leaves the cloud alone unless asked: add `ELLA_CLOUD=on` to run
 the same flow against the model over the internet
 ([Over the internet](#over-the-internet)).
+
+## Ella's lessons
+
+Ella is the learner's mentor, as on Ella Mobile: she keeps count of how their
+talks go and, when it is time, has a short lesson ready on one skill. The rules
+are the phone's (`lesson.ts`), in [`lesson.rs`](src-tauri/src/lesson.rs):
+
+- **A skill is stuck** when two talks in a row aimed at it and it showed in
+  neither (`progress::stuck_skill`). Of the skills a talk could aim at, the
+  one still to pass that has missed most is the lesson's: something to improve.
+- **Otherwise, after two successful talks** since the last lesson taken,
+  whether they went well or not, the lesson is on the skill a talk would aim at
+  next, and Ella opens on what grew in those talks, never on the skill she is
+  about to teach; when nothing grew, she praises nothing. That skill is kept
+  with the talk that made the lesson ready (`sessions.lesson_skill`), so the
+  lesson teaches what Home named, until it passes.
+- A **successful** talk is one its assessment counted (`sessions.counted`): not
+  a placement, long enough for Ella's notes, and scored. Chores count. A
+  lesson is taken once it counts itself, which starts the count again, and a
+  lesson whose skill did not show leaves its misses at none rather than one
+  more: it was taught, not gone past. Talks finished before lessons existed
+  were counted once by the same measure, so a learner who has been talking to
+  Ella finds one ready at once; none of them makes it overdue.
+- **Overdue**: each talk keeps whether a lesson was waiting when it began
+  (`sessions.lesson_ready`). A successful one that began with one waiting means
+  the learner went past it, and the window asks them to talk to Ella first.
+- **Only while the cloud answers** (`TutorEngine::teaches_lessons`). Offline,
+  a lesson that is ready waits: Today's talk is a talk, and a talk had
+  meanwhile does not go past it, since it was never offered. Told a lesson's
+  skill, the laptop's Qwen2.5-3B taught it badly: in the same three lessons
+  the cloud taught on 2026-10-13, it marked 6 of 24 answers, praised a "Yes."
+  as a good use, opened by inventing what the learner had said last time,
+  asked the same three questions four replies running, and once answered
+  "Please provide the learner's words so I can review them." A lesson whose
+  cloud drops partway is finished by the laptop's model, as any talk is.
+
+**The lesson** is a talk on today's topic, kind `lesson`, aimed at the lesson's
+skill (`start_lesson`). Ella teaches it the way the phone's does (Ella Prompt
+v8): she says the skill in plain words with an example, praises each good use
+by quoting it and saying why it works, leads a slip back with questions rather
+than the answer, has the learner spot the pattern, livens up two one-word
+answers with a booster, and ends on what they say they learned
+([`lesson_prompt.rs`](src-tauri/src/infrastructure/lesson_prompt.rs)).
+Grammar, vocabulary and fluency are each taught their own way. Every count is
+the app's, never the model's: a note just before the learner's latest answer
+says what this reply must do — the pattern check after the second good use,
+the offer to wrap up with the third, the ending from the sixth answer — and the
+lesson closes on her goodbye, by the eighth answer.
+
+The phone's model answers a lesson's turn in JSON, its judgement of the answer
+first. Here a reply is spoken while it is written, so her judgement comes first
+as a mark in square brackets, `[USED]` or `[NOT USED]`, and her goodbye ends
+with `[BYE]`; Piper never reads a bracketed mark and the screen never shows
+one. Her judgement is kept with the answer (`messages.skill_used`), and each of
+her earlier lines carries it back to the model, so she goes on marking. A
+goodbye she marks closes the lesson once its ending has begun; one marked
+earlier, as when the learner says they have to go, leaves it open for End talk.
+
+**Its opening is the model's own**, unlike a talk's, so it is written before it
+is asked for: while Home shows the lesson, the cloud writes it
+(`prepare_lesson`), and "Start the lesson" says it at once; the lesson's
+instructions are evaluated and kept on the laptop's model the way a talk's are.
+On the laptop alone the opening is written when the lesson starts, from
+instructions already evaluated, rather than as an errand that could hold up a
+talk opened meanwhile. Measured through the cloud on 2026-10-13, three lessons
+(grammar on a stuck skill, vocabulary after two good talks, fluency after two
+where nothing grew) each opened in 1.3-1.7 s and replied in 0.9-2.0 s, and
+each closed on its goodbye at the seventh or eighth answer.
 
 ## Run the complete local voice POC
 
@@ -937,7 +1016,8 @@ reply, placement check, judges ──► cloud up? ──yes──► Ella Deskt
   harder than the laptop's: in two runs the scripted learner got him to 450 and
   420, not 400.
 - **Replies run to 80 tokens** in the cloud, against the laptop's 50: a talk
-  partner's longer sentences ran out mid-sentence at 50. A reply that still runs
+  partner's longer sentences ran out mid-sentence at 50. A lesson's run to 140
+  and 110: its opening and its goodbye are five short sentences. A reply that still runs
   out is cut back to its last whole sentence (`whole_sentences`).
 - **Telemetry** marks what the cloud did: `backend: "cloud"` on a turn's
   `llm_runs` and an assessment's `judges`, with `failed` (`unanswered` or `cut`)

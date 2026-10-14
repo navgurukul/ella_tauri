@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Mutex};
+use std::{collections::HashMap, path::Path, sync::Mutex};
 
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
 
@@ -9,13 +9,25 @@ use crate::{
         WinCondition,
     },
     error::{EllaError, EllaResult},
+    lesson::LessonCadence,
     progress::SkillProgress,
 };
+
+/// What a talk keeps about Ella's lesson as it starts: whether one was
+/// waiting, and, on the lesson itself when it builds on talks that went well,
+/// the skills she praises, by the labels the recap shows. `None` there for a
+/// lesson on a stuck skill, and for every other talk.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LessonMark {
+    pub ready: bool,
+    pub strengths: Option<Vec<String>>,
+}
 
 /// What a session carries for the curriculum, beside its topic and messages.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionCurriculum {
-    /// `placement` for the placement chat; `None` for every other talk.
+    /// `placement` for the placement chat, `lesson` for Ella's lesson; `None`
+    /// for every other talk.
     pub kind: Option<String>,
     /// The skill the talk quietly aims at, as a `skill_key`.
     pub target_skill: Option<String>,
@@ -25,6 +37,8 @@ pub struct SessionCurriculum {
     /// pitched at to the end, whatever another talk's assessment does
     /// meanwhile. `None` for talks from before it was kept.
     pub level_code: Option<String>,
+    /// On Ella's lesson, what `LessonMark::strengths` kept as it started.
+    pub lesson_strengths: Option<Vec<String>>,
 }
 
 /// The learner's curriculum as an assessment's transaction sees it.
@@ -49,6 +63,16 @@ impl CurriculumReader<'_> {
     pub fn skill_progress(&self, keys: &[String]) -> EllaResult<Vec<SkillProgress>> {
         read_skill_progress(self.connection, keys)
     }
+
+    /// `Database::recent_targets`, as the transaction sees them.
+    pub fn recent_targets(&self) -> EllaResult<Vec<String>> {
+        read_recent_targets(self.connection)
+    }
+
+    /// `Database::lesson_cadence`, as the transaction sees it.
+    pub fn lesson_cadence(&self) -> EllaResult<LessonCadence> {
+        read_lesson_cadence(self.connection)
+    }
 }
 
 /// Everything one assessment writes, all at once.
@@ -61,6 +85,9 @@ pub struct AssessmentWrite {
     pub placed: bool,
     /// What is kept on the session and answered from then on, as JSON.
     pub assessment: String,
+    /// A successful talk, which Ella's lessons are counted by
+    /// (`crate::lesson`): not a placement, long enough for notes, and scored.
+    pub counted: bool,
 }
 
 pub struct Database {
@@ -150,6 +177,7 @@ impl Database {
         add_learner_profile(&connection)?;
         add_curriculum(&connection)?;
         add_spoken_time(&connection)?;
+        add_lessons(&connection)?;
         Ok(())
     }
 
@@ -247,14 +275,22 @@ impl Database {
         kind: Option<&str>,
         target_skill: Option<&str>,
         level_code: Option<&str>,
+        lesson: &LessonMark,
     ) -> EllaResult<()> {
+        let strengths = lesson
+            .strengths
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| EllaError::Engine(error.to_string()))?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         transaction.execute(
             "INSERT INTO sessions(
-               id, topic_id, topic_label, status, started_at, kind, target_skill, level_code
+               id, topic_id, topic_label, status, started_at, kind, target_skill, level_code,
+               lesson_ready, lesson_strengths
              )
-             VALUES(?1, ?2, ?3, 'active', ?4, ?5, ?6, ?7)",
+             VALUES(?1, ?2, ?3, 'active', ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 session.id,
                 session.topic_id,
@@ -262,7 +298,9 @@ impl Database {
                 session.started_at,
                 kind,
                 target_skill,
-                level_code
+                level_code,
+                lesson.ready,
+                strengths
             ],
         )?;
         insert_message(&transaction, &session.id, opening)?;
@@ -294,14 +332,28 @@ impl Database {
     /// held back so one skill is not picked talk after talk.
     pub fn recent_targets(&self) -> EllaResult<Vec<String>> {
         let connection = self.connection()?;
+        read_recent_targets(&connection)
+    }
+
+    /// Where the learner is between Ella's lessons: see `LessonCadence`.
+    pub fn lesson_cadence(&self) -> EllaResult<LessonCadence> {
+        let connection = self.connection()?;
+        read_lesson_cadence(&connection)
+    }
+
+    /// Ella's judgement of each answer in a lesson, by the answer's message
+    /// id: whether it used the lesson's skill well. An answer she has not
+    /// judged, and every answer outside a lesson, is left out.
+    pub fn lesson_judgements(&self, session_id: &str) -> EllaResult<HashMap<String, bool>> {
+        let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT target_skill FROM sessions WHERE target_skill IS NOT NULL
-             ORDER BY started_at DESC, rowid DESC LIMIT ?1",
+            "SELECT id, skill_used FROM messages
+             WHERE session_id = ?1 AND skill_used IS NOT NULL",
         )?;
-        let targets = statement
-            .query_map([crate::progress::RECENT_TARGETS as i64], |row| row.get(0))?
-            .collect::<Result<Vec<String>, _>>()?;
-        Ok(targets)
+        let judged = statement
+            .query_map([session_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<HashMap<String, bool>, _>>()?;
+        Ok(judged)
     }
 
     /// Every skill a talk the learner spoke in has aimed at, each once: what
@@ -326,14 +378,17 @@ impl Database {
     pub fn session_curriculum(&self, session_id: &str) -> EllaResult<SessionCurriculum> {
         self.connection()?
             .query_row(
-                "SELECT kind, target_skill, assessment, level_code FROM sessions WHERE id = ?1",
+                "SELECT kind, target_skill, assessment, level_code, lesson_strengths
+                 FROM sessions WHERE id = ?1",
                 [session_id],
                 |row| {
+                    let strengths: Option<String> = row.get(4)?;
                     Ok(SessionCurriculum {
                         kind: row.get(0)?,
                         target_skill: row.get(1)?,
                         assessment: row.get(2)?,
                         level_code: row.get(3)?,
+                        lesson_strengths: strengths.as_deref().map(labels),
                     })
                 },
             )
@@ -353,6 +408,18 @@ impl Database {
         &self,
         session_id: &str,
         decide: impl FnOnce(&CurriculumReader<'_>) -> EllaResult<AssessmentWrite>,
+    ) -> EllaResult<String> {
+        self.commit_assessment_then(session_id, decide, |_| Ok(None))
+    }
+
+    /// `commit_assessment`, then, in the same transaction and with everything
+    /// it wrote in place, `keep`: the skill the talk keeps for the lesson Ella
+    /// has ready now that it has counted (`lesson::skill_to_keep`), if any.
+    pub fn commit_assessment_then(
+        &self,
+        session_id: &str,
+        decide: impl FnOnce(&CurriculumReader<'_>) -> EllaResult<AssessmentWrite>,
+        keep: impl FnOnce(&CurriculumReader<'_>) -> EllaResult<Option<String>>,
     ) -> EllaResult<String> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -407,8 +474,15 @@ impl Database {
             )?;
         }
         transaction.execute(
-            "UPDATE sessions SET assessment = ?2 WHERE id = ?1",
-            params![session_id, write.assessment],
+            "UPDATE sessions SET assessment = ?2, counted = ?3 WHERE id = ?1",
+            params![session_id, write.assessment, write.counted],
+        )?;
+        let kept = keep(&CurriculumReader {
+            connection: &transaction,
+        })?;
+        transaction.execute(
+            "UPDATE sessions SET lesson_skill = ?2 WHERE id = ?1",
+            params![session_id, kept],
         )?;
         transaction.commit()?;
         Ok(write.assessment)
@@ -632,13 +706,16 @@ impl Database {
     }
 
     /// One exchange. `spoken_ms` is how long the learner's answer lasted when
-    /// they said it aloud, and `None` when they typed it.
+    /// they said it aloud, and `None` when they typed it. `skill_used` is, in
+    /// a lesson, Ella's judgement of the answer: whether it used the lesson's
+    /// skill well; `None` everywhere else, and where she gave none.
     pub fn persist_turn(
         &self,
         session_id: &str,
         learner: &Message,
         ella: &Message,
         spoken_ms: Option<u64>,
+        skill_used: Option<bool>,
     ) -> EllaResult<()> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
@@ -648,6 +725,12 @@ impl Database {
             transaction.execute(
                 "UPDATE messages SET spoken_ms = ?2 WHERE id = ?1",
                 params![learner.id, spoken_ms as i64],
+            )?;
+        }
+        if let Some(used) = skill_used {
+            transaction.execute(
+                "UPDATE messages SET skill_used = ?2 WHERE id = ?1",
+                params![learner.id, used],
             )?;
         }
         transaction.commit()?;
@@ -666,14 +749,16 @@ impl Database {
         ledger_opening: Option<i32>,
         level_code: &str,
         now: &str,
+        lesson_ready: bool,
     ) -> EllaResult<()> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         transaction.execute(
             "INSERT INTO sessions(
-               id, topic_id, topic_label, status, started_at, chore_id, character_id, level_code
+               id, topic_id, topic_label, status, started_at, chore_id, character_id, level_code,
+               lesson_ready
              )
-             VALUES(?1, ?2, ?3, 'active', ?4, ?5, ?6, ?7)",
+             VALUES(?1, ?2, ?3, 'active', ?4, ?5, ?6, ?7, ?8)",
             params![
                 session.id,
                 session.topic_id,
@@ -681,7 +766,8 @@ impl Database {
                 session.started_at,
                 chore_id,
                 character_id,
-                level_code
+                level_code,
+                lesson_ready
             ],
         )?;
         if let Some(current) = ledger_opening {
@@ -1172,6 +1258,176 @@ fn add_spoken_time(connection: &Connection) -> EllaResult<()> {
         connection.execute("ALTER TABLE messages ADD COLUMN spoken_ms INTEGER", [])?;
     }
     Ok(())
+}
+
+/// What Ella's mentor lessons are counted and paced by (`crate::lesson`),
+/// added the way `age` was, so v0.1.6 can still open the database:
+/// - `sessions.counted` marks a successful talk, as its assessment decides:
+///   not a placement, long enough for notes, and scored. Ella has a lesson
+///   ready after two of them since the last lesson taken (a counted lesson),
+///   as well as when a skill is stuck.
+/// - `sessions.lesson_ready` says a lesson was already waiting when the talk
+///   began; a counted talk like that, since the last lesson, means the
+///   learner went past it, and Ella asks to talk first before the next.
+/// - `sessions.lesson_strengths` is set on a lesson that builds on what went
+///   well rather than one on a stuck skill: the JSON array of skill labels
+///   she praises.
+/// - `sessions.lesson_skill` is the skill a talk kept for the lesson it left
+///   ready, so the lesson teaches what Home named.
+/// - `messages.skill_used` is Ella's judgement of a learner's answer in a
+///   lesson: whether it used the lesson's skill well. The lesson's pacing
+///   counts these, so the model never has to count.
+///
+/// Talks that ended before this are counted by the same measure, once, so a
+/// learner who has been talking to Ella finds a lesson ready straight away.
+/// Whether a lesson was waiting when they began is not known, so none of
+/// them makes it overdue. All of it is one transaction: a launch cut short
+/// before the count leaves the columns to be added again, count and all.
+fn add_lessons(connection: &Connection) -> EllaResult<()> {
+    if has_column(connection, "sessions", "counted")? {
+        return Ok(());
+    }
+    let transaction = connection.unchecked_transaction()?;
+    for (table, column, ddl) in [
+        (
+            "sessions",
+            "lesson_ready",
+            "ALTER TABLE sessions ADD COLUMN lesson_ready INTEGER NOT NULL DEFAULT 0",
+        ),
+        ("sessions", "lesson_strengths", "ALTER TABLE sessions ADD COLUMN lesson_strengths TEXT"),
+        ("sessions", "lesson_skill", "ALTER TABLE sessions ADD COLUMN lesson_skill TEXT"),
+        ("messages", "skill_used", "ALTER TABLE messages ADD COLUMN skill_used INTEGER"),
+    ] {
+        if !has_column(&transaction, table, column)? {
+            transaction.execute(ddl, [])?;
+        }
+    }
+    // Last, so its presence says the rest is done.
+    transaction.execute(
+        "ALTER TABLE sessions ADD COLUMN counted INTEGER NOT NULL DEFAULT 0",
+        [],
+    )?;
+    let finished = {
+        let mut statement = transaction.prepare(
+            "SELECT id, assessment FROM sessions
+             WHERE status = 'complete' AND COALESCE(kind, '') <> 'placement'
+               AND assessment IS NOT NULL",
+        )?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    for (id, assessment) in finished {
+        let scored = serde_json::from_str::<serde_json::Value>(&assessment)
+            .ok()
+            .and_then(|value| value["scored"].as_bool())
+            .unwrap_or(false);
+        if !scored {
+            continue;
+        }
+        let answers = {
+            let mut statement = transaction.prepare(
+                "SELECT content FROM messages WHERE session_id = ?1 AND speaker = 'learner'",
+            )?;
+            let rows = statement
+                .query_map([&id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let answers: Vec<&str> = answers.iter().map(String::as_str).collect();
+        if !crate::notes::too_short(&answers) {
+            transaction.execute("UPDATE sessions SET counted = 1 WHERE id = ?1", [&id])?;
+        }
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+/// The skills the newest talks aimed at, newest first.
+fn read_recent_targets(connection: &Connection) -> EllaResult<Vec<String>> {
+    let mut statement = connection.prepare(
+        "SELECT target_skill FROM sessions WHERE target_skill IS NOT NULL
+         ORDER BY started_at DESC, rowid DESC LIMIT ?1",
+    )?;
+    let targets = statement
+        .query_map([crate::progress::RECENT_TARGETS as i64], |row| row.get(0))?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(targets)
+}
+
+/// The learner's talks since the last lesson they took: how many were
+/// successful, whether any of those began with a lesson waiting, whether any
+/// at all did, what grew in the latest two successful ones, and the skill
+/// kept for the lesson they made ready. A lesson counts as taken once it is a
+/// successful talk itself. Talks are in the order they started, which is the
+/// order their rows were written in.
+fn read_lesson_cadence(connection: &Connection) -> EllaResult<LessonCadence> {
+    let last: i64 = connection.query_row(
+        "SELECT COALESCE(MAX(rowid), 0) FROM sessions WHERE counted = 1 AND kind = 'lesson'",
+        [],
+        |row| row.get(0),
+    )?;
+    let (talks, overdue): (u32, bool) = connection.query_row(
+        "SELECT COUNT(*), COALESCE(MAX(lesson_ready), 0) FROM sessions
+         WHERE rowid > ?1 AND counted = 1 AND COALESCE(kind, '') <> 'lesson'",
+        [last],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let held: bool = connection.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sessions WHERE rowid > ?1 AND lesson_ready = 1)",
+        [last],
+        |row| row.get(0),
+    )?;
+    let latest = {
+        let mut statement = connection.prepare(
+            "SELECT assessment FROM sessions
+             WHERE rowid > ?1 AND counted = 1 AND COALESCE(kind, '') <> 'lesson'
+             ORDER BY rowid DESC LIMIT 2",
+        )?;
+        let rows = statement
+            .query_map([last], |row| row.get::<_, Option<String>>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    let mut strengths: Vec<String> = Vec::new();
+    for assessment in latest.into_iter().flatten() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&assessment) else {
+            continue;
+        };
+        for skill in value["skills"].as_array().into_iter().flatten() {
+            if let Some(label) = skill["label"].as_str().filter(|label| !label.is_empty()) {
+                if !strengths.iter().any(|known| known == label) {
+                    strengths.push(label.to_owned());
+                }
+            }
+        }
+    }
+    let kept = connection
+        .query_row(
+            "SELECT lesson_skill FROM sessions WHERE rowid > ?1 AND lesson_skill IS NOT NULL
+             ORDER BY rowid DESC LIMIT 1",
+            [last],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(LessonCadence {
+        talks,
+        overdue,
+        held,
+        strengths,
+        kept,
+    })
+}
+
+/// A JSON array of skill labels, as `lesson_strengths` keeps it; strings
+/// only, and none from anything else.
+fn labels(kept: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<serde_json::Value>>(kept)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|label| label.as_str().map(str::to_owned))
+        .collect()
 }
 
 /// For a few hours of development, and never in a release, the laptop could
@@ -2042,7 +2298,7 @@ mod tests {
             messages: Vec::new(),
         };
         database
-            .create_session(&session, &message(Speaker::Ella, 0, at), None, None, None)
+            .create_session(&session, &message(Speaker::Ella, 0, at), None, None, None, &LessonMark::default())
             .unwrap();
         for turn in 1..=answers {
             let when = at + Duration::seconds(20 * i64::from(turn));
@@ -2051,6 +2307,7 @@ mod tests {
                     &id,
                     &message(Speaker::Learner, turn, when),
                     &message(Speaker::Ella, turn, when),
+                    None,
                     None,
                 )
                 .unwrap();
@@ -2157,11 +2414,16 @@ mod tests {
             );
             assert!(
                 changed.iter().any(|line| line.contains("\"sessions\"")
-                    && line.contains(", kind TEXT, target_skill TEXT, assessment TEXT, level_code TEXT")),
+                    && line.contains(
+                        ", kind TEXT, target_skill TEXT, assessment TEXT, level_code TEXT, \
+                         lesson_ready INTEGER NOT NULL DEFAULT 0, lesson_strengths TEXT, \
+                         lesson_skill TEXT, counted INTEGER NOT NULL DEFAULT 0"
+                    )),
                 "{changed:?}"
             );
             assert!(
-                changed.iter().any(|line| line.contains("\"messages\"") && line.contains(", spoken_ms INTEGER")),
+                changed.iter().any(|line| line.contains("\"messages\"")
+                    && line.contains(", spoken_ms INTEGER, skill_used INTEGER")),
                 "{changed:?}"
             );
             assert!(
@@ -2725,6 +2987,172 @@ mod tests {
     }
 
     #[test]
+    fn the_lesson_cadence_counts_successful_talks_since_the_last_lesson_taken() {
+        let database = Database::in_memory().unwrap();
+        save_asha(&database);
+        // How the assessment and the start leave a talk.
+        let mark = |id: &str, kind: Option<&str>, ready: bool, counted: bool, grew: &[&str]| {
+            let skills: Vec<serde_json::Value> =
+                grew.iter().map(|label| serde_json::json!({"label": label, "count": 1})).collect();
+            database
+                .connection()
+                .unwrap()
+                .execute(
+                    "UPDATE sessions SET kind = ?2, lesson_ready = ?3, counted = ?4, assessment = ?5
+                     WHERE id = ?1",
+                    params![id, kind, ready, counted, serde_json::json!({"skills": skills}).to_string()],
+                )
+                .unwrap();
+        };
+        assert_eq!(database.lesson_cadence().unwrap(), LessonCadence::default());
+
+        let first = talk(&database, "street-food", noon_utc(2026, 1, 10), 3, true);
+        mark(&first, None, false, true, &["Saying hello"]);
+        let short = talk(&database, "gbu", noon_utc(2026, 1, 11), 1, true);
+        mark(&short, None, false, false, &[]);
+        let placement = talk(&database, "placement", noon_utc(2026, 1, 11), 5, true);
+        mark(&placement, Some("placement"), false, false, &[]);
+        let second = talk(&database, "a2-cricket", noon_utc(2026, 1, 12), 3, true);
+        mark(&second, None, false, true, &["Past time words", "Saying hello"]);
+        assert_eq!(
+            database.lesson_cadence().unwrap(),
+            LessonCadence {
+                talks: 2,
+                strengths: vec!["Past time words".into(), "Saying hello".into()],
+                ..LessonCadence::default()
+            },
+            "newest first, each once"
+        );
+
+        // A lesson begun but left too short is not taken: it is still waiting.
+        let left = talk(&database, "street-food", noon_utc(2026, 1, 13), 1, true);
+        mark(&left, Some("lesson"), true, false, &[]);
+        let cadence = database.lesson_cadence().unwrap();
+        assert!(cadence.held && !cadence.overdue);
+        assert_eq!(cadence.talks, 2);
+
+        // Taken: the count starts again.
+        let lesson = talk(&database, "street-food", noon_utc(2026, 1, 14), 4, true);
+        mark(&lesson, Some("lesson"), true, true, &["Saying hello"]);
+        assert_eq!(database.lesson_cadence().unwrap(), LessonCadence::default());
+
+        // A talk that began with the next lesson waiting, and was not counted,
+        // keeps it ready; one that was counted went past it.
+        let waited = talk(&database, "gbu", noon_utc(2026, 1, 15), 1, true);
+        mark(&waited, None, true, false, &[]);
+        database
+            .connection()
+            .unwrap()
+            .execute("UPDATE sessions SET lesson_skill = 'A1:U1-GRA-01' WHERE id = ?1", [&waited])
+            .unwrap();
+        let cadence = database.lesson_cadence().unwrap();
+        assert!(cadence.held && !cadence.overdue);
+        assert_eq!(cadence.kept.as_deref(), Some("A1:U1-GRA-01"));
+        let past = talk(&database, "a2-cricket", noon_utc(2026, 1, 16), 3, true);
+        mark(&past, None, true, true, &[]);
+        let cadence = database.lesson_cadence().unwrap();
+        assert_eq!((cadence.talks, cadence.overdue), (1, true));
+    }
+
+    #[test]
+    fn a_lesson_keeps_ellas_judgement_of_each_answer_and_what_she_praises() {
+        let database = Database::in_memory().unwrap();
+        save_asha(&database);
+        let at = noon_utc(2026, 1, 10);
+        let session = Session {
+            id: "lesson".into(),
+            topic_id: "street-food".into(),
+            topic_label: "Street food".into(),
+            status: "active".into(),
+            started_at: at.to_rfc3339(),
+            completed_at: None,
+            messages: Vec::new(),
+        };
+        let praised = LessonMark {
+            ready: true,
+            strengths: Some(vec!["Saying hello".into()]),
+        };
+        database
+            .create_session(&session, &message(Speaker::Ella, 0, at), Some("lesson"), Some("A1:U1-GRA-01"), Some("A1"), &praised)
+            .unwrap();
+        let meta = database.session_curriculum("lesson").unwrap();
+        assert_eq!(meta.kind.as_deref(), Some("lesson"));
+        assert_eq!(meta.lesson_strengths, Some(vec!["Saying hello".to_string()]));
+
+        let judged = message(Speaker::Learner, 1, at);
+        database
+            .persist_turn("lesson", &judged, &message(Speaker::Ella, 1, at), None, Some(true))
+            .unwrap();
+        let unjudged = message(Speaker::Learner, 2, at);
+        database
+            .persist_turn("lesson", &unjudged, &message(Speaker::Ella, 2, at), None, None)
+            .unwrap();
+        let judgements = database.lesson_judgements("lesson").unwrap();
+        assert_eq!(judgements.len(), 1);
+        assert_eq!(judgements.get(&judged.id), Some(&true));
+    }
+
+    #[test]
+    fn talks_finished_before_lessons_existed_are_counted_once_by_the_same_measure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ella.sqlite3");
+        {
+            let database = Database::open(&path).unwrap();
+            save_asha(&database);
+            let long = talk(&database, "street-food", noon_utc(2026, 1, 10), 3, true);
+            let unscored = talk(&database, "gbu", noon_utc(2026, 1, 11), 3, true);
+            let brief = talk(&database, "a2-cricket", noon_utc(2026, 1, 12), 2, true);
+            let placement = talk(&database, "placement", noon_utc(2026, 1, 13), 5, true);
+            let connection = database.connection().unwrap();
+            // Three answers of four words each: long enough for notes.
+            connection
+                .execute("UPDATE messages SET content = 'I ate pani puri' WHERE speaker = 'learner'", [])
+                .unwrap();
+            for (id, scored) in [(&long, true), (&unscored, false), (&brief, true), (&placement, true)] {
+                connection
+                    .execute(
+                        "UPDATE sessions SET assessment = ?2 WHERE id = ?1",
+                        params![id, serde_json::json!({"scored": scored, "skills": []}).to_string()],
+                    )
+                    .unwrap();
+            }
+            connection
+                .execute("UPDATE sessions SET kind = 'placement' WHERE id = ?1", [&placement])
+                .unwrap();
+            // As a database from before lessons has it.
+            for (table, column) in [
+                ("sessions", "counted"),
+                ("sessions", "lesson_ready"),
+                ("sessions", "lesson_strengths"),
+                ("sessions", "lesson_skill"),
+                ("messages", "skill_used"),
+            ] {
+                connection
+                    .execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])
+                    .unwrap();
+            }
+        }
+        let database = Database::open(&path).unwrap();
+        let counted = rows(
+            &database.connection().unwrap(),
+            "SELECT topic_id FROM sessions WHERE counted = 1 ORDER BY rowid",
+        );
+        assert_eq!(counted, ["Text(\"street-food\")"]);
+        assert_eq!(database.lesson_cadence().unwrap().talks, 1);
+        assert!(!database.lesson_cadence().unwrap().overdue, "nothing was waiting then");
+
+        // Once: a talk counted later is not counted again on the next launch,
+        // nor is one the measure would count but the assessment did not.
+        database
+            .connection()
+            .unwrap()
+            .execute("UPDATE sessions SET counted = 0", [])
+            .unwrap();
+        drop(database);
+        assert_eq!(Database::open(&path).unwrap().lesson_cadence().unwrap().talks, 0);
+    }
+
+    #[test]
     fn the_recent_topics_are_the_latest_talked_about_each_once() {
         let database = Database::in_memory().unwrap();
         save_asha(&database);
@@ -2767,6 +3195,7 @@ mod tests {
                 &id,
                 &message(Speaker::Learner, 2, after_midnight),
                 &message(Speaker::Ella, 2, after_midnight),
+                None,
                 None,
             )
             .unwrap();

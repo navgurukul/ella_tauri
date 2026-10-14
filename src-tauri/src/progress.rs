@@ -282,16 +282,40 @@ pub fn choose_target(
     best.map(|(placed, _)| placed)
 }
 
+/// The skill the mentor's lesson is for: of the skills a talk at `position`
+/// may aim at, the one still to pass that has missed most, once that is
+/// `STUCK_AFTER` or more; the earlier one on a tie. `None` when nothing is
+/// stuck. Home and the mentor card offer it and the lesson aims at it, so
+/// they agree. Ella Mobile's `stuckSkill`.
+pub fn stuck_skill(position: &Position, progress: &ProgressMap) -> Option<Placed> {
+    let mut stuck = None;
+    let mut most = 0;
+    for candidate in candidates(position, progress) {
+        let entry = lookup(progress, &candidate.key);
+        if entry.misses < STUCK_AFTER || passed(candidate.skill, &entry) {
+            continue;
+        }
+        if entry.misses > most {
+            most = entry.misses;
+            stuck = Some(candidate);
+        }
+    }
+    stuck
+}
+
 /// What one scored talk does to the skills it was scored on. `scores` holds
 /// the judge's confidence for each skill the learner showed; one left out was
-/// not shown. The talk's aim, when not shown, misses once more. A skill the
-/// talk changed nothing about comes back equal to what went in.
+/// not shown. The talk's aim, when not shown, misses once more, unless the
+/// talk was a `lesson` on it: one taught is not one the learner went past,
+/// and its count starts again. A skill the talk changed nothing about comes
+/// back equal to what went in.
 pub fn apply_scores(
     progress: &[SkillProgress],
     scores: &HashMap<String, f64>,
     target: Option<&str>,
     topic_id: &str,
     today: &str,
+    lesson: bool,
 ) -> Vec<SkillProgress> {
     progress
         .iter()
@@ -313,7 +337,7 @@ pub fn apply_scores(
             }
             if target == Some(entry.skill.as_str()) {
                 return SkillProgress {
-                    misses: entry.misses + 1,
+                    misses: if lesson { 0 } else { entry.misses + 1 },
                     ..entry.clone()
                 };
             }
@@ -591,7 +615,7 @@ mod tests {
 
     #[test]
     fn a_strong_demonstration_raises_mastery_by_the_bounded_step_and_is_recorded() {
-        let after = apply_scores(&[at("k")], &scores(&[("k", 0.8)]), Some("k"), "cab", TODAY);
+        let after = apply_scores(&[at("k")], &scores(&[("k", 0.8)]), Some("k"), "cab", TODAY, false);
         assert!((after[0].mastery - 0.32).abs() < 1e-9);
         assert_eq!(
             SkillProgress { mastery: 0.0, ..after[0].clone() },
@@ -602,7 +626,7 @@ mod tests {
                 ..at("k")
             }
         );
-        let again = apply_scores(&after, &scores(&[("k", 0.8)]), None, "cab", "2026-09-27");
+        let again = apply_scores(&after, &scores(&[("k", 0.8)]), None, "cab", "2026-09-27", false);
         assert!((again[0].mastery - (0.32 + 0.4 * 0.8 * 0.68)).abs() < 1e-9);
         assert_eq!((again[0].sightings, again[0].topics.clone()), (2, vec!["cab".to_string()]));
     }
@@ -616,6 +640,7 @@ mod tests {
             Some("target"),
             "gbu",
             TODAY,
+            false,
         );
         assert_eq!(after[0], SkillProgress { misses: 2, ..before[0].clone() });
         assert_eq!(after[1], before[1], "an untouched skill comes back unchanged");
@@ -623,8 +648,41 @@ mod tests {
 
     #[test]
     fn showing_a_stuck_skill_clears_its_misses() {
-        let after = apply_scores(&[SkillProgress { misses: 3, ..at("k") }], &scores(&[("k", 0.9)]), Some("k"), "cab", TODAY);
+        let after = apply_scores(&[SkillProgress { misses: 3, ..at("k") }], &scores(&[("k", 0.9)]), Some("k"), "cab", TODAY, false);
         assert_eq!(after[0].misses, 0);
+    }
+
+    #[test]
+    fn a_lesson_on_a_skill_that_does_not_show_starts_its_count_again() {
+        let before = [SkillProgress { misses: 2, ..at("target") }, SkillProgress { misses: 1, ..at("other") }];
+        let after = apply_scores(&before, &scores(&[]), Some("target"), "cab", TODAY, true);
+        assert_eq!(after[0], SkillProgress { misses: 0, ..before[0].clone() });
+        assert_eq!(after[1], before[1], "only the lesson's own skill is taught");
+    }
+
+    #[test]
+    fn the_stuck_skill_is_the_one_still_to_pass_that_has_missed_most() {
+        let progress = by_key(&[
+            SkillProgress { misses: 1, ..at("A1:U1-VOC-01") },
+            SkillProgress { misses: 2, ..at("A1:U1-GRA-01") },
+            SkillProgress { misses: 3, ..at("A1:U1-FLU-01") },
+        ]);
+        assert_eq!(stuck_skill(&a1s1(), &progress).unwrap().key, "A1:U1-FLU-01");
+
+        let tied = by_key(&[
+            SkillProgress { misses: 2, ..at("A1:U1-GRA-01") },
+            SkillProgress { misses: 2, ..at("A1:U1-FLU-01") },
+        ]);
+        assert_eq!(stuck_skill(&a1s1(), &tied).unwrap().key, "A1:U1-GRA-01", "the earlier one on a tie");
+    }
+
+    #[test]
+    fn nothing_is_stuck_below_two_misses_nor_once_it_has_passed() {
+        let once = by_key(&[SkillProgress { misses: 1, ..at("A1:U1-GRA-01") }]);
+        assert!(stuck_skill(&a1s1(), &once).is_none());
+        // Grammar passes once it has started to show, whatever it missed since.
+        let shown = by_key(&[SkillProgress { mastery: 0.3, misses: 2, ..at("A1:U1-GRA-01") }]);
+        assert!(stuck_skill(&a1s1(), &shown).is_none());
     }
 
     #[test]
@@ -638,7 +696,7 @@ mod tests {
             ("A1:U2-VOC-01", 0.9),
             ("A1:U2-GRA-01", 0.5),
         ]);
-        let after = apply_scores(&before, &judged, Some("A1:U1-FLU-01"), "cab", TODAY);
+        let after = apply_scores(&before, &judged, Some("A1:U1-FLU-01"), "cab", TODAY, false);
         let grown = grown_skills(&before, &after, &judged, Some("A1:U1-FLU-01"));
         let labels: Vec<&str> = grown.iter().map(|skill| skill.label.as_str()).collect();
         let label = |key: &str| curriculum::skill_at(key).unwrap().2.label.as_str();

@@ -4,6 +4,7 @@ pub mod domain;
 pub mod error;
 pub mod infrastructure;
 mod install;
+pub mod lesson;
 mod ipc;
 mod machine;
 pub mod notes;
@@ -149,6 +150,7 @@ pub fn run() {
             ipc::log_out,
             ipc::save_avatar_color,
             ipc::start_session,
+            ipc::start_lesson,
             ipc::start_placement,
             ipc::start_chore,
             ipc::speak_opening,
