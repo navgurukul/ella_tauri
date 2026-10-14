@@ -188,6 +188,12 @@ export interface SkillGrowth {
   count: number;
 }
 
+/** The skill a talk aimed at: its short label, and the curriculum's "I can …". */
+export interface SkillAim {
+  label: string;
+  text: string;
+}
+
 /** What a finished talk did for the learner. Worked out once by the backend
  * and kept on the talk, so asking again answers the same. */
 export interface Assessment {
@@ -201,6 +207,9 @@ export interface Assessment {
   advanced?: Advance | null;
   /** Skills the talk counted, its aim first, at most three. */
   skills: SkillGrowth[];
+  /** The skill the talk aimed at, which the recap suggests trying next time
+   * when it counted none. Absent from assessments kept before. */
+  aim?: SkillAim | null;
   /** False when nothing judged the talk: nothing said, or no model to judge. */
   scored: boolean;
   /** Ella's notes for the recap; null for a placement, and for a talk too
@@ -212,8 +221,10 @@ export interface Assessment {
 export interface TalkNotes {
   /** At most two short lines, read off what the learner said. */
   went_well: string[];
-  /** One of the learner's own phrases and how to say it. */
+  /** One of the learner's own phrases and how to say it: the best of them. */
   fix?: Fix | null;
+  /** Up to two more, when the cloud's model corrected the talk. */
+  more_fixes?: Fix[];
   /** Whether a model looked for a mistake; without one, no fix does not mean
    * nothing to fix. */
   checked: boolean;
@@ -451,7 +462,7 @@ export interface EllaBridge {
    * then kept. Rejects while the talk is still going, or when the model could
    * not be read — asking again later is safe. `onScored` hears a talk's
    * assessment as soon as the talk is scored and what it counted is kept,
-   * before its one fix has been looked for; the whole of it follows. */
+   * before its fixes have been looked for; the whole of it follows. */
   assessSession(sessionId: string, onScored?: (scored: Assessment) => void): Promise<Assessment>;
   /** Every level, lowest first, as it stands for the learner. */
   levels(): Promise<LevelView[]>;
@@ -465,9 +476,10 @@ export interface EllaBridge {
    * learner hears that Ella missed them instead of only reading it. Tauri
    * bridge only; in the browser this falls back to system speech. */
   speakRetryPrompt?(sessionId: string): Promise<SpokenLine>;
-  /** The recap's fix said aloud, from the fix kept on the talk. Tauri bridge
-   * only; in the browser it falls back to system speech. */
-  speakFix?(sessionId: string): Promise<SpokenLine>;
+  /** One of the recap's fixes said aloud, the `index`-th of those kept on
+   * the talk (the first by default). Tauri bridge only; in the browser it
+   * falls back to system speech. */
+  speakFix?(sessionId: string, index?: number): Promise<SpokenLine>;
   getSession(sessionId: string): Promise<Session>;
   sendTextTurn(sessionId: string, text: string): Promise<TurnResult>;
   sendVoiceTurn(input: VoiceTurnInput): Promise<TurnResult>;

@@ -1,4 +1,9 @@
 {
+  "0.1.23": [
+    "When you are online, your recap can show up to three fixes. Use the arrows to see each one, and tap the speaker to hear it.",
+    "The Skills grew card now shows which blocks are from today and which are from your talks before.",
+    "When no skill grew in a talk, the recap shows you one skill to try next time."
+  ],
   "0.1.22": [
     "Ella now has short lessons for you. When you get stuck on something, or after two good talks, your lesson is ready on Home.",
     "In a lesson, Ella helps you practise one thing: she praises what you get right and helps you fix the rest, step by step.",

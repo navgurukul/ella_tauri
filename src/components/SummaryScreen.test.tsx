@@ -186,7 +186,100 @@ describe("the recap", () => {
     (bridge as { speakFix?: unknown }).speakFix = speakFix;
     renderRecap({ assessment: assessed() });
     fireEvent.click(screen.getByRole("button", { name: "Hear it" }));
-    await waitFor(() => expect(speakFix).toHaveBeenCalledWith("talk-1"));
+    await waitFor(() => expect(speakFix).toHaveBeenCalledWith("talk-1", 0));
+    expect(screen.queryByRole("button", { name: "Next fix" })).not.toBeInTheDocument();
+  });
+
+  it("turns over up to three fixes, the best first, and says the one shown", async () => {
+    const speakFix = vi.fn().mockResolvedValue({ audio: null, speech_words: [], streamed_segments: 0 });
+    (bridge as { speakFix?: unknown }).speakFix = speakFix;
+    renderRecap({
+      assessment: assessed({
+        notes: {
+          went_well: ["Warm greeting", "Gave reasons"],
+          fix: { said: "Myself Aarav", better: "I'm Aarav" },
+          more_fixes: [
+            { said: "Yesterday I go to market", better: "Yesterday I went to market" },
+            { said: "We plays cricket", better: "We play cricket" },
+          ],
+          checked: true,
+        },
+      }),
+    });
+    const fixes = screen.getByRole("region", { name: "Three fixes" });
+    expect(fixes).toHaveTextContent("Better: I'm Aarav");
+    expect(fixes).toHaveTextContent("1 of 3");
+    expect(screen.getByRole("button", { name: "Previous fix" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Next fix" }));
+    expect(fixes).toHaveTextContent("You said: Yesterday I go to market");
+    expect(fixes).toHaveTextContent("Better: Yesterday I went to market");
+    expect(fixes).toHaveTextContent("2 of 3");
+    fireEvent.click(screen.getByRole("button", { name: "Hear it" }));
+    await waitFor(() => expect(speakFix).toHaveBeenCalledWith("talk-1", 1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Next fix" }));
+    expect(fixes).toHaveTextContent("Better: We play cricket");
+    expect(screen.getByRole("button", { name: "Next fix" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Previous fix" }));
+    expect(fixes).toHaveTextContent("2 of 3");
+  });
+
+  it("keys today's block and, when a bar has them, the talks before", () => {
+    const { rerender, onDone, onTryAgain, onRetry, onCelebrated, onLevels } = renderRecap({ assessment: assessed() });
+    const key = () => document.querySelector(".recap-skills__key");
+    expect(key()).toHaveTextContent("Today");
+    expect(key()).toHaveTextContent("Before");
+
+    rerender(
+      <SummaryScreen
+        summary={summaryOf()}
+        assessment={assessed({ skills: [{ label: "Directions", count: 1 }] })}
+        assessError={null}
+        before={nothingYet}
+        learnerName="Aarav Sharma"
+        standing={standing}
+        nextTopic="Sunday vegetable run"
+        {...{ onDone, onTryAgain, onRetry, onCelebrated, onLevels }}
+      />,
+    );
+    expect(key()).toHaveTextContent("Today");
+    expect(key()).not.toHaveTextContent("Before");
+  });
+
+  it("suggests the skill the talk aimed at when it counted none", () => {
+    const aim = { label: "Used to", text: "I can use ‘used to’ to talk about past habits." };
+    const { rerender, onDone, onTryAgain, onRetry, onCelebrated, onLevels } = renderRecap({
+      assessment: assessed({ skills: [], aim }),
+    });
+    const tryNext = screen.getByRole("region", { name: "Try next time" });
+    expect(tryNext).toHaveTextContent("Used to");
+    expect(tryNext).toHaveTextContent("I can use ‘used to’ to talk about past habits.");
+    expect(screen.queryByRole("region", { name: "Skills grew" })).not.toBeInTheDocument();
+    // Three notes and the streak.
+    expect(document.querySelector(".recap__tiles")?.getAttribute("style")).toContain("--columns: 4");
+
+    const recap = (assessment: Assessment) => (
+      <SummaryScreen
+        summary={summaryOf()}
+        assessment={assessment}
+        assessError={null}
+        before={nothingYet}
+        learnerName="Aarav Sharma"
+        standing={standing}
+        nextTopic="Sunday vegetable run"
+        {...{ onDone, onTryAgain, onRetry, onCelebrated, onLevels }}
+      />
+    );
+    // Nothing judged the talk, so nothing was missed: no suggestion.
+    rerender(recap(assessed({ skills: [], aim, scored: false })));
+    expect(screen.queryByRole("region", { name: "Try next time" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Skills grew" })).not.toBeInTheDocument();
+
+    // Skills that grew are shown as ever, aim or not.
+    rerender(recap(assessed({ aim })));
+    expect(screen.getByRole("region", { name: "Skills grew" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Try next time" })).not.toBeInTheDocument();
   });
 
   it("offers to try again when the talk could not be read, and still counts the streak", () => {

@@ -22,6 +22,7 @@ import type {
   Fix,
   LearnerProgress,
   SessionSummary,
+  SkillAim,
   SkillGrowth,
   Standing,
 } from "../types";
@@ -29,13 +30,14 @@ import type {
 /**
  * The recap, as the Ella Desktop Recap design draws it: a band that celebrates
  * the talk (Ella cheering, or the talk partner and how the goal went), then
- * Ella's notes in tiles — what went well, one fix, the skills that grew — the
- * streak, and what is next.
+ * Ella's notes in tiles — what went well, a fix or up to three, the skills
+ * that grew (or, when none did, the one to try next time) — the streak, and
+ * what is next.
  *
  * It opens at once, while the backend works out what the talk did. What went
  * well is there from the start, read off the learner's words as the talk
- * closed; the skills fill in once the model has scored the talk, and the one
- * fix once it has looked for it, each tile waiting with three dots until
+ * closed; the skills fill in once the model has scored the talk, and the
+ * fixes once it has looked for them, each tile waiting with three dots until
  * then. The app owns that question, so leaving before the answer comes loses
  * nothing. A talk too short for notes says so straight away, and a talk that
  * could not be read offers to try again — the streak counts either way.
@@ -61,7 +63,7 @@ export function SummaryScreen({
   summary: SessionSummary;
   /** Null until the backend has answered. */
   assessment: Assessment | null;
-  /** The talk is scored, and its one fix is still being looked for. */
+  /** The talk is scored, and its fixes are still being looked for. */
   fixPending?: boolean;
   /** Why it could not answer; asking again is safe. */
   assessError: string | null;
@@ -92,7 +94,9 @@ export function SummaryScreen({
 
   const chore = summary.chore ?? null;
   const notes = assessment?.notes ?? null;
+  const fixes = notes?.fix ? [notes.fix, ...(notes.more_fixes ?? [])] : [];
   const fixReady = assessment !== null && !fixPending;
+  const aim = aimToTry(assessment);
   const wentWell = notes?.went_well ?? (summary.went_well?.length ? summary.went_well : null);
   const standing = assessment?.standing ?? standingBefore;
   const tiles = tilesFor(summary, assessment, assessError, fixPending);
@@ -115,14 +119,19 @@ export function SummaryScreen({
 
         <div className="recap__tiles" style={{ "--columns": columns } as CSSProperties}>
           {tiles.map((tile) => (
-            <Tile key={tile} kind={tile} span={isNotice(tile) ? noticeSpan : 1}>
+            <Tile
+              key={tile}
+              kind={tile}
+              label={tile === "fix" ? fixesTitle(fixes.length) : tile === "skills" && aim ? TRY_NEXT : TILE_LABEL[tile]}
+              span={isNotice(tile) ? noticeSpan : 1}
+            >
               {tile === "well" ? (
                 // "Nothing to fix" is only said when a model looked.
                 <WentWell items={wentWell} nothingToFix={fixReady && Boolean(notes?.checked) && !notes?.fix} />
               ) : tile === "fix" ? (
-                <OneFix fix={notes?.fix ?? null} ready={fixReady} sessionId={summary.session_id} />
+                <Fixes fixes={fixes} ready={fixReady} sessionId={summary.session_id} />
               ) : tile === "skills" ? (
-                <SkillsGrew skills={assessment?.skills ?? null} />
+                aim ? <TryNext aim={aim} /> : <SkillsGrew skills={assessment?.skills ?? null} />
               ) : tile === "failed" ? (
                 <Failed message={assessError ?? ""} onRetry={onRetry} />
               ) : (
@@ -335,7 +344,9 @@ function isNotice(tile: TileKey | "streak") {
 
 /** Which tiles the recap has, in reading order. Before the answer it holds a
  * place for every note; once it lands, only what the talk has fills one, and
- * the fix keeps its place while it is still being looked for. */
+ * the fix keeps its place while it is still being looked for. A talk with
+ * notes that counted no skill keeps the skills' place for the one it aimed
+ * at, to try next time. */
 function tilesFor(
   summary: SessionSummary,
   assessment: Assessment | null,
@@ -348,7 +359,14 @@ function tilesFor(
   if (!assessment) return ["well", "fix", "skills"];
   const notes = assessment.notes;
   if (!notes) return [...grew, "notice"];
-  return ["well", ...(notes.fix || fixPending ? (["fix"] as TileKey[]) : []), ...grew];
+  const skills: TileKey[] = grew.length > 0 || aimToTry(assessment) ? ["skills"] : [];
+  return ["well", ...(notes.fix || fixPending ? (["fix"] as TileKey[]) : []), ...skills];
+}
+
+/** The skill to try next time: the one the talk aimed at, when it was scored
+ * and counted none. Not when nothing could judge it: then nothing was missed. */
+function aimToTry(assessment: Assessment | null): SkillAim | null {
+  return assessment?.scored && assessment.skills.length === 0 ? (assessment.aim ?? null) : null;
 }
 
 const TILE_LABEL: Record<TileKey, string> = {
@@ -359,11 +377,18 @@ const TILE_LABEL: Record<TileKey, string> = {
   failed: "Ella’s notes",
 };
 
-function Tile({ kind, span, children }: { kind: TileKey; span: number; children: ReactNode }) {
+const TRY_NEXT = "Try next time";
+
+/** "One fix", "Two fixes", "Three fixes": the tile's title, and its name. */
+function fixesTitle(count: number) {
+  return count === 2 ? "Two fixes" : count === 3 ? "Three fixes" : TILE_LABEL.fix;
+}
+
+function Tile({ kind, label, span, children }: { kind: TileKey; label: string; span: number; children: ReactNode }) {
   return (
     <section
       className={`recap-tile recap-tile--${kind}`}
-      aria-label={TILE_LABEL[kind]}
+      aria-label={label}
       style={span > 1 ? { gridColumn: `span ${span}` } : undefined}
     >
       {children}
@@ -412,16 +437,43 @@ function WellItems({ items }: { items: string[] }) {
   );
 }
 
-function OneFix({ fix, ready, sessionId }: { fix: Fix | null; ready: boolean; sessionId: string }) {
+/** The fixes, one at a time, the best first: each is the learner's words, the
+ * better way, and Ella saying it. More than one turns over with the arrows
+ * either side of "Hear it". */
+function Fixes({ fixes, ready, sessionId }: { fixes: Fix[]; ready: boolean; sessionId: string }) {
+  const [shown, setShown] = useState(0);
+  const at = Math.min(shown, Math.max(0, fixes.length - 1));
   return (
     <>
-      <h2 className="display recap-tile__title">One fix</h2>
-      {ready && fix ? <FixLines fix={fix} sessionId={sessionId} /> : <Waiting />}
+      <h2 className="display recap-tile__title">{fixesTitle(fixes.length)}</h2>
+      {ready && fixes.length > 0 ? (
+        // A fix of its own each, so turning over stops Ella saying the last.
+        <FixLines
+          key={at}
+          fix={fixes[at]}
+          index={at}
+          sessionId={sessionId}
+          turn={fixes.length > 1 ? { count: fixes.length, to: setShown } : null}
+        />
+      ) : (
+        <Waiting />
+      )}
     </>
   );
 }
 
-function FixLines({ fix, sessionId }: { fix: Fix; sessionId: string }) {
+function FixLines({
+  fix,
+  index,
+  sessionId,
+  turn,
+}: {
+  fix: Fix;
+  index: number;
+  sessionId: string;
+  /** How many fixes there are, and how to show another; null for one alone. */
+  turn: { count: number; to: (index: number) => void } | null;
+}) {
   const [hearing, setHearing] = useState(false);
   const stop = useRef<(() => void) | null>(null);
   const live = useRef(true);
@@ -443,7 +495,7 @@ function FixLines({ fix, sessionId }: { fix: Fix; sessionId: string }) {
     };
     let audio = null;
     try {
-      audio = (await bridge.speakFix?.(sessionId))?.audio ?? null;
+      audio = (await bridge.speakFix?.(sessionId, index))?.audio ?? null;
     } catch {
       // Her own voice could not be had; the system's says it instead.
     }
@@ -467,23 +519,59 @@ function FixLines({ fix, sessionId }: { fix: Fix; sessionId: string }) {
         <span className="sr-only">Better: </span>
         {fix.better}
       </p>
-      <button
-        className={`recap-fix__hear ${hearing ? "is-hearing" : ""}`.trim()}
-        onClick={() => void hear()}
-        aria-label="Hear it"
-      >
-        {hearing ? (
-          <span className="recap-fix__wave" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-            <i />
-          </span>
-        ) : (
-          <SpeakerGlyph />
+      <div className="recap-fix__controls">
+        {turn && (
+          <button
+            className="recap-fix__turn"
+            onClick={() => turn.to(index - 1)}
+            disabled={index === 0}
+            aria-label="Previous fix"
+          >
+            <TurnGlyph back />
+          </button>
         )}
-      </button>
+        <button
+          className={`recap-fix__hear ${hearing ? "is-hearing" : ""}`.trim()}
+          onClick={() => void hear()}
+          aria-label="Hear it"
+        >
+          {hearing ? (
+            <span className="recap-fix__wave" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+              <i />
+            </span>
+          ) : (
+            <SpeakerGlyph />
+          )}
+        </button>
+        {turn && (
+          <button
+            className="recap-fix__turn"
+            onClick={() => turn.to(index + 1)}
+            disabled={index === turn.count - 1}
+            aria-label="Next fix"
+          >
+            <TurnGlyph />
+          </button>
+        )}
+      </div>
+      {turn && (
+        <p className="recap-fix__count">
+          {index + 1} of {turn.count}
+        </p>
+      )}
     </>
+  );
+}
+
+/** The arrow on a fix's turn-over buttons: back, or on. */
+function TurnGlyph({ back = false }: { back?: boolean }) {
+  return (
+    <svg className="recap-turn" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+      <path d={back ? "M14.5 6l-6 6 6 6" : "M9.5 6l6 6-6 6"} />
+    </svg>
   );
 }
 
@@ -500,8 +588,10 @@ function SkillsGrew({ skills }: { skills: SkillGrowth[] | null }) {
 }
 
 /** Each skill a stack of blocks, one per talk that has shown it: today's on
- * top in green, the earlier ones under it in violet. */
+ * top in green, the earlier ones under it in violet. The key names both, the
+ * earlier ones only when a bar has them. */
 function SkillBars({ skills }: { skills: SkillGrowth[] }) {
+  const before = skills.some((skill) => Math.min(MAX_BLOCKS, skill.count) > 1);
   return (
     <>
       <ul className="recap-skills">
@@ -527,9 +617,29 @@ function SkillBars({ skills }: { skills: SkillGrowth[] }) {
         })}
       </ul>
       <p className="recap-skills__key" aria-hidden="true">
-        <i />
-        Today
+        <span>
+          <i />
+          Today
+        </span>
+        {before && (
+          <span>
+            <i className="is-before" />
+            Before
+          </span>
+        )}
       </p>
+    </>
+  );
+}
+
+/** A talk that counted no skill: the one it aimed at, to try next time, as the
+ * curriculum says it. */
+function TryNext({ aim }: { aim: SkillAim }) {
+  return (
+    <>
+      <h2 className="display recap-tile__title">{TRY_NEXT}</h2>
+      <p className="display recap-aim__label">{aim.label}</p>
+      <p className="recap-aim__text">{aim.text}</p>
     </>
   );
 }

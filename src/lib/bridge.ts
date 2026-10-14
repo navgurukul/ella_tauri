@@ -174,7 +174,7 @@ class TauriBridge implements EllaBridge {
   speakOpening = (sessionId: string) => invoke<SpokenLine>("speak_opening", { sessionId });
   speakRetryPrompt = (sessionId: string) =>
     invoke<SpokenLine>("speak_retry_prompt", { sessionId });
-  speakFix = (sessionId: string) => invoke<SpokenLine>("speak_fix", { sessionId });
+  speakFix = (sessionId: string, index = 0) => invoke<SpokenLine>("speak_fix", { sessionId, index });
   sendTextTurn = (sessionId: string, text: string) =>
     invoke<TurnResult>("send_text_turn", { sessionId, text });
   sendVoiceTurn = ({ sessionId, samples, sampleRate, browserTranscript }: VoiceTurnInput) =>
@@ -650,6 +650,7 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
           closing: `That was lovely, ${learner.name.split(/\s+/)[0]}!`,
           advanced: null,
           skills: [],
+          aim: null,
           scored: heard,
           notes: null,
         };
@@ -661,12 +662,13 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
           closing: null,
           advanced: null,
           skills: [],
+          aim: null,
           scored: false,
           // What went well needs no model; a fix does, so there is none, and
           // nothing claims there was nothing to fix.
           notes: tooShort(answersIn(session))
             ? null
-            : { went_well: wentWell(answersIn(session)), fix: null, checked: false },
+            : { went_well: wentWell(answersIn(session)), fix: null, more_fixes: [], checked: false },
         };
       }
       session.assessment = assessment;

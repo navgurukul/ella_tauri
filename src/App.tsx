@@ -419,10 +419,10 @@ export default function App() {
 
   /**
    * Asks what a finished talk did: the skills it counted and any step or
-   * level it finished, then its one fix. The first ask can take a while, as
+   * level it finished, then its fixes. The first ask can take a while, as
    * the model reads the talk; the backend keeps the answer, so asking again
    * is instant and counts nothing twice. The skills come as soon as the talk
-   * is scored, and the fix after them. Each time the snapshot is read again,
+   * is scored, and the fixes after them. Each time the snapshot is read again,
    * wherever the learner is by then, and if they have left the summary a step
    * or level it finished is celebrated where they are.
    */

@@ -489,7 +489,7 @@ impl Database {
     }
 
     /// Puts `finished` in place of the assessment kept on a talk, if what is
-    /// kept is still `kept`: the recap's one fix, filled in once the model has
+    /// kept is still `kept`: the recap's fixes, filled in once the model has
     /// looked, after the rest of the assessment was committed. Nothing it
     /// changes is counted anywhere else. False when something else changed
     /// the kept assessment first, which then stands.

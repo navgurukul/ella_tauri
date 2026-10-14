@@ -166,13 +166,16 @@ pub async fn speak_retry_prompt(
     off_main_thread(move || service.speak_retry_prompt(&session_id)).await
 }
 
+/// One of the recap's fixes, said right: the `index`-th, the first when the
+/// window does not say.
 #[tauri::command]
 pub async fn speak_fix(
     state: State<'_, AppState>,
     session_id: String,
+    index: Option<usize>,
 ) -> Result<SpokenLine, String> {
     let service = state.0.clone();
-    off_main_thread(move || service.speak_fix(&session_id)).await
+    off_main_thread(move || service.speak_fix(&session_id, index.unwrap_or(0))).await
 }
 
 #[tauri::command]
@@ -269,7 +272,7 @@ pub async fn complete_session(
 /// What a finished talk did for the learner. Slow the first time — the model
 /// reads the talk — and kept, so asking again is instant and counts nothing
 /// twice. `scored` hears the assessment as soon as the talk is scored, before
-/// its one fix is in: see `AppService::assess_session_with`.
+/// its fixes are in: see `AppService::assess_session_with`.
 #[tauri::command]
 pub async fn assess_session(
     state: State<'_, AppState>,
