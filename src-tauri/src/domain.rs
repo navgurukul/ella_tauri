@@ -416,6 +416,8 @@ pub struct Focus {
     pub step_focus: String,
     /// "I can …", as the curriculum words it.
     pub skill: String,
+    /// The skill's name, as the recap and Home give it: "Present perfect".
+    pub label: String,
 }
 
 /// A turn of the placement chat.

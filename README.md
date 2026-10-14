@@ -133,8 +133,8 @@ design's window chrome — title bar and traffic lights — is left to the OS.
   yet it asks for a name and goes straight in. "Let's start" after a log out
   is the same learner onboarding again: `save_learner` signs them in and their
   history stays theirs.
-- **Ella, as mentor**, shows a lesson she has ready, while she can teach it
-  (online), in two places, as on Ella Mobile: Home's Today's talk becomes Today's lesson, on the skill it teaches
+- **Ella, as mentor**, shows a lesson she has ready, online or offline, in two
+  places, as on Ella Mobile: Home's Today's talk becomes Today's lesson, on the skill it teaches
   with what she can honestly say about it, and the "Your mentor" card on Talk
   partners offers "Start the lesson" where it said "Nothing to fix yet". Once
   the learner has gone past a waiting lesson in a talk, every way into another
@@ -347,15 +347,9 @@ are the phone's (`lesson.ts`), in [`lesson.rs`](src-tauri/src/lesson.rs):
 - **Overdue**: each talk keeps whether a lesson was waiting when it began
   (`sessions.lesson_ready`). A successful one that began with one waiting means
   the learner went past it, and the window asks them to talk to Ella first.
-- **Only while the cloud answers** (`TutorEngine::teaches_lessons`). Offline,
-  a lesson that is ready waits: Today's talk is a talk, and a talk had
-  meanwhile does not go past it, since it was never offered. Told a lesson's
-  skill, the laptop's Qwen2.5-3B taught it badly: in the same three lessons
-  the cloud taught on 2026-10-13, it marked 6 of 24 answers, praised a "Yes."
-  as a good use, opened by inventing what the learner had said last time,
-  asked the same three questions four replies running, and once answered
-  "Please provide the learner's words so I can review them." A lesson whose
-  cloud drops partway is finished by the laptop's model, as any talk is.
+- **Online or offline** (`TutorEngine::teaches_lessons`): whenever a model
+  answers. A ready lesson waits only when neither the cloud nor the laptop's
+  llama-server answers, and a talk had meanwhile does not go past it.
 
 **The lesson** is a talk on today's topic, kind `lesson`, aimed at the lesson's
 skill (`start_lesson`). Ella teaches it the way the phone's does (Ella Prompt
@@ -370,6 +364,39 @@ says what this reply must do — the pattern check after the second good use,
 the offer to wrap up with the third, the ending from the sixth answer — and the
 lesson closes on her goodbye, by the eighth answer.
 
+**On the laptop**, without the internet, Ella's Qwen2.5-3B teaches the same
+lesson in smaller pieces (`laptop_*` in
+[`lesson_prompt.rs`](src-tauri/src/infrastructure/lesson_prompt.rs)). Told the
+cloud's lesson, it taught badly: on 2026-10-13 it marked 6 of 24 answers,
+praised a "Yes." as a good use, invented the learner's last talk and asked the
+same three questions four replies running; on 2026-10-14 testers' lessons that
+fell to it when the cloud dropped stuck at the seventh answer, the model
+writing a mark and nothing else. So on the laptop:
+
+- The app says the opening (the skill, its example and the topic's first
+  question), the question that begins the ending, and the goodbye, at once.
+- The model is told instructions a third as long, and a note just before the
+  learner's latest answer asks it to judge that answer first, against the
+  skill's own example. A grammar holds its reply to a mark and then words, so
+  it can never be a mark alone, and an answer of a word or two can only be
+  marked a miss.
+- Where the answer's words show the skill's form, the app reads the mark
+  itself ([`skill_forms.rs`](src-tauri/src/skill_forms.rs)): have and a past
+  participle for the present perfect, if and will for the first conditional,
+  the skill's own words for "Contrast words", about half of the A0–B1 skills.
+- The app says what the mark means: a short praise for a use, or the skill and
+  its example for a miss. The model writes one warm sentence about what the
+  learner said and one new question; its own praise, talk about their English,
+  the learner's answer said back and a question asked before are taken out.
+
+In five scripted lessons (`live_laptop_teaches_five_lessons`, against
+llama-server on a CPU), its marks agreed with a teacher's on 33 and 34 of 35
+answers, against 24 to 29 when the model judged every one, and no miss was
+said back. On the slowest tester's laptop (18 prompt tokens a second read, 6.7
+written) a reply would take about 11 s. A lesson the cloud starts and then
+drops is carried on by the laptop's own lesson, and a reply with nothing left
+to say is never an error: the app says something instead.
+
 The phone's model answers a lesson's turn in JSON, its judgement of the answer
 first. Here a reply is spoken while it is written, so her judgement comes first
 as a mark in square brackets, `[USED]` or `[NOT USED]`, and her goodbye ends
@@ -379,13 +406,12 @@ her earlier lines carries it back to the model, so she goes on marking. A
 goodbye she marks closes the lesson once its ending has begun; one marked
 earlier, as when the learner says they have to go, leaves it open for End talk.
 
-**Its opening is the model's own**, unlike a talk's, so it is written before it
-is asked for: while Home shows the lesson, the cloud writes it
-(`prepare_lesson`), and "Start the lesson" says it at once; the lesson's
-instructions are evaluated and kept on the laptop's model the way a talk's are.
-On the laptop alone the opening is written when the lesson starts, from
-instructions already evaluated, rather than as an errand that could hold up a
-talk opened meanwhile. Measured through the cloud on 2026-10-13, three lessons
+**Its opening is the cloud model's own**, unlike a talk's, so it is written
+before it is asked for: while Home shows the lesson, the cloud writes it
+(`prepare_lesson`), and "Start the lesson" says it at once. The laptop's lesson
+instructions are evaluated and kept on its model the way a talk's are, and on
+the laptop alone the app says the laptop's own opening at once
+(`lesson_prompt::laptop_opening`). Measured through the cloud on 2026-10-13, three lessons
 (grammar on a stuck skill, vocabulary after two good talks, fluency after two
 where nothing grew) each opened in 1.3-1.7 s and replied in 0.9-2.0 s, and
 each closed on its goodbye at the seventh or eighth answer.
@@ -1017,7 +1043,8 @@ reply, placement check, judges ──► cloud up? ──yes──► Ella Deskt
   420, not 400.
 - **Replies run to 80 tokens** in the cloud, against the laptop's 50: a talk
   partner's longer sentences ran out mid-sentence at 50. A lesson's run to 140
-  and 110: its opening and its goodbye are five short sentences. A reply that still runs
+  in the cloud, where its opening and its goodbye are five short sentences, and
+  to 70 on the laptop (40 where the app says what follows). A reply that still runs
   out is cut back to its last whole sentence (`whole_sentences`).
 - **Telemetry** marks what the cloud did: `backend: "cloud"` on a turn's
   `llm_runs` and an assessment's `judges`, with `failed` (`unanswered` or `cut`)

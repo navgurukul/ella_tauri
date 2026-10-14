@@ -10,6 +10,7 @@ mod machine;
 pub mod notes;
 pub mod progress;
 mod setup;
+pub mod skill_forms;
 mod telemetry;
 pub mod topics;
 mod window_fit;

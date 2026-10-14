@@ -33,6 +33,7 @@ use crate::{
         engine_manager::LlamaServer,
         lesson_prompt::{self, LessonAsk, Marks},
         model_queue::{Errand, ErrandTurn, GiveWay, Held, ModelQueue, Step},
+        safety,
         speech_timing::{phoneme_spans, shifted, word_spans},
         stt::{
             CanaryStt, SpeechToTextEngine, SttRouter, Transcription, WindowsStt,
@@ -4064,6 +4065,58 @@ const LESSON_BUDGET: Budget = Budget {
     cloud: 140,
 };
 
+/// The laptop's lesson reply: its mark, a sentence and a question, in under
+/// thirty words (`lesson_prompt::laptop_system_prompt`)...
+const LAPTOP_LESSON_TOKENS: u32 = 70;
+/// ...or its mark and a sentence alone, where the app says what follows.
+const LAPTOP_LESSON_CLOSING_TOKENS: u32 = 40;
+
+/// What the laptop's model is asked for a reply when it is not what the
+/// cloud's is: a lesson's own instructions, history and note
+/// (`lesson_prompt::laptop_system_prompt`), with a grammar its reply must
+/// follow and a budget of its own.
+struct Laptop {
+    messages: Vec<Value>,
+    grammar: Option<String>,
+    max_tokens: u32,
+}
+
+/// Who wrote a reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Writer {
+    Cloud,
+    Laptop,
+}
+
+/// Every session shares one `id_slot`, so the prefix cached there is
+/// whatever the last session left behind. The fingerprint is what says which
+/// prompt a turn is actually being generated against: it must hold steady for
+/// every turn of one session and must change the moment the topic does.
+fn log_prompt(system: &str, slot: i32) {
+    eprintln!(
+        "[LATENCY]     llm> prompt fp={} len={} slot={slot} cache_prompt=true",
+        prompt_fingerprint(system),
+        system.len(),
+    );
+    eprintln!(
+        "[LATENCY]     llm> scene: {}…",
+        scene_clause(system).chars().take(80).collect::<String>().trim()
+    );
+}
+
+/// The messages a reply is asked with, for `ELLA_DEBUG_PROMPT`.
+fn print_prompt(messages: &[Value]) {
+    eprintln!("[PROMPT] ─── chained prompt, {} messages ───", messages.len());
+    for (index, message) in messages.iter().enumerate() {
+        eprintln!(
+            "[PROMPT] {index:>2} {:<9} {}",
+            message["role"].as_str().unwrap_or("?"),
+            message["content"].as_str().unwrap_or("")
+        );
+    }
+    eprintln!("[PROMPT] ─── end of chained prompt ───");
+}
+
 /// The fingerprint a lesson's opening is kept under: everything the model is
 /// asked for it.
 fn lesson_key(ask: &LessonAsk) -> String {
@@ -4072,6 +4125,187 @@ fn lesson_key(ask: &LessonAsk) -> String {
         lesson_prompt::system_prompt(ask),
         lesson_prompt::opening_request(ask)
     ))
+}
+
+/// Whether the laptop's lesson reply turns the learner's message down, as
+/// its instructions ask for anything romantic, rude or off the lesson
+/// (`lesson_prompt::SAFETY`).
+fn turns_down(reply: &str) -> bool {
+    let lower = reply.to_lowercase().replace('\u{2019}', "'");
+    [
+        "not something i talk about",
+        "not something we talk about",
+        "not something i can talk about",
+        "only help with this lesson",
+        "can't talk about that",
+        "cannot talk about that",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase))
+}
+
+/// What a reply opens with when it praises or encourages an answer.
+/// Longer first, so "nice try" is found before "nice".
+const PRAISE: &[&str] = &[
+    "well done", "nice one", "nice try", "good try", "good job", "great job", "good work", "great work",
+    "good effort", "very good", "not quite", "excellent", "brilliant", "perfect", "fantastic",
+    "awesome", "wonderful", "amazing", "almost", "great", "nice", "good",
+];
+
+/// Words that say a sentence is about the learner's English rather than
+/// what they said.
+const ABOUT_ENGLISH: &[&str] = &[
+    "sentence", "grammar", "tense", "mistake", "correct", "idiom", "phrase", "the word", "your english",
+    "your answer", "not used", "not really used", "lesson", "it means", "practis", "practic", "skill",
+    "fits well", "\"",
+];
+
+/// Words a sentence opens with when it asks for something, as a question
+/// the model ended without its question mark: "Can you tell me about the
+/// village, please."
+const ASKING: &[&str] = &[
+    "what", "how", "why", "where", "when", "who", "which", "can", "could", "would", "will", "do", "does", "did",
+    "is", "are", "tell", "describe", "share", "let's", "lets",
+];
+
+/// What the laptop's model wrote for a lesson reply, once what it gets
+/// wrong there is taken out, as measured on 2026-10-14. The app says what the
+/// answer showed (`lesson_prompt::laptop_feedback`), so the model's own
+/// praise, encouragement and talk about their English go: it praised misses
+/// ("Well done! It was fun."), and told a whole sentence it was "a word or
+/// two". So does the learner's answer said back to them whole, mistake and
+/// all ("I live in Pune since five years."), and a question it has asked
+/// before, which it asked three replies running. What is left is a warm
+/// sentence and a question; at the ending and the goodbye, one sentence and
+/// no question, since the app asks what comes next; after a word or two,
+/// the question alone. A reply left with no question where one is due ends
+/// on `LESSON_CARRY_ON_LINE`.
+fn laptop_lesson_line(
+    reply: &str,
+    answer: &str,
+    asked: &[String],
+    skill: &str,
+    step: lesson_prompt::LaptopStep,
+    short: bool,
+    carry_on: &str,
+) -> String {
+    let said = words_in(answer);
+    let skill = skill.to_lowercase();
+    let mut warm: Option<String> = None;
+    let mut question: Option<String> = None;
+    for sentence in sentences(reply) {
+        let Some(sentence) = without_praise(sentence).map(|sentence| capitalised(&sentence)) else {
+            continue;
+        };
+        let lower = sentence.to_lowercase();
+        let words = words_in(&sentence);
+        let echoed = words == said || (words.len() >= 4 && said.windows(words.len()).any(|window| window == words));
+        let about_english = ABOUT_ENGLISH.iter().any(|word| lower.contains(word));
+        // A question may name the skill: "How often do you play?" in a How
+        // often lesson is the question it is there to ask.
+        let names_skill = lower.contains(&skill);
+        // At the goodbye the app says goodbye; the model's own would make two.
+        let signs_off = step == lesson_prompt::LaptopStep::Goodbye
+            && ["bye", "see you", "talk again", "take care"].iter().any(|word| lower.contains(word));
+        // "Now, tell us what you learned." asks as well.
+        let opening = match words.first().map(String::as_str) {
+            Some("now" | "so" | "okay" | "ok" | "well" | "then") => words.get(1),
+            _ => words.first(),
+        };
+        let asking = opening.is_some_and(|first| ASKING.contains(&first.as_str()));
+        if sentence.ends_with('?') {
+            if question.is_none() && !about_english && asked_before(&sentence, asked).is_none() {
+                question = Some(sentence);
+            }
+        } else if warm.is_none()
+            && !echoed
+            && !about_english
+            && !names_skill
+            && !signs_off
+            && !asking
+            // Fewer words are what is left of its praise: "Point!", "Story!";
+            // "To see you've explored." and "Started with a personal story."
+            // are half a sentence.
+            && words.len() >= 3
+            && words.first().is_some_and(|first| first != "to" && !(first.len() > 4 && first.ends_with("ed")))
+        {
+            warm = Some(sentence);
+        }
+    }
+    match step {
+        lesson_prompt::LaptopStep::Practise => {
+            let question = question.unwrap_or_else(|| carry_on.to_owned());
+            match warm.filter(|_| !short) {
+                Some(warm) => format!("{warm} {question}"),
+                None => question,
+            }
+        }
+        lesson_prompt::LaptopStep::Ending | lesson_prompt::LaptopStep::Goodbye => warm.unwrap_or_default(),
+    }
+}
+
+/// `sentence` without the praise it opens with, with a capital to start
+/// what is left; `None` when the praise is all of it.
+fn without_praise(sentence: &str) -> Option<String> {
+    let lower = sentence.to_lowercase();
+    let Some(praise) = PRAISE.iter().find(|praise| {
+        lower.starts_with(*praise) && !lower[praise.len()..].starts_with(|c: char| c.is_alphanumeric())
+    }) else {
+        return Some(sentence.to_owned());
+    };
+    let rest = sentence[praise.len()..].trim_start_matches(|c: char| !c.is_alphanumeric());
+    let mut letters = rest.chars();
+    let first = letters.next()?;
+    Some(first.to_uppercase().chain(letters).collect())
+}
+
+/// `sentence` with a capital to start.
+fn capitalised(sentence: &str) -> String {
+    let mut letters = sentence.chars();
+    match letters.next() {
+        Some(first) => first.to_uppercase().chain(letters).collect(),
+        None => String::new(),
+    }
+}
+
+/// A sentence's words, lower case, without punctuation, for comparing what
+/// was said.
+fn words_in(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|word| word.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase())
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+/// A lesson's opening as the cloud writes it, from the lesson's own
+/// instructions, waiting `first_word` for it to start; `None` for one it
+/// does not write, or that leaves nothing to say.
+fn cloud_opening(cloud: &CloudLlm, ask: &LessonAsk, first_word: Duration) -> Option<String> {
+    let messages = [
+        json!({"role": "system", "content": lesson_prompt::system_prompt(ask)}),
+        json!({"role": "user", "content": lesson_prompt::opening_request(ask)}),
+    ];
+    let asked = cloud.ask(
+        &messages,
+        Ask {
+            max_tokens: LESSON_BUDGET.cloud,
+            temperature: 0.65,
+            json: false,
+            first_word,
+        },
+        |_, _| true,
+    );
+    match asked {
+        Asked::Answered(answer) if answer.cut_short => {
+            whole_sentences(answer.text.trim()).and_then(|text| sayable_opening(&text))
+        }
+        Asked::Answered(answer) => sayable_opening(answer.text.trim()),
+        Asked::Unanswered { why, .. } | Asked::Cut { why, .. } => {
+            eprintln!("[LATENCY]     llm> lesson opening: the cloud wrote none ({why})");
+            None
+        }
+        Asked::Empty { .. } => None,
+    }
 }
 
 /// A lesson's opening as Ella can say it: no marks, and something said;
@@ -4413,26 +4647,22 @@ impl TutorEngine for LocalEngine {
         }
     }
 
-    /// Only while the cloud answers. Told a lesson's skill, the laptop's 3B
-    /// model taught it badly: in three lessons on 2026-10-13 it marked 6 of
-    /// 24 answers, praised a "Yes." as a good use, opened by inventing what
-    /// the learner had said last time, asked the same three questions four
-    /// replies running, and once answered "Please provide the learner's words
-    /// so I can review them." The cloud's marked every answer, and taught as
-    /// the phone's does.
+    /// Whenever there is a model to teach with: the cloud's, or the
+    /// laptop's, which teaches the lesson in smaller pieces
+    /// (`lesson_prompt::laptop_system_prompt`), so a lesson never waits for
+    /// the internet. Not when neither answers, as when llama-server could
+    /// not start and the laptop is offline.
     fn teaches_lessons(&self) -> bool {
-        self.cloud.as_ref().is_some_and(|cloud| cloud.usable())
+        self.llama_error.is_none() || self.cloud.as_ref().is_some_and(|cloud| cloud.usable())
     }
 
-    /// The lesson's instructions are got ready on the laptop's model the way
-    /// a talk's are, as an errand kept on disk. Its opening is written by the
-    /// cloud straight away, when the cloud answers, which costs the laptop
-    /// nothing; on the laptop alone it is written when the lesson starts,
-    /// with its instructions already evaluated, rather than as an errand that
-    /// could hold up a talk opened meanwhile for as long as writing it takes.
+    /// The laptop's lesson instructions are got ready on its model the way a
+    /// talk's are, as an errand kept on disk, for whenever it writes a reply
+    /// of the lesson. Its opening is written by the cloud straight away, when
+    /// the cloud answers, which costs the laptop nothing; otherwise the app
+    /// says the laptop's own when the lesson starts.
     fn prepare_lesson(&self, ask: &LessonAsk) {
-        let system = lesson_prompt::system_prompt(ask);
-        self.prepare_prompt("lesson", system.clone());
+        self.prepare_prompt("lesson", lesson_prompt::laptop_system_prompt(ask));
         let Some(cloud) = self.cloud.as_ref().filter(|cloud| cloud.usable()).map(Arc::clone) else {
             return;
         };
@@ -4441,35 +4671,11 @@ impl TutorEngine for LocalEngine {
             return;
         }
         let lessons = Arc::clone(&self.lessons);
-        let request = lesson_prompt::opening_request(ask);
+        let ask = ask.clone();
         thread::spawn(move || {
             let started = Instant::now();
-            let messages = [
-                json!({"role": "system", "content": system}),
-                json!({"role": "user", "content": request}),
-            ];
-            let asked = cloud.ask(
-                &messages,
-                Ask {
-                    max_tokens: LESSON_BUDGET.cloud,
-                    temperature: 0.65,
-                    json: false,
-                    // Nobody is waiting on it yet.
-                    first_word: cloud_llm::JUDGE_FIRST_WORD,
-                },
-                |_, _| true,
-            );
-            let line = match asked {
-                Asked::Answered(answer) if answer.cut_short => {
-                    whole_sentences(answer.text.trim()).and_then(|text| sayable_opening(&text))
-                }
-                Asked::Answered(answer) => sayable_opening(answer.text.trim()),
-                Asked::Unanswered { why, .. } | Asked::Cut { why, .. } => {
-                    eprintln!("[LATENCY]     llm> lesson opening: the cloud wrote none ahead ({why})");
-                    None
-                }
-                Asked::Empty { .. } => None,
-            };
+            // Nobody is waiting on it yet.
+            let line = cloud_opening(&cloud, &ask, cloud_llm::JUDGE_FIRST_WORD);
             eprintln!(
                 "[LATENCY]     llm> lesson opening: {} ahead in {:.0}ms",
                 if line.is_some() { "written" } else { "not written" },
@@ -4479,34 +4685,30 @@ impl TutorEngine for LocalEngine {
         });
     }
 
+    /// The cloud's opening, written ahead or now; without the cloud, the
+    /// laptop's own (`lesson_prompt::laptop_opening`), said at once. Asked
+    /// for an opening, the laptop's model made up the learner's last talk,
+    /// and on a classroom laptop wrote it for most of a minute.
     fn lesson_opening(&self, ask: &LessonAsk) -> EllaResult<String> {
-        let system = lesson_prompt::system_prompt(ask);
-        let text = match self.lessons.take(&lesson_key(ask), MADE_AHEAD_WAIT) {
-            Some(line) => {
-                eprintln!("[LATENCY]     llm> lesson opening: the one written ahead");
-                line
-            }
-            None => {
-                // On the laptop alone, its instructions as `prepare_lesson`
-                // kept them go back in the slot first, so writing the line
-                // reads only the request: cold, a lesson's instructions are
-                // most of a minute on a classroom laptop.
-                if !self.cloud.as_ref().is_some_and(|cloud| cloud.usable()) {
-                    if let Some(slots) = &self.slots {
-                        let _talking = self.queue.talking();
-                        let root = self.llm_base_url.trim_end_matches('/').trim_end_matches("/v1");
-                        slots.wait_for_saves();
-                        slots.prime(&self.client, root, self.llm_slot, &[("lesson", system.clone())]);
-                    }
-                }
-                let history = [json!({"role": "user", "content": lesson_prompt::opening_request(ask)})];
-                let written = self.stream_once(&system, &history, None, None, None, LESSON_BUDGET)?;
-                let whole = whole_sentences(&written.text).unwrap_or(written.text);
-                sayable_opening(&whole).unwrap_or_else(|| lesson_prompt::scripted_opening(ask))
-            }
-        };
-        // So the first reply evaluates only the learner's answer.
-        self.warm_prompt_cache(system.clone(), text.clone(), vec![("lesson", system)]);
+        let ahead = self.lessons.take(&lesson_key(ask), MADE_AHEAD_WAIT);
+        if ahead.is_some() {
+            eprintln!("[LATENCY]     llm> lesson opening: the one written ahead");
+        }
+        let text = ahead
+            .or_else(|| {
+                let cloud = self
+                    .cloud
+                    .as_ref()
+                    .filter(|cloud| cloud.usable_for_reply(cloud_llm::REPLY_LOOK))?;
+                cloud_opening(cloud, ask, cloud_llm::REPLY_FIRST_WORD)
+            })
+            .unwrap_or_else(|| {
+                eprintln!("[LATENCY]     llm> lesson opening: the laptop's own");
+                lesson_prompt::laptop_opening(ask)
+            });
+        // So a reply the laptop writes evaluates only the learner's answer.
+        let instructions = lesson_prompt::laptop_system_prompt(ask);
+        self.warm_prompt_cache(instructions.clone(), text.clone(), vec![("lesson", instructions)]);
         Ok(text)
     }
 
@@ -5128,6 +5330,14 @@ impl LocalEngine {
     /// Spoken as it is written, like any reply; her marks are read off it
     /// and never reach Piper or the screen.
     ///
+    /// The cloud's model is told the lesson whole. The laptop's, when it
+    /// writes the reply, is told its own (`lesson_prompt::laptop_system_prompt`)
+    /// and held to a mark and then words by a grammar, and at the ending and
+    /// the goodbye the app says what follows its sentence
+    /// (`lesson_prompt::laptop_closing`). Whichever wrote it, a reply with
+    /// nothing left to say once its marks are off is never an error that
+    /// leaves the learner stuck: the app says something instead.
+    ///
     /// The free talk's guard against a question asked again is left out, as
     /// the phone's lesson has none: a lesson asks for the same skill again and
     /// again by design, and its note moves each reply on.
@@ -5138,12 +5348,41 @@ impl LocalEngine {
             .as_ref()
             .map(|lesson| lesson.judged.clone())
             .unwrap_or_default();
-        let mut history = lesson_prompt::history(&request.messages, &judged, &request.learner_text);
-        let pacing = lesson_pacing(request);
-        history.insert(
-            history.len().saturating_sub(1),
-            json!({"role": "system", "content": pacing.note}),
-        );
+        let history = lesson_prompt::history(&request.messages, &judged, &request.learner_text);
+        let noted = |system: &str, note: String| {
+            let mut messages = vec![json!({"role": "system", "content": system})];
+            messages.extend(history.iter().cloned());
+            messages.insert(messages.len() - 1, json!({"role": "system", "content": note}));
+            messages
+        };
+        let answers = request
+            .messages
+            .iter()
+            .filter(|message| message.speaker == Speaker::Learner)
+            .count() as u32
+            + 1;
+        let step = lesson_prompt::laptop_step(answers);
+        let short = lesson_prompt::laptop_short(&request.learner_text);
+        let asked = asked_questions(&request.messages);
+        let last_question = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.speaker == Speaker::Ella)
+            .and_then(|message| trailing_question(&message.content));
+        // The mark, where the app can read it off the answer itself.
+        let read = lesson_prompt::laptop_read(ask, answers, &request.learner_text);
+        let laptop = Laptop {
+            messages: noted(
+                &lesson_prompt::laptop_system_prompt(ask),
+                lesson_prompt::laptop_note(ask, answers, read, last_question),
+            ),
+            grammar: Some(lesson_prompt::laptop_grammar(step, read)),
+            max_tokens: match step {
+                lesson_prompt::LaptopStep::Practise => LAPTOP_LESSON_TOKENS,
+                _ => LAPTOP_LESSON_CLOSING_TOKENS,
+            },
+        };
         let mut pipeline = self
             .piper_daemon
             .as_ref()
@@ -5152,12 +5391,73 @@ impl LocalEngine {
         if pipeline.is_none() {
             telemetry::note("no_audio_ahead");
         }
-        let written = self.stream_once(&system, &history, None, None, pipeline.as_mut(), LESSON_BUDGET)?;
+        log_prompt(&system, self.llm_slot);
+        let (written, writer) = self.stream_reply(
+            noted(&system, lesson_pacing(request).note),
+            Some(laptop),
+            false,
+            None,
+            pipeline.as_mut(),
+            LESSON_BUDGET,
+        )?;
+        let mut marks = lesson_prompt::marks(&written.text);
+        let mut text = one_line(&strip_bracket_tokens(&written.text));
+        if writer == Writer::Laptop && turns_down(&text) {
+            // Its instructions have it turn down what the content filter
+            // lets through, such as a compliment or a hug. The app says what
+            // the filter's own turn says: never praise for it, nor the
+            // goodbye, whatever form of the skill the message happens to show.
+            telemetry::note("lesson_laptop");
+            telemetry::note("lesson_turned_down");
+            text = safety::redirect_reply(last_question);
+            marks = Marks { used: Some(false), goodbye: false };
+        } else if writer == Writer::Laptop {
+            telemetry::note("lesson_laptop");
+            if read.is_some() {
+                telemetry::note("lesson_mark_read");
+            }
+            // The app's own read of the form outranks the model's mark.
+            marks.used = read.or(marks.used);
+            // Cut short by its budget, a reply keeps its whole sentences.
+            if let Some(whole) = whole_sentences(&text) {
+                text = whole;
+            }
+            let said = laptop_lesson_line(
+                &text,
+                &request.learner_text,
+                &asked,
+                &ask.focus.label,
+                step,
+                short,
+                lesson_prompt::laptop_carry_on(answers),
+            );
+            // The app says what the answer showed, and what comes after the
+            // model's sentence at the ending and the goodbye.
+            let feedback = (step != lesson_prompt::LaptopStep::Goodbye)
+                .then(|| lesson_prompt::laptop_feedback(ask, marks.used, short, answers))
+                .flatten();
+            text = [feedback, Some(said), lesson_prompt::laptop_closing(ask, step)]
+                .into_iter()
+                .flatten()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            marks.goodbye = step == lesson_prompt::LaptopStep::Goodbye;
+        }
+        if !says_something(&text) {
+            // The laptop's model, before it was held to words, wrote a mark
+            // alone at a seventh answer, four times running.
+            eprintln!("[LATENCY]     llm> the lesson's reply said nothing; the app says something instead");
+            telemetry::note("lesson_said_nothing");
+            text = if marks.goodbye {
+                lesson_prompt::laptop_closing(ask, lesson_prompt::LaptopStep::Goodbye).unwrap_or_default()
+            } else {
+                lesson_prompt::LESSON_CARRY_ON_LINE.to_owned()
+            };
+        }
         if let Some(pipeline) = pipeline.as_mut() {
             pipeline.close();
         }
-        let marks = lesson_prompt::marks(&written.text);
-        let text = one_line(&strip_bracket_tokens(&written.text));
         if marks.used.is_none() {
             telemetry::note("lesson_unmarked");
         }
@@ -5503,7 +5803,7 @@ impl LocalEngine {
         history: &[Value],
         corrective: Option<&str>,
         aim: Option<&str>,
-        mut speech: Option<&mut SpeechPipeline>,
+        speech: Option<&mut SpeechPipeline>,
         budget: Budget,
     ) -> EllaResult<GeneratedReply> {
         let mut messages = vec![json!({"role": "system", "content": system})];
@@ -5511,32 +5811,34 @@ impl LocalEngine {
         if let Some(corrective) = corrective {
             messages.push(json!({"role": "system", "content": corrective}));
         }
+        log_prompt(system, self.llm_slot);
+        self.stream_reply(messages, None, corrective.is_some(), aim, speech, budget)
+            .map(|(reply, _)| reply)
+    }
 
-        // Every session shares one `id_slot`, so the prefix cached there is
-        // whatever the last session left behind. The fingerprint is what says
-        // which prompt this turn is actually being generated against: it must
-        // hold steady for every turn of one session and must change the moment
-        // the topic does.
-        eprintln!(
-            "[LATENCY]     llm> prompt fp={} len={} slot={} cache_prompt=true",
-            prompt_fingerprint(system),
-            system.len(),
-            self.llm_slot,
-        );
-        eprintln!(
-            "[LATENCY]     llm> scene: {}…",
-            scene_clause(system).chars().take(80).collect::<String>().trim()
-        );
+    /// `stream_once` with `messages` already chained, and, in `laptop`, what
+    /// the laptop's model is asked instead when the cloud does not write the
+    /// reply. Says with the reply who wrote it.
+    fn stream_reply(
+        &self,
+        messages: Vec<Value>,
+        laptop: Option<Laptop>,
+        rewrite: bool,
+        aim: Option<&str>,
+        mut speech: Option<&mut SpeechPipeline>,
+        budget: Budget,
+    ) -> EllaResult<(GeneratedReply, Writer)> {
+        let why = if rewrite { "rewrite" } else { "reply" };
+        let (local, grammar, max_tokens) = match &laptop {
+            Some(laptop) => (&laptop.messages, laptop.grammar.as_deref(), laptop.max_tokens),
+            None => (&messages, None, budget.local),
+        };
         if env::var("ELLA_DEBUG_PROMPT").is_ok() {
-            eprintln!("[PROMPT] ─── chained prompt, {} messages ───", messages.len());
-            for (index, message) in messages.iter().enumerate() {
-                eprintln!(
-                    "[PROMPT] {index:>2} {:<9} {}",
-                    message["role"].as_str().unwrap_or("?"),
-                    message["content"].as_str().unwrap_or("")
-                );
+            print_prompt(&messages);
+            if laptop.is_some() {
+                eprintln!("[PROMPT] (the laptop's model is asked this instead)");
+                print_prompt(local);
             }
-            eprintln!("[PROMPT] ─── end of chained prompt ───");
         }
         let _talking = self.queue.talking();
         // The cloud first, when it answers. What a failed attempt cost is
@@ -5547,7 +5849,6 @@ impl LocalEngine {
             .as_ref()
             .filter(|cloud| cloud.usable_for_reply(cloud_llm::REPLY_LOOK))
         {
-            let why = if corrective.is_some() { "rewrite" } else { "reply" };
             let mut asked = messages.clone();
             if let Some(aim) = aim {
                 asked.insert(
@@ -5556,14 +5857,16 @@ impl LocalEngine {
                 );
                 telemetry::note("aim_told");
             }
-            let hedge = self.hedge(&messages);
+            // What the laptop would be asked, so a reply the cloud then fails
+            // finds all of it read.
+            let hedge = self.hedge(local);
             let answered =
                 self.stream_cloud(cloud, &asked, why, speech.as_deref_mut(), hedge.as_deref(), budget.cloud);
             if hedge.is_some_and(|hedge| hedge.settle()) {
                 telemetry::note("laptop_hedged");
             }
             match answered {
-                Ok(reply) => return Ok(reply),
+                Ok(reply) => return Ok((reply, Writer::Cloud)),
                 Err((failed, reason, ms)) => {
                     cloud_ms = ms;
                     eprintln!(
@@ -5584,7 +5887,7 @@ impl LocalEngine {
         eprintln!(
             "[LATENCY]     llm> POST {}/chat/completions ({} messages, stream=true)",
             self.llm_base_url.trim_end_matches('/'),
-            messages.len()
+            local.len()
         );
         let started = Instant::now();
         // Counted in the time to the first token, as it was when the reply
@@ -5602,18 +5905,18 @@ impl LocalEngine {
         if let Some(warm_up) = self.warm_ups.take_report() {
             telemetry::record_warm_up(warm_up);
         }
+        // The laptop's lesson reply is said only once the app has put its own
+        // lines around it, so Piper reading it as it is written would be
+        // work thrown away, on a CPU the model needs.
+        if laptop.is_some() {
+            speech = None;
+        }
         let errand = self.queue.running();
-        let response = self
-            .client
-            .post(format!(
-                "{}/chat/completions",
-                self.llm_base_url.trim_end_matches('/')
-            ))
-            .json(&json!({
+        let mut body = json!({
                 "model": "local",
-                "messages": messages,
+                "messages": local,
                 "temperature": 0.65,
-                "max_tokens": budget.local,
+                "max_tokens": max_tokens,
                 // No presence/frequency penalty here on purpose. They look like
                 // the obvious cure for the repeated sentence template, and they
                 // make it worse: holding seed and prompt fixed, reuse of one
@@ -5628,7 +5931,17 @@ impl LocalEngine {
                 "stream_options": {"include_usage": true},
                 "cache_prompt": true,
                 "id_slot": self.llm_slot
-            }))
+            });
+        if let Some(grammar) = grammar {
+            body["grammar"] = json!(grammar);
+        }
+        let response = self
+            .client
+            .post(format!(
+                "{}/chat/completions",
+                self.llm_base_url.trim_end_matches('/')
+            ))
+            .json(&body)
             .send()?
             .error_for_status()?;
         eprintln!(
@@ -5703,7 +6016,7 @@ impl LocalEngine {
             ),
         }
         telemetry::record_llm_run(LlmRun {
-            why: if corrective.is_some() { "rewrite" } else { "reply" },
+            why,
             backend: "",
             failed: "",
             wait_ms: waited_ms.round() as u64,
@@ -5723,12 +6036,16 @@ impl LocalEngine {
                     .into(),
             ));
         }
-        Ok(GeneratedReply::plain(
-            text,
-            ttft_ms.unwrap_or(completion_ms) + cloud_ms,
-            completion_ms + cloud_ms,
+        Ok((
+            GeneratedReply::plain(
+                text,
+                ttft_ms.unwrap_or(completion_ms) + cloud_ms,
+                completion_ms + cloud_ms,
+            ),
+            Writer::Laptop,
         ))
     }
+
 
     /// One reply from the cloud, each piece handed to `speech` as it lands,
     /// as `stream_once` does with the local model's. `Err` says how it failed
@@ -6299,6 +6616,7 @@ mod tests {
             step_title: "Talking about the past".into(),
             step_focus: "Starting to use past tense to share what happened.".into(),
             skill: "I can use past simple with regular verbs.".into(),
+            label: "Regular past".into(),
         };
         for topic in crate::domain::topics() {
             let own = ella_topic_prompt("Asha", &topic.id, &topic.label, "B1");
@@ -8203,6 +8521,7 @@ mod curriculum_prompt_tests {
                     step_title: "Talking about the past".into(),
                     step_focus: "Starting to use past tense to share what happened.".into(),
                     skill: "I can use past simple with regular verbs — I walked, I watched, I played.".into(),
+                    label: "Regular past".into(),
                 }),
             },
         );
@@ -9433,6 +9752,7 @@ mod errand_tests {
             step_title: "Choosing words with more precision and feeling".into(),
             step_focus: "Picking the word that says exactly what you mean.".into(),
             skill: "I can express nuanced ideas, not just basic ones.".into(),
+            label: "Nuanced ideas".into(),
         };
         let answer = "I had the crispy corn in Barbecue Nation.";
         let at = |turn: u32| TutorRequest {
@@ -9563,6 +9883,7 @@ mod errand_tests {
                 step_title: "Telling what happened".into(),
                 step_focus: "Talking about the past.".into(),
                 skill: "I can say what I did yesterday.".into(),
+                label: "What I did".into(),
             },
             strand: crate::curriculum::Strand::Grammar,
             strengths: Some(vec!["Saying hello".into()]),
@@ -9598,23 +9919,53 @@ mod errand_tests {
         }
     }
 
-    #[test]
-    fn a_lesson_reply_is_taught_by_its_own_instructions_and_its_marks_are_never_said() {
-        let fake = FakeLlama::scripted(pace(5, 5, 4), &["[USED] Well done! You said ate. Where did you eat it?"]);
-        let engine = fake.engine(Duration::from_secs(60));
-        let reply = engine.reply(&second_lesson_answer("Yesterday I ate chaat.")).unwrap();
-        assert_eq!(reply.text, "Well done! You said ate. Where did you eat it?");
-        assert_eq!(reply.marks, Marks { used: Some(true), goodbye: false });
+    /// The `answers`-th answer of that lesson, each one before it judged a
+    /// miss and followed by a line of Ella's.
+    fn lesson_answer(answers: u32, answer: &str) -> TutorRequest {
+        let mut request = second_lesson_answer(answer);
+        let mut messages = vec![said(
+            Speaker::Ella,
+            "Hi Souvik! Today we will practise the past. What did you eat yesterday?",
+            0,
+        )];
+        let mut judged = HashMap::new();
+        for turn in 1..answers {
+            messages.push(said(Speaker::Learner, "I eat chaat with my brother.", turn));
+            messages.push(said(Speaker::Ella, &format!("Chaat sounds great. What happened next, part {turn}?"), turn));
+            judged.insert(format!("Learner-{turn}"), false);
+        }
+        request.messages = messages;
+        request.turn = answers;
+        request.lesson.as_mut().unwrap().judged = judged;
+        request
+    }
 
-        let asked = fake
-            .completions()
+    /// The last reply the laptop's model was asked to write.
+    fn last_written(fake: &FakeLlama) -> Value {
+        fake.completions()
             .into_iter()
             .filter(|seen| seen.body["stream"] == true)
             .last()
-            .unwrap();
-        assert_eq!(asked.body["max_tokens"], LESSON_BUDGET.local);
-        let messages = asked.body["messages"].as_array().unwrap();
-        assert_eq!(messages[0]["content"], lesson_prompt::system_prompt(&lesson_for_tests()));
+            .expect("a reply was written")
+            .body
+    }
+
+    #[test]
+    fn on_the_laptop_a_lesson_reply_is_taught_by_its_own_instructions_and_held_to_a_mark_and_words() {
+        let fake = FakeLlama::scripted(pace(5, 5, 4), &["[USED] You said ate. Where did you eat it?"]);
+        let engine = fake.engine(Duration::from_secs(60));
+        let reply = engine.reply(&second_lesson_answer("Yesterday I ate chaat.")).unwrap();
+        assert_eq!(
+            reply.text, "Yes, well said! You said ate. Where did you eat it?",
+            "the app's praise from her mark, then her sentence and question, and never the mark"
+        );
+        assert_eq!(reply.marks, Marks { used: Some(true), goodbye: false });
+
+        let asked = last_written(&fake);
+        assert_eq!(asked["max_tokens"], LAPTOP_LESSON_TOKENS);
+        assert_eq!(asked["grammar"], lesson_prompt::laptop_grammar(lesson_prompt::LaptopStep::Practise, None));
+        let messages = asked["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["content"], lesson_prompt::laptop_system_prompt(&lesson_for_tests()));
         let [.., judged, note, latest] = messages.as_slice() else {
             panic!("no messages");
         };
@@ -9623,8 +9974,184 @@ mod errand_tests {
             "her line carries her mark on the answer before it"
         );
         assert_eq!(note["role"], "system");
-        assert!(note["content"].as_str().unwrap().starts_with("Lesson note: 2 answers so far."));
+        assert_eq!(
+            note["content"],
+            lesson_prompt::laptop_note(&lesson_for_tests(), 2, None, Some("Was that today, or yesterday?"))
+        );
         assert_eq!(latest["content"], "Yesterday I ate chaat.");
+    }
+
+    #[test]
+    fn the_cloud_is_told_the_whole_lesson_and_the_laptop_its_own_when_the_cloud_fails() {
+        let fake = FakeLlama::scripted(pace(5, 5, 4), &["[NOT USED] Nice try. Say it with ate. Who did you eat it with?"]);
+        let engine = fake.engine_with_cloud(Duration::from_millis(50));
+        engine.reply(&second_lesson_answer("Yesterday I eat chaat.")).unwrap();
+        let [cloud] = fake.cloud_chats().try_into().unwrap();
+        let messages = cloud.body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["content"], lesson_prompt::system_prompt(&lesson_for_tests()));
+        assert!(messages[messages.len() - 2]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("Lesson note: 2 answers so far."));
+        assert!(cloud.body.get("grammar").is_none());
+
+        // The cloud drops mid-lesson: the laptop carries it on, from its own.
+        fake.cloud_refuses.store(true, Ordering::Relaxed);
+        let reply = engine.reply(&second_lesson_answer("Yesterday I eat chaat.")).unwrap();
+        assert_eq!(reply.text, "Try to use today's skill: what you did. Say it with ate. Who did you eat it with?");
+        assert_eq!(reply.marks.used, Some(false));
+        let asked = last_written(&fake);
+        assert_eq!(
+            asked["messages"][0]["content"],
+            lesson_prompt::laptop_system_prompt(&lesson_for_tests())
+        );
+        assert!(asked["grammar"].is_string());
+    }
+
+    #[test]
+    fn on_the_laptop_the_app_asks_what_they_learned_and_says_goodbye() {
+        let fake = FakeLlama::scripted(
+            pace(5, 5, 4),
+            &["[USED] You told it in the past, well done.", "[NOT USED] Yes, ate and went are for yesterday."],
+        );
+        let engine = fake.engine(Duration::from_secs(60));
+        let ending = engine.reply(&lesson_answer(6, "Then I went home and slept.")).unwrap();
+        assert_eq!(
+            ending.text,
+            format!("Yes, well said! You told it in the past, well done. {}", lesson_prompt::LESSON_ENDING_LINE),
+            "the app's praise, the model's sentence, and the app's question"
+        );
+        assert_eq!(ending.marks, Marks { used: Some(true), goodbye: false });
+        let asked = last_written(&fake);
+        assert_eq!(asked["max_tokens"], LAPTOP_LESSON_CLOSING_TOKENS);
+        assert_eq!(asked["grammar"], lesson_prompt::laptop_grammar(lesson_prompt::LaptopStep::Ending, None));
+
+        let goodbye = engine.reply(&lesson_answer(7, "I learned to say ate and went.")).unwrap();
+        assert!(goodbye.text.starts_with("Yes, ate and went are for yesterday. Today's skill was what you did."));
+        assert!(goodbye.text.ends_with("Goodbye for now, Souvik! I hope we talk again soon."));
+        assert_eq!(goodbye.marks, Marks { used: Some(false), goodbye: true }, "the lesson closes on it");
+        assert_eq!(
+            last_written(&fake)["grammar"],
+            lesson_prompt::laptop_grammar(lesson_prompt::LaptopStep::Goodbye, Some(false))
+        );
+    }
+
+    #[test]
+    fn a_reply_that_is_only_a_mark_never_leaves_the_learner_stuck() {
+        // What the laptop wrote at a seventh answer on 2026-10-14, four times
+        // running, before it was held to words.
+        let fake = FakeLlama::scripted(pace(5, 5, 4), &["[USED]", "[BYE]"]);
+        let engine = fake.engine(Duration::from_secs(60));
+        let carried_on = engine.reply(&second_lesson_answer("Yesterday I ate chaat.")).unwrap();
+        assert_eq!(carried_on.text, format!("Yes, well said! {}", lesson_prompt::laptop_carry_on(2)));
+        let goodbye = engine.reply(&lesson_answer(7, "I learned the past.")).unwrap();
+        assert!(goodbye.text.starts_with("Today's skill was what you did."), "{}", goodbye.text);
+        assert!(goodbye.marks.goodbye);
+    }
+
+    #[test]
+    fn what_the_laptop_turns_down_gets_the_filters_own_turn_and_no_praise() {
+        // Not flagged by the content filter, and the Opinion-words kind of
+        // message whose form the app could read as a use.
+        let fake = FakeLlama::scripted(
+            pace(5, 5, 4),
+            &[
+                "[NOT USED] That is not something I talk about. What did you eat?",
+                "[NOT USED] I can only help with this lesson here. Tell me what you learned.",
+            ],
+        );
+        let engine = fake.engine(Duration::from_secs(60));
+        let reply = engine.reply(&second_lesson_answer("I think you are very beautiful.")).unwrap();
+        assert_eq!(reply.text, safety::redirect_reply(Some("Was that today, or yesterday?")));
+        assert_eq!(reply.marks, Marks { used: Some(false), goodbye: false });
+        let last = engine.reply(&lesson_answer(7, "Tell me a joke please.")).unwrap();
+        assert!(last.text.starts_with("That's not something I talk about."), "{}", last.text);
+        assert!(!last.marks.goodbye, "the lesson does not close on it");
+    }
+
+    #[test]
+    fn a_word_or_two_is_never_judged_a_use() {
+        let fake = FakeLlama::scripted(pace(5, 5, 4), &["[NOT USED] Where did you eat it?"]);
+        let engine = fake.engine(Duration::from_secs(60));
+        let reply = engine.reply(&second_lesson_answer("Yes.")).unwrap();
+        assert_eq!(reply.marks.used, Some(false));
+        assert_eq!(reply.text, "Please answer in a whole sentence. Where did you eat it?");
+        let asked = last_written(&fake);
+        assert_eq!(asked["grammar"], lesson_prompt::laptop_grammar(lesson_prompt::LaptopStep::Practise, Some(false)));
+        let messages = asked["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[messages.len() - 2]["content"],
+            lesson_prompt::laptop_note(&lesson_for_tests(), 2, Some(false), Some("Was that today, or yesterday?"))
+        );
+    }
+
+    #[test]
+    fn the_laptops_lesson_reply_keeps_a_warm_sentence_and_a_new_question() {
+        use lesson_prompt::LaptopStep::{Ending, Goodbye, Practise};
+        let asked = vec!["Would you rather learn online or in a classroom, and why?".to_owned()];
+        let line = |reply: &str, answer: &str, step, short| {
+            laptop_lesson_line(reply, answer, &asked, "Collocations", step, short, lesson_prompt::LESSON_CARRY_ON_LINE)
+        };
+        assert_eq!(
+            line("Well done! It was fun. That sounds lovely. What did you do next?", "It was fun.", Practise, false),
+            "That sounds lovely. What did you do next?",
+            "no praise of its own, and their words are not said back"
+        );
+        assert_eq!(
+            line(
+                "Your sentence was a word or two. Try to use \"make a decision\". Engineering is a big step. Why did you pick it?",
+                "I did a decision to study engineering.",
+                Practise,
+                false
+            ),
+            "Engineering is a big step. Why did you pick it?",
+            "nothing about their English: the app says that"
+        );
+        assert_eq!(
+            line("Nice try. Would you rather learn online or in a classroom, and why?", "I did a decision.", Practise, false),
+            lesson_prompt::LESSON_CARRY_ON_LINE,
+            "a question asked before is not asked again"
+        );
+        assert_eq!(line("Okay. Where did you go?", "Yes.", Practise, true), "Where did you go?");
+        assert_eq!(
+            line("That was a brave choice. What will you study next?", "I made a decision.", Ending, false),
+            "That was a brave choice.",
+            "the app asks what comes next"
+        );
+        assert_eq!(line("", "I learned a lot.", Goodbye, false), "", "a mark alone leaves nothing");
+        assert_eq!(
+            line("Goodbye for now, see you soon! You learned a lot today.", "I learned a lot.", Goodbye, false),
+            "You learned a lot today.",
+            "the app says goodbye, once"
+        );
+        assert_eq!(
+            laptop_lesson_line(
+                "Cricket is fun. How often do you play it?",
+                "I play cricket.",
+                &asked,
+                "How often",
+                Practise,
+                false,
+                lesson_prompt::LESSON_CARRY_ON_LINE
+            ),
+            "Cricket is fun. How often do you play it?",
+            "a question may name the skill it asks for"
+        );
+        assert_eq!(
+            line("Can you tell me about your village, please. To see you've explored.", "I lived there.", Ending, false),
+            "",
+            "no question without its question mark, and no half sentence"
+        );
+        assert_eq!(
+            line("Started with a personal story. Now, tell us what you learned today.", "I learned a lot.", Goodbye, false),
+            "",
+            "no sentence without its subject, and nothing asked"
+        );
+        assert_eq!(
+            line("great, you made it. what will you do next?", "I made it.", Practise, false),
+            "You made it. What will you do next?",
+            "each sentence starts with a capital"
+        );
     }
 
     #[test]
@@ -9647,14 +10174,17 @@ mod errand_tests {
     }
 
     #[test]
-    fn lessons_are_taught_only_while_the_cloud_answers() {
+    fn lessons_are_taught_by_the_laptop_too_and_only_wait_when_no_model_answers() {
         let fake = FakeLlama::start(pace(5, 5, 4));
-        assert!(!fake.engine(Duration::from_millis(50)).teaches_lessons(), "not by the laptop's model");
+        assert!(fake.engine(Duration::from_millis(50)).teaches_lessons(), "by the laptop's model");
         assert!(fake.engine_with_cloud(Duration::from_millis(50)).teaches_lessons());
+        let mut broken = fake.engine(Duration::from_millis(50));
+        broken.llama_error = Some("llama-server stopped before it was ready".into());
+        assert!(!broken.teaches_lessons(), "no model to teach with");
     }
 
     #[test]
-    fn on_the_laptop_alone_a_lessons_instructions_are_got_ready_and_its_opening_waits_for_it() {
+    fn on_the_laptop_alone_a_lessons_instructions_are_got_ready_and_the_app_opens_it_at_once() {
         let fake = FakeLlama::start(pace(5, 5, 4));
         let engine = fake.engine(Duration::from_millis(50));
         let ask = lesson_for_tests();
@@ -9662,25 +10192,23 @@ mod errand_tests {
         eventually("the lesson's instructions are kept", || {
             fake.kept().iter().any(|name| name.starts_with("ella-lesson-"))
         });
-        assert_eq!(talk_turns(&fake), 0, "no opening is written ahead of the lesson");
+        let laptops = lesson_prompt::laptop_system_prompt(&ask);
+        assert!(
+            fake.completions().iter().any(|seen| seen.body["messages"][0]["content"] == laptops.as_str()),
+            "the laptop's own lesson is kept"
+        );
 
-        // Started, the kept instructions go back in the slot before the line
-        // is written, so writing it reads only the request.
         let opening = engine.lesson_opening(&ask).unwrap();
-        assert_eq!(opening, REPLY);
-        let seen = fake.seen();
-        let restored = seen
-            .iter()
-            .position(|seen| {
-                seen.path == "/slots/0?action=restore"
-                    && seen.body["filename"].as_str().is_some_and(|name| name.starts_with("ella-lesson-"))
+        assert_eq!(opening, lesson_prompt::laptop_opening(&ask));
+        assert_eq!(talk_turns(&fake), 0, "the model writes no opening");
+        // So the first reply reads only the learner's answer.
+        eventually("the opening is read into the slot", || {
+            fake.completions().iter().any(|seen| {
+                seen.body["messages"]
+                    .as_array()
+                    .is_some_and(|messages| messages.len() == 2 && messages[1]["content"] == opening.as_str())
             })
-            .expect("the kept instructions were restored");
-        let written = seen
-            .iter()
-            .position(|seen| seen.body["stream"] == true)
-            .expect("the line was written");
-        assert!(restored < written);
+        });
     }
 
     #[test]

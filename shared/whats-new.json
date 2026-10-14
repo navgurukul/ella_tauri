@@ -2,7 +2,11 @@
   "0.1.23": [
     "When you are online, your recap can show up to three fixes. Use the arrows to see each one, and tap the speaker to hear it.",
     "The Skills grew card now shows which blocks are from today and which are from your talks before.",
-    "When no skill grew in a talk, the recap shows you one skill to try next time."
+    "When no skill grew in a talk, the recap shows you one skill to try next time.",
+    "Lessons now work without the internet. When you are offline, Ella teaches your lesson on your laptop.",
+    "If the internet drops during a lesson, Ella carries on with it.",
+    "Your recap no longer shows a repeated word, like \"I am I am\", as a mistake.",
+    "When one answer has several mistakes, your recap can still show you a fix for it."
   ],
   "0.1.22": [
     "Ella now has short lessons for you. When you get stuck on something, or after two good talks, your lesson is ready on Home.",

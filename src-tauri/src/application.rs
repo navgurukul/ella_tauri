@@ -2306,6 +2306,7 @@ fn focus_for(target: &str) -> Option<Focus> {
         step_title: step.title.clone(),
         step_focus: step.focus.clone(),
         skill: skill.text.clone(),
+        label: skill.label.clone(),
     })
 }
 
@@ -4770,6 +4771,184 @@ mod curriculum_flow_tests {
                 }
             }
         }
+    }
+
+    /// Five of Ella's lessons on the laptop's model alone, each to its
+    /// goodbye, with a learner who gets it wrong, gets it right, answers in a
+    /// word and wanders off it, and the mark a teacher would give each
+    /// answer. Prints each lesson and how it went: marks that agree with the
+    /// teacher's, praise for a miss, a miss said back, a question asked
+    /// again, and how long each reply would take on the slowest tester's
+    /// laptop (2026-10-14: 18 prompt tokens a second read, 6.7 written).
+    /// Against llama-server alone, with the cloud off:
+    ///
+    /// ELLA_LLM_BASE_URL=http://127.0.0.1:39291/v1 ELLA_LLM_SLOT_DIR=<its --slot-save-path> \
+    ///   cargo test --lib live_laptop_teaches -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn live_laptop_teaches_five_lessons() {
+        use crate::infrastructure::engines::{EnginePaths, LocalEngine};
+        assert!(std::env::var("ELLA_LLM_BASE_URL").is_ok(), "point ELLA_LLM_BASE_URL at llama-server");
+        std::env::set_var("ELLA_PIPER_DAEMON", "0");
+        // (level, step, skill, the learner's answers with the mark a teacher gives each)
+        let lessons: [(&str, u8, &str, [(&str, bool); 7]); 5] = [
+            (
+                "A2",
+                1,
+                "U1-GRA-01",
+                [
+                    ("I live in Pune since five years.", false),
+                    ("I have lived in Pune for five years.", true),
+                    ("Yes.", false),
+                    ("I have visited Mumbai two times with my family.", true),
+                    ("My father works in a bank.", false),
+                    ("I have never seen snow in my life.", true),
+                    ("I learned to say have and the third form for things that are still true.", false),
+                ],
+            ),
+            (
+                "A2",
+                1,
+                "U1-VOC-02",
+                [
+                    ("My phone is very old.", false),
+                    ("My old phone was on its last legs.", true),
+                    ("Without phone I will feel bored.", false),
+                    ("It was a piece of cake to live without my phone for one day.", true),
+                    ("No.", false),
+                    ("I was over the moon when I got a new phone.", true),
+                    ("I learned some idioms like piece of cake and over the moon.", false),
+                ],
+            ),
+            (
+                "A2",
+                3,
+                "U3-GRA-01",
+                [
+                    ("If it rain tomorrow I stay home.", false),
+                    ("If it rains tomorrow, I will stay at home.", true),
+                    ("I like summer more than winter.", false),
+                    ("If I get good marks, my mother will be happy.", true),
+                    ("Okay.", false),
+                    ("If I finish my homework early, I will play cricket.", true),
+                    ("I learned to say if and then will for something that can happen.", false),
+                ],
+            ),
+            (
+                "A2",
+                2,
+                "U2-FLU-01",
+                [
+                    ("Last week I went to my cousin wedding.", false),
+                    ("First we reached the hall, then we ate, and after that we danced, and I still remember it now.", true),
+                    ("It was fun.", false),
+                    ("My uncle fell down while dancing and everyone laughed, and now we tell that story every time we meet.", true),
+                    ("Yes.", false),
+                    ("When I was small I lived in a village, but now I live in Pune and I miss my village.", true),
+                    ("I learned to tell a story in order and join the past with now.", false),
+                ],
+            ),
+            (
+                "B1",
+                1,
+                "U1-VOC-02",
+                [
+                    ("Last year I did a decision to study engineering.", false),
+                    ("I made a decision to study engineering.", true),
+                    ("Online is good because I can learn from home.", false),
+                    ("Pay attention.", false),
+                    ("In class I always pay attention to the teacher.", true),
+                    ("Sometimes I take a risk and try new things.", true),
+                    ("I learned that some words go together, like make a decision and take a risk.", false),
+                ],
+            ),
+        ];
+        let praise = ["well done", "nice one", "good job", "great", "excellent", "brilliant", "perfect", "awesome", "wonderful"];
+        let words = |text: &str| -> Vec<String> {
+            text.split_whitespace()
+                .map(|word| word.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase())
+                .filter(|word| !word.is_empty())
+                .collect()
+        };
+        let (mut agreed, mut judged_all, mut praised_misses, mut echoes, mut repeats) = (0, 0, 0, 0, 0);
+        let mut waits: Vec<f64> = Vec::new();
+        for (level, step, skill_id, answers) in lessons {
+            let service = AppService::new(
+                Database::in_memory().unwrap(),
+                Box::new(LocalEngine::from_environment(EnginePaths::default())),
+            );
+            service.save_learner("Aarav", Some(15)).unwrap();
+            place_at(&service, level, step);
+            let key = curriculum::skill_key(level, skill_id);
+            give(&service, vec![SkillProgress { misses: 2, ..SkillProgress::fresh(&key) }]);
+            let offered = service.bootstrap().unwrap().lesson.expect("a lesson is ready on the laptop");
+            println!("\n=== {level} step {step}: {}", offered.title);
+            let lesson = service.start_lesson().unwrap();
+            println!("            ella     {}", lesson.messages[0].content);
+            let mut questions: Vec<Vec<String>> = Vec::new();
+            if let Some(question) = crate::infrastructure::engines::trailing_question(&lesson.messages[0].content) {
+                questions.push(words(question));
+            }
+            for (answer, used) in answers {
+                println!("            learner  {answer}");
+                let turn = service.send_text_turn(&lesson.id, answer).unwrap();
+                let reply = turn.ella_message.content.clone();
+                assert!(!reply.contains('['), "a mark was said: {reply}");
+                let event = crate::telemetry::written()
+                    .into_iter()
+                    .rev()
+                    .find(|event| event["event"] == "ella_turn_latency")
+                    .unwrap();
+                let runs = event["llm_runs"].as_array().cloned().unwrap_or_default();
+                let read: f64 = runs.iter().filter_map(|run| run["prompt_evaluated"].as_f64()).sum();
+                let written: f64 = runs.iter().filter_map(|run| run["gen_tokens"].as_f64()).sum();
+                let wait = 0.7 + read / 18.0 + written / 6.7;
+                waits.push(wait);
+                let mark = service.database.lesson_judgements(&lesson.id).unwrap().get(&turn.learner_message.id).copied();
+                judged_all += 1;
+                let agrees = mark == Some(used);
+                agreed += usize::from(agrees);
+                let lower = reply.to_lowercase();
+                let praised = praise.iter().any(|word| lower.starts_with(word));
+                let praised_miss = !used && praised;
+                praised_misses += usize::from(praised_miss);
+                let said = words(answer);
+                let echo = !used && said.len() >= 3 && words(&reply).windows(said.len()).any(|window| window == said);
+                echoes += usize::from(echo);
+                let repeat = crate::infrastructure::engines::trailing_question(&reply).map(words).is_some_and(|asking| {
+                    let repeated = questions.iter().any(|before| {
+                        let shared = asking.iter().filter(|word| before.contains(word)).count();
+                        shared * 4 >= asking.len().max(before.len()) * 3
+                    });
+                    questions.push(asking);
+                    repeated
+                });
+                repeats += usize::from(repeat);
+                let flags = [(agrees, "mark?"), (!praised_miss, "praised a miss"), (!echo, "said it back"), (!repeat, "asked again")]
+                    .iter()
+                    .filter(|(fine, _)| !fine)
+                    .map(|(_, what)| *what)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mark = match mark {
+                    Some(true) => "USED    ",
+                    Some(false) => "NOT USED",
+                    None => "unmarked",
+                };
+                println!("  [{wait:>4.1} s] {mark} {reply}{}", if flags.is_empty() { String::new() } else { format!("   <-- {flags}") });
+                if turn.session_summary.is_some() {
+                    println!("  -- closed after answer {}", turn.learner_message.turn);
+                    break;
+                }
+            }
+        }
+        waits.sort_by(f64::total_cmp);
+        println!(
+            "\nmarks agreeing with the teacher's {agreed}/{judged_all}; praised a miss {praised_misses}; said a miss back \
+             {echoes}; asked again {repeats}; on the classroom laptop a reply takes {:.1} s at the median, {:.1} s at most",
+            waits[waits.len() / 2],
+            waits[waits.len() - 1]
+        );
     }
 
     #[test]
