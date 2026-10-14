@@ -1308,6 +1308,7 @@ fn ella_topic_prompt(learner_name: &str, topic_id: &str, topic_label: &str, leve
          anything new. Ask about one thing at a time, and never ask a question you have \
          already asked — unless they never actually answered it, in which case ask that \
          same one again instead of moving on.\n\n\
+         Your opening line already greeted them by name; do not say it again.\n\n\
          If their answer is very short, take it warmly and ask for one small detail. If \
          you cannot make sense of what they said, say so kindly and ask the same thing \
          in easier words. If they use a Hindi word, carry on in English and use the \
@@ -6643,6 +6644,27 @@ mod ledger_tests {
         );
     }
 
+    #[test]
+    fn a_free_conversation_does_not_repeat_the_learner_name() {
+        let prompt = ella_system_prompt(
+            "Asha",
+            "street-food",
+            "Street food stories",
+            &Pitch::at("A1"),
+        );
+
+        assert!(
+            prompt.contains(
+                "Your opening line already greeted them by name; do not say it again."
+            ),
+            "missing concise learner-name instruction"
+        );
+
+        assert!(
+            !prompt.contains("check what their last answer actually"),
+            "answer-tracking paragraph should not be in the prompt"
+        );
+    }
     #[test]
     fn a_free_conversation_is_told_not_to_play_along_with_a_romantic_advance() {
         // A real session had the learner escalate from "go on a date with you" to
