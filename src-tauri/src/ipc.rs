@@ -123,6 +123,14 @@ pub async fn start_session(
     off_main_thread(move || service.start_session(&topic_id)).await
 }
 
+/// Ella's lesson, the one she has ready: Home's Today's talk once she has
+/// one, and the mentor card's "Start the lesson".
+#[tauri::command]
+pub async fn start_lesson(state: State<'_, AppState>) -> Result<Session, String> {
+    let service = state.0.clone();
+    off_main_thread(move || service.start_lesson()).await
+}
+
 /// The placement chat: onboarding's first talk, or the one the level map
 /// offers a learner who never had it.
 #[tauri::command]

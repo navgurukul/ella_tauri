@@ -31,6 +31,7 @@ use crate::{
         audio::raw_pcm_to_wav,
         cloud_llm::{self, Ask, Asked, CloudLlm},
         engine_manager::LlamaServer,
+        lesson_prompt::{self, LessonAsk, Marks},
         model_queue::{Errand, ErrandTurn, GiveWay, Held, ModelQueue, Step},
         speech_timing::{phoneme_spans, shifted, word_spans},
         stt::{
@@ -63,6 +64,10 @@ pub struct GeneratedReply {
     /// means the caller has to say `text` itself: nothing was synthesized
     /// ahead, or what was is not what the reply ended up saying.
     pub pending: Option<PendingSpeech>,
+    /// In Ella's lesson, what her reply's marks said: her judgement of the
+    /// answer, and whether it is her goodbye (`lesson_prompt::marks`).
+    /// Nothing in any other talk.
+    pub marks: Marks,
 }
 
 impl GeneratedReply {
@@ -75,6 +80,7 @@ impl GeneratedReply {
             signal: None,
             regenerated: false,
             pending: None,
+            marks: Marks::default(),
         }
     }
 }
@@ -2878,6 +2884,28 @@ pub trait TutorEngine: Send + Sync {
         Ok(placement_opening_line(learner_name))
     }
 
+    /// Whether Ella can teach a lesson now. A lesson is offered only then;
+    /// otherwise it waits, and Today's talk is a talk. Yes by default, as in
+    /// demo mode, whose lessons are scripted.
+    fn teaches_lessons(&self) -> bool {
+        true
+    }
+
+    /// Get Ella's lesson ready while the learner looks at Home, where it is
+    /// offered: its instructions, and the line it opens with, so "Start the
+    /// lesson" does not wait for the model. Never waits itself. Nothing by
+    /// default, where there is nothing to get ready.
+    fn prepare_lesson(&self, _ask: &LessonAsk) {}
+
+    /// Ella's lesson's first line: what it will practise, with an example,
+    /// and a first question that calls for the skill, which unlike a talk's
+    /// opening is the model's own. Taken from the one got ready ahead where
+    /// there is one for exactly this lesson. The default is the scripted line
+    /// demo mode says.
+    fn lesson_opening(&self, ask: &LessonAsk) -> EllaResult<String> {
+        Ok(lesson_prompt::scripted_opening(ask))
+    }
+
     /// Whether there is a model to judge with. Without one — demo mode — the
     /// placement chat runs to its shortest length and talks are not scored.
     fn judges(&self) -> bool {
@@ -3047,6 +3075,28 @@ impl TutorEngine for DemoEngine {
 
     fn reply(&self, request: &TutorRequest) -> EllaResult<GeneratedReply> {
         let started = Instant::now();
+        if request.lesson.is_some() {
+            // The lesson's shape without a model: its ending asked for on the
+            // sixth answer, and its goodbye by the eighth.
+            let turn = request.turn;
+            let text = if turn >= lesson_prompt::LESSON_GOODBYE_BY {
+                "You did really well today. Goodbye for now, and I hope we talk again soon!"
+            } else if turn > lesson_prompt::LESSON_ENDING_AT {
+                "That is a good start. What will you remember from today?"
+            } else if turn == lesson_prompt::LESSON_ENDING_AT {
+                lesson_prompt::LESSON_ENDING_LINE
+            } else {
+                "Nice! Can you tell me a little more about that?"
+            };
+            let completion_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            return Ok(GeneratedReply {
+                marks: Marks {
+                    used: None,
+                    goodbye: turn >= lesson_prompt::LESSON_GOODBYE_BY,
+                },
+                ..GeneratedReply::plain(text.to_owned(), completion_ms, completion_ms)
+            });
+        }
         if let Some(brief) = &request.placement {
             let text = if brief.closing {
                 PLACEMENT_WRAP.to_owned()
@@ -3876,6 +3926,9 @@ pub struct LocalEngine {
     /// Fields, so tests need not wait seconds.
     hedge_after: Duration,
     reply_first_word: Duration,
+    /// Lesson openings the cloud wrote while the learner was on Home: see
+    /// `prepare_lesson`.
+    lessons: Arc<MadeAhead>,
 }
 
 /// After this long without the cloud's first word, the laptop's model starts
@@ -3914,6 +3967,161 @@ impl Hedge {
         self.settled.notify_all();
         state.started
     }
+}
+
+/// The first lines of Ella's lessons, written before they are asked for, by
+/// the fingerprint of exactly what the model was asked (Ella Mobile's
+/// `lesson_opening.ts`). Asked live, a lesson's opening keeps the learner
+/// waiting while the model writes four or five sentences; written while Home
+/// showed the lesson, "Start the lesson" says it at once. A line is said once,
+/// and only for the very lesson it was written for: one that has changed
+/// since asks something else, and its opening is written live.
+#[derive(Default)]
+struct MadeAhead {
+    /// `None` while the line is being written.
+    lines: Mutex<HashMap<String, Option<String>>>,
+    changed: Condvar,
+}
+
+/// How long "Start the lesson" waits on an opening still being written, as
+/// when it is pressed the moment Home shows the lesson, before asking the
+/// model itself: the one already asked began first, so it is the nearer done.
+const MADE_AHEAD_WAIT: Duration = Duration::from_secs(8);
+
+impl MadeAhead {
+    /// Whether this call is the one to write the line for `key`: not when it
+    /// is written already, or being written. One for a new key takes the
+    /// place of every finished line kept for an older one.
+    fn claim(&self, key: &str) -> bool {
+        let mut lines = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+        if lines.contains_key(key) {
+            return false;
+        }
+        lines.retain(|_, line| line.is_none());
+        lines.insert(key.to_owned(), None);
+        true
+    }
+
+    /// The line written under a claim on `key`; `None` gives the claim up.
+    fn keep(&self, key: &str, line: Option<String>) {
+        let mut lines = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+        match line {
+            Some(line) => {
+                lines.insert(key.to_owned(), Some(line));
+            }
+            None => {
+                lines.remove(key);
+            }
+        }
+        drop(lines);
+        self.changed.notify_all();
+    }
+
+    /// The line written for `key`, taken so it is said once, after waiting
+    /// up to `wait` for one still being written.
+    fn take(&self, key: &str, wait: Duration) -> Option<String> {
+        let deadline = Instant::now() + wait;
+        let mut lines = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            match lines.get(key) {
+                None => return None,
+                Some(Some(_)) => return lines.remove(key).flatten(),
+                Some(None) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return None;
+                    }
+                    lines = self
+                        .changed
+                        .wait_timeout(lines, left)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0;
+                }
+            }
+        }
+    }
+}
+
+/// How long a reply may run, in tokens, on the laptop's model and on the
+/// cloud's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Budget {
+    local: u32,
+    cloud: u32,
+}
+
+/// A talk's reply: one or two short sentences and a question.
+const TALK_BUDGET: Budget = Budget {
+    local: 50,
+    cloud: CLOUD_REPLY_TOKENS,
+};
+
+/// A lesson's: its mark, a reaction of at most twenty words and a question,
+/// or an opening or a goodbye of five short sentences.
+const LESSON_BUDGET: Budget = Budget {
+    local: 110,
+    cloud: 140,
+};
+
+/// The fingerprint a lesson's opening is kept under: everything the model is
+/// asked for it.
+fn lesson_key(ask: &LessonAsk) -> String {
+    prompt_fingerprint(&format!(
+        "{}\u{0}{}",
+        lesson_prompt::system_prompt(ask),
+        lesson_prompt::opening_request(ask)
+    ))
+}
+
+/// A lesson's opening as Ella can say it: no marks, and something said;
+/// `None` for a line with nothing left to say.
+fn sayable_opening(text: &str) -> Option<String> {
+    let line = one_line(&strip_bracket_tokens(text));
+    says_something(&line).then_some(line)
+}
+
+/// A lesson's line on one line. The cloud's model sets a lesson's question
+/// apart from its reaction with a blank line between, which the talk screen
+/// would show as a gap and Piper does not need.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A turn of Ella's lesson as its instructions are made of: everything its
+/// opening was asked with (`AppService::start_lesson`), so the two read the
+/// same. `None` for any other turn, and for a lesson whose skill the
+/// curriculum no longer has, which carries on as a talk.
+fn lesson_ask(request: &TutorRequest) -> Option<LessonAsk> {
+    let lesson = request.lesson.as_ref()?;
+    Some(LessonAsk {
+        learner_name: request.learner_name.clone(),
+        age: lesson.age,
+        topic_id: request.topic_id.clone(),
+        topic_label: request.topic_label.clone(),
+        level: request.pitch.level.clone(),
+        focus: request.pitch.focus.clone()?,
+        strand: lesson.strand,
+        strengths: lesson.strengths.clone(),
+    })
+}
+
+/// What this turn of a lesson must do: `lesson_prompt::pacing`, from the
+/// learner's answers so far, this one (`request.learner_text`) included, and
+/// Ella's judgement of the earlier ones.
+fn lesson_pacing(request: &TutorRequest) -> lesson_prompt::Pacing {
+    let judged = request.lesson.as_ref().map(|lesson| &lesson.judged);
+    let earlier: Vec<&Message> = request
+        .messages
+        .iter()
+        .filter(|message| message.speaker == Speaker::Learner)
+        .collect();
+    let uses = earlier
+        .iter()
+        .filter(|answer| judged.and_then(|judged| judged.get(&answer.id)) == Some(&true))
+        .count();
+    let short = earlier.last().is_some_and(|before| lesson_prompt::very_short(&before.content))
+        && lesson_prompt::very_short(&request.learner_text);
+    lesson_prompt::pacing(earlier.len() as u32 + 1, uses, short)
 }
 
 impl LocalEngine {
@@ -4045,6 +4253,7 @@ impl LocalEngine {
             cloud,
             hedge_after: HEDGE_AFTER,
             reply_first_word: cloud_llm::REPLY_FIRST_WORD,
+            lessons: Arc::default(),
         };
         // So the first talk, or a bench's, does not go to the laptop only
         // because the first look at the cloud had not come back yet.
@@ -4203,6 +4412,103 @@ impl TutorEngine for LocalEngine {
         }
     }
 
+    /// Only while the cloud answers. Told a lesson's skill, the laptop's 3B
+    /// model taught it badly: in three lessons on 2026-10-13 it marked 6 of
+    /// 24 answers, praised a "Yes." as a good use, opened by inventing what
+    /// the learner had said last time, asked the same three questions four
+    /// replies running, and once answered "Please provide the learner's words
+    /// so I can review them." The cloud's marked every answer, and taught as
+    /// the phone's does.
+    fn teaches_lessons(&self) -> bool {
+        self.cloud.as_ref().is_some_and(|cloud| cloud.usable())
+    }
+
+    /// The lesson's instructions are got ready on the laptop's model the way
+    /// a talk's are, as an errand kept on disk. Its opening is written by the
+    /// cloud straight away, when the cloud answers, which costs the laptop
+    /// nothing; on the laptop alone it is written when the lesson starts,
+    /// with its instructions already evaluated, rather than as an errand that
+    /// could hold up a talk opened meanwhile for as long as writing it takes.
+    fn prepare_lesson(&self, ask: &LessonAsk) {
+        let system = lesson_prompt::system_prompt(ask);
+        self.prepare_prompt("lesson", system.clone());
+        let Some(cloud) = self.cloud.as_ref().filter(|cloud| cloud.usable()).map(Arc::clone) else {
+            return;
+        };
+        let key = lesson_key(ask);
+        if !self.lessons.claim(&key) {
+            return;
+        }
+        let lessons = Arc::clone(&self.lessons);
+        let request = lesson_prompt::opening_request(ask);
+        thread::spawn(move || {
+            let started = Instant::now();
+            let messages = [
+                json!({"role": "system", "content": system}),
+                json!({"role": "user", "content": request}),
+            ];
+            let asked = cloud.ask(
+                &messages,
+                Ask {
+                    max_tokens: LESSON_BUDGET.cloud,
+                    temperature: 0.65,
+                    json: false,
+                    // Nobody is waiting on it yet.
+                    first_word: cloud_llm::JUDGE_FIRST_WORD,
+                },
+                |_, _| true,
+            );
+            let line = match asked {
+                Asked::Answered(answer) if answer.cut_short => {
+                    whole_sentences(answer.text.trim()).and_then(|text| sayable_opening(&text))
+                }
+                Asked::Answered(answer) => sayable_opening(answer.text.trim()),
+                Asked::Unanswered { why, .. } | Asked::Cut { why, .. } => {
+                    eprintln!("[LATENCY]     llm> lesson opening: the cloud wrote none ahead ({why})");
+                    None
+                }
+                Asked::Empty { .. } => None,
+            };
+            eprintln!(
+                "[LATENCY]     llm> lesson opening: {} ahead in {:.0}ms",
+                if line.is_some() { "written" } else { "not written" },
+                started.elapsed().as_secs_f64() * 1_000.0
+            );
+            lessons.keep(&key, line);
+        });
+    }
+
+    fn lesson_opening(&self, ask: &LessonAsk) -> EllaResult<String> {
+        let system = lesson_prompt::system_prompt(ask);
+        let text = match self.lessons.take(&lesson_key(ask), MADE_AHEAD_WAIT) {
+            Some(line) => {
+                eprintln!("[LATENCY]     llm> lesson opening: the one written ahead");
+                line
+            }
+            None => {
+                // On the laptop alone, its instructions as `prepare_lesson`
+                // kept them go back in the slot first, so writing the line
+                // reads only the request: cold, a lesson's instructions are
+                // most of a minute on a classroom laptop.
+                if !self.cloud.as_ref().is_some_and(|cloud| cloud.usable()) {
+                    if let Some(slots) = &self.slots {
+                        let _talking = self.queue.talking();
+                        let root = self.llm_base_url.trim_end_matches('/').trim_end_matches("/v1");
+                        slots.wait_for_saves();
+                        slots.prime(&self.client, root, self.llm_slot, &[("lesson", system.clone())]);
+                    }
+                }
+                let history = [json!({"role": "user", "content": lesson_prompt::opening_request(ask)})];
+                let written = self.stream_once(&system, &history, None, None, None, LESSON_BUDGET)?;
+                let whole = whole_sentences(&written.text).unwrap_or(written.text);
+                sayable_opening(&whole).unwrap_or_else(|| lesson_prompt::scripted_opening(ask))
+            }
+        };
+        // So the first reply evaluates only the learner's answer.
+        self.warm_prompt_cache(system.clone(), text.clone(), vec![("lesson", system)]);
+        Ok(text)
+    }
+
     fn prepare_recap(&self, next: &NextRecap) {
         let judge = |instructions: String| self.prepare_prompt_as(Errand::PrepareRecap, "judge", instructions);
         match next {
@@ -4357,6 +4663,9 @@ impl TutorEngine for LocalEngine {
     }
 
     fn reply(&self, request: &TutorRequest) -> EllaResult<GeneratedReply> {
+        if let Some(ask) = lesson_ask(request) {
+            return self.lesson_reply(request, &ask);
+        }
         let system = match (&request.placement, &request.chore) {
             (Some(brief), _) => placement_system_prompt(&request.learner_name, brief.age),
             (None, Some(context)) => chore_system_prompt(&request.learner_name, context),
@@ -4413,7 +4722,7 @@ impl TutorEngine for LocalEngine {
             telemetry::note("no_audio_ahead");
         }
 
-        let first = self.stream_once(&system, &history, None, aim.as_deref(), pipeline.as_mut())?;
+        let first = self.stream_once(&system, &history, None, aim.as_deref(), pipeline.as_mut(), TALK_BUDGET)?;
         // Only the first generation feeds the speaker; a regenerated reply is
         // said from scratch by the caller. Whatever is still being synthesized
         // carries on while the reply is checked.
@@ -4444,7 +4753,7 @@ impl TutorEngine for LocalEngine {
                 // the model's second one. In the rare case that the second
                 // comes back empty, the caller says the first one itself.
                 drop(pipeline.take());
-                let second = self.stream_once(&system, &history, Some(&corrective), None, None)?;
+                let second = self.stream_once(&system, &history, Some(&corrective), None, None, TALK_BUDGET)?;
                 let (retry_text, _) = take_signal(&second.text);
                 // Once only. Whatever the second asks again is dropped rather
                 // than written a third time: another generation costs the
@@ -4459,6 +4768,7 @@ impl TutorEngine for LocalEngine {
                 };
                 if !retry_text.is_empty() {
                     return Ok(GeneratedReply {
+                        marks: Marks::default(),
                         text: retry_text,
                         ttft_ms: first.ttft_ms,
                         completion_ms: first.completion_ms + second.completion_ms,
@@ -4480,6 +4790,7 @@ impl TutorEngine for LocalEngine {
                 text = kept;
             }
             return Ok(GeneratedReply {
+                marks: Marks::default(),
                 pending: PendingSpeech::matching(pipeline, &text),
                 text,
                 ttft_ms: first.ttft_ms,
@@ -4511,6 +4822,7 @@ impl TutorEngine for LocalEngine {
             );
             telemetry::note("took_offer");
             return Ok(GeneratedReply {
+                marks: Marks::default(),
                 pending: PendingSpeech::matching(pipeline, &agreeing),
                 text: agreeing,
                 named_figure: None,
@@ -4537,6 +4849,7 @@ impl TutorEngine for LocalEngine {
             // the reply being returned — unless `voiced` substituted the
             // authored line for a wordless turn, which `matching` catches.
             return Ok(GeneratedReply {
+                marks: Marks::default(),
                 pending: PendingSpeech::matching(pipeline, &final_text),
                 text: final_text,
                 named_figure: figure,
@@ -4571,7 +4884,7 @@ impl TutorEngine for LocalEngine {
             ledger.spec.unit,
             ledger.current,
         );
-        let second = self.stream_once(&system, &history, Some(&corrective), None, None)?;
+        let second = self.stream_once(&system, &history, Some(&corrective), None, None, TALK_BUDGET)?;
         let (retry_text, retry_signal) = take_signal(&second.text);
         let retry_figure = settled_figure(
             &retry_text,
@@ -4589,6 +4902,7 @@ impl TutorEngine for LocalEngine {
                 ledger.current,
             );
             return Ok(GeneratedReply {
+                marks: Marks::default(),
                 text: retry_text,
                 named_figure: retry_figure,
                 signal: retry_signal,
@@ -4606,6 +4920,7 @@ impl TutorEngine for LocalEngine {
         eprintln!("[LATENCY]     llm> ledger break twice - falling back to the authored refusal");
         telemetry::note("ledger_break_twice");
         Ok(GeneratedReply {
+            marks: Marks::default(),
             text: holding_line(&ledger.spec, ledger.current, &said),
             named_figure: None,
             signal: None,
@@ -4802,6 +5117,57 @@ impl LocalEngine {
                 errand,
             });
         });
+    }
+
+    /// One reply of Ella's lesson: its instructions, the lesson so far with
+    /// her marks on it, and a note on what this reply must do just before the
+    /// learner's latest answer, where it leaves the cached prefix alone.
+    /// Spoken as it is written, like any reply; her marks are read off it
+    /// and never reach Piper or the screen.
+    ///
+    /// The free talk's guard against a question asked again is left out, as
+    /// the phone's lesson has none: a lesson asks for the same skill again and
+    /// again by design, and its note moves each reply on.
+    fn lesson_reply(&self, request: &TutorRequest, ask: &LessonAsk) -> EllaResult<GeneratedReply> {
+        let system = lesson_prompt::system_prompt(ask);
+        let judged = request
+            .lesson
+            .as_ref()
+            .map(|lesson| lesson.judged.clone())
+            .unwrap_or_default();
+        let mut history = lesson_prompt::history(&request.messages, &judged, &request.learner_text);
+        let pacing = lesson_pacing(request);
+        history.insert(
+            history.len().saturating_sub(1),
+            json!({"role": "system", "content": pacing.note}),
+        );
+        let mut pipeline = self
+            .piper_daemon
+            .as_ref()
+            .filter(|daemon| daemon.usable())
+            .map(|daemon| SpeechPipeline::start(Arc::clone(daemon), None, Instant::now()));
+        if pipeline.is_none() {
+            telemetry::note("no_audio_ahead");
+        }
+        let written = self.stream_once(&system, &history, None, None, pipeline.as_mut(), LESSON_BUDGET)?;
+        if let Some(pipeline) = pipeline.as_mut() {
+            pipeline.close();
+        }
+        let marks = lesson_prompt::marks(&written.text);
+        let text = one_line(&strip_bracket_tokens(&written.text));
+        if marks.used.is_none() {
+            telemetry::note("lesson_unmarked");
+        }
+        Ok(GeneratedReply {
+            pending: PendingSpeech::matching(pipeline, &text),
+            text,
+            ttft_ms: written.ttft_ms,
+            completion_ms: written.completion_ms,
+            named_figure: None,
+            signal: None,
+            regenerated: false,
+            marks,
+        })
     }
 
     /// Build the message array once per turn. Full history every time is
@@ -5133,6 +5499,7 @@ impl LocalEngine {
         corrective: Option<&str>,
         aim: Option<&str>,
         mut speech: Option<&mut SpeechPipeline>,
+        budget: Budget,
     ) -> EllaResult<GeneratedReply> {
         let mut messages = vec![json!({"role": "system", "content": system})];
         messages.extend(history.iter().cloned());
@@ -5185,7 +5552,8 @@ impl LocalEngine {
                 telemetry::note("aim_told");
             }
             let hedge = self.hedge(&messages);
-            let answered = self.stream_cloud(cloud, &asked, why, speech.as_deref_mut(), hedge.as_deref());
+            let answered =
+                self.stream_cloud(cloud, &asked, why, speech.as_deref_mut(), hedge.as_deref(), budget.cloud);
             if hedge.is_some_and(|hedge| hedge.settle()) {
                 telemetry::note("laptop_hedged");
             }
@@ -5240,7 +5608,7 @@ impl LocalEngine {
                 "model": "local",
                 "messages": messages,
                 "temperature": 0.65,
-                "max_tokens": 50,
+                "max_tokens": budget.local,
                 // No presence/frequency penalty here on purpose. They look like
                 // the obvious cure for the repeated sentence template, and they
                 // make it worse: holding seed and prompt fixed, reuse of one
@@ -5439,11 +5807,12 @@ impl LocalEngine {
         why: &'static str,
         mut speech: Option<&mut SpeechPipeline>,
         hedge: Option<&Hedge>,
+        max_tokens: u32,
     ) -> Result<GeneratedReply, (&'static str, String, f64)> {
         let asked = cloud.ask(
             messages,
             Ask {
-                max_tokens: CLOUD_REPLY_TOKENS,
+                max_tokens,
                 temperature: 0.65,
                 json: false,
                 first_word: self.reply_first_word,
@@ -6091,6 +6460,7 @@ mod tests {
                 chore: None,
                 pitch: Pitch::at("A1"),
                 placement: None,
+                lesson: None,
             })
             .unwrap();
         assert!(reply.text.ends_with('?'));
@@ -6130,6 +6500,7 @@ mod tests {
                 chore: None,
                 pitch: Pitch::at("A1"),
                 placement: None,
+                lesson: None,
             })
             .unwrap();
         assert!(!reply.text.is_empty());
@@ -8043,6 +8414,7 @@ mod curriculum_prompt_tests {
             chore: None,
             pitch: Pitch::at("A2"),
             placement: Some(crate::domain::PlacementBrief { age: None, closing }),
+            lesson: None,
         };
         let asked = DemoEngine.reply(&request(2, false)).unwrap().text;
         assert!(asked.ends_with('?'));
@@ -8212,6 +8584,7 @@ mod errand_tests {
                 cloud: None,
                 hedge_after: HEDGE_AFTER,
                 reply_first_word: cloud_llm::REPLY_FIRST_WORD,
+                lessons: Arc::default(),
             }
         }
 
@@ -8428,6 +8801,7 @@ mod errand_tests {
             chore: None,
             pitch: Pitch::at("A2"),
             placement: None,
+            lesson: None,
         }
     }
 
@@ -8484,6 +8858,7 @@ mod errand_tests {
             chore: None,
             pitch: Pitch::at("B2"),
             placement: None,
+            lesson: None,
         }
     }
 
@@ -8520,6 +8895,7 @@ mod errand_tests {
             }),
             pitch: Pitch::at("B2"),
             placement: None,
+            lesson: None,
         }
     }
 
@@ -9069,6 +9445,7 @@ mod errand_tests {
         engine
             .reply(&TutorRequest {
                 placement: Some(crate::domain::PlacementBrief { age: None, closing: false }),
+                lesson: None,
                 ..at(2)
             })
             .unwrap();
@@ -9155,6 +9532,137 @@ mod errand_tests {
         fake.cloud_quiet_ms.store(300, Ordering::Relaxed);
         engine.reply(&after_where("I had pani puri at the station.")).unwrap();
         assert!(readings(&fake).is_empty());
+    }
+
+    fn lesson_for_tests() -> LessonAsk {
+        LessonAsk {
+            learner_name: "Souvik".into(),
+            age: None,
+            topic_id: "street-food".into(),
+            topic_label: "Street food stories".into(),
+            level: "A2".into(),
+            focus: Focus {
+                step_title: "Telling what happened".into(),
+                step_focus: "Talking about the past.".into(),
+                skill: "I can say what I did yesterday.".into(),
+            },
+            strand: crate::curriculum::Strand::Grammar,
+            strengths: Some(vec!["Saying hello".into()]),
+        }
+    }
+
+    /// The second answer of that lesson, whose first Ella judged a miss.
+    fn second_lesson_answer(answer: &str) -> TutorRequest {
+        let ask = lesson_for_tests();
+        TutorRequest {
+            learner_name: ask.learner_name.clone(),
+            topic_id: ask.topic_id.clone(),
+            topic_label: ask.topic_label.clone(),
+            messages: vec![
+                said(Speaker::Ella, "Hi Souvik! Today we will practise the past. What did you eat yesterday?", 0),
+                said(Speaker::Learner, "I eat chaat.", 1),
+                said(Speaker::Ella, "Chaat sounds great. Was that today, or yesterday?", 1),
+            ],
+            learner_text: answer.into(),
+            turn: 2,
+            chore: None,
+            pitch: Pitch {
+                level: ask.level.clone(),
+                focus: Some(ask.focus.clone()),
+            },
+            placement: None,
+            lesson: Some(crate::domain::LessonTurn {
+                strand: ask.strand,
+                strengths: ask.strengths.clone(),
+                age: ask.age,
+                judged: HashMap::from([("Learner-1".to_string(), false)]),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_lesson_reply_is_taught_by_its_own_instructions_and_its_marks_are_never_said() {
+        let fake = FakeLlama::scripted(pace(5, 5, 4), &["[USED] Well done! You said ate. Where did you eat it?"]);
+        let engine = fake.engine(Duration::from_secs(60));
+        let reply = engine.reply(&second_lesson_answer("Yesterday I ate chaat.")).unwrap();
+        assert_eq!(reply.text, "Well done! You said ate. Where did you eat it?");
+        assert_eq!(reply.marks, Marks { used: Some(true), goodbye: false });
+
+        let asked = fake
+            .completions()
+            .into_iter()
+            .filter(|seen| seen.body["stream"] == true)
+            .last()
+            .unwrap();
+        assert_eq!(asked.body["max_tokens"], LESSON_BUDGET.local);
+        let messages = asked.body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["content"], lesson_prompt::system_prompt(&lesson_for_tests()));
+        let [.., judged, note, latest] = messages.as_slice() else {
+            panic!("no messages");
+        };
+        assert_eq!(
+            judged["content"], "[NOT USED] Chaat sounds great. Was that today, or yesterday?",
+            "her line carries her mark on the answer before it"
+        );
+        assert_eq!(note["role"], "system");
+        assert!(note["content"].as_str().unwrap().starts_with("Lesson note: 2 answers so far."));
+        assert_eq!(latest["content"], "Yesterday I ate chaat.");
+    }
+
+    #[test]
+    fn a_lessons_opening_is_written_ahead_by_the_cloud_and_said_once() {
+        let fake = FakeLlama::start(pace(5, 5, 4));
+        let engine = fake.engine_with_cloud(Duration::from_millis(50));
+        let ask = lesson_for_tests();
+        engine.prepare_lesson(&ask);
+        // The window reads Home again, and asks again: it is written once.
+        engine.prepare_lesson(&ask);
+        assert_eq!(engine.lesson_opening(&ask).unwrap(), REPLY);
+        let [written] = fake.cloud_chats().try_into().unwrap();
+        assert_eq!(written.body["max_tokens"], LESSON_BUDGET.cloud);
+        assert_eq!(written.body["messages"][0]["content"], lesson_prompt::system_prompt(&ask));
+        assert_eq!(written.body["messages"][1]["content"], lesson_prompt::opening_request(&ask));
+
+        // Said once: the next start of it asks for its own.
+        engine.lesson_opening(&ask).unwrap();
+        assert_eq!(fake.cloud_chats().len(), 2);
+    }
+
+    #[test]
+    fn lessons_are_taught_only_while_the_cloud_answers() {
+        let fake = FakeLlama::start(pace(5, 5, 4));
+        assert!(!fake.engine(Duration::from_millis(50)).teaches_lessons(), "not by the laptop's model");
+        assert!(fake.engine_with_cloud(Duration::from_millis(50)).teaches_lessons());
+    }
+
+    #[test]
+    fn on_the_laptop_alone_a_lessons_instructions_are_got_ready_and_its_opening_waits_for_it() {
+        let fake = FakeLlama::start(pace(5, 5, 4));
+        let engine = fake.engine(Duration::from_millis(50));
+        let ask = lesson_for_tests();
+        engine.prepare_lesson(&ask);
+        eventually("the lesson's instructions are kept", || {
+            fake.kept().iter().any(|name| name.starts_with("ella-lesson-"))
+        });
+        assert_eq!(talk_turns(&fake), 0, "no opening is written ahead of the lesson");
+
+        // Started, the kept instructions go back in the slot before the line
+        // is written, so writing it reads only the request.
+        let opening = engine.lesson_opening(&ask).unwrap();
+        assert_eq!(opening, REPLY);
+        let seen = fake.seen();
+        let restored = seen
+            .iter()
+            .position(|seen| {
+                seen.path == "/slots/0?action=restore"
+                    && seen.body["filename"].as_str().is_some_and(|name| name.starts_with("ella-lesson-"))
+            })
+            .expect("the kept instructions were restored");
+        let written = seen
+            .iter()
+            .position(|seen| seen.body["stream"] == true)
+            .expect("the line was written");
+        assert!(restored < written);
     }
 
     #[test]

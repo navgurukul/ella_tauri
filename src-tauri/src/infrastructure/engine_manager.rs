@@ -527,6 +527,7 @@ use crate::domain::{
 use crate::infrastructure::engines::{
     GeneratedReply, NextRecap, NextTalk, SpeechSink, SynthesizedAudio, TutorEngine,
 };
+use crate::infrastructure::lesson_prompt::LessonAsk;
 use crate::infrastructure::model_queue::Held;
 use crate::infrastructure::stt::Transcription;
 
@@ -714,6 +715,27 @@ impl TutorEngine for DeferredEngine {
 
     fn placement_opening(&self, learner_name: &str, age: Option<u8>) -> EllaResult<String> {
         self.with_engine(|engine| engine.placement_opening(learner_name, age))
+    }
+
+    /// Not while there is no engine to teach with.
+    fn teaches_lessons(&self) -> bool {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|engine| engine.teaches_lessons()))
+            .unwrap_or(false)
+    }
+
+    /// Dropped while there is no engine, as `prepare_recap` is: the window
+    /// reads Home again after the next talk, and asks again.
+    fn prepare_lesson(&self, ask: &LessonAsk) {
+        if let Some(engine) = self.inner.read().ok().as_ref().and_then(|slot| slot.as_ref()) {
+            engine.prepare_lesson(ask);
+        }
+    }
+
+    fn lesson_opening(&self, ask: &LessonAsk) -> EllaResult<String> {
+        self.with_engine(|engine| engine.lesson_opening(ask))
     }
 
     fn judges(&self) -> bool {

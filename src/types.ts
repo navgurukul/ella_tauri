@@ -136,7 +136,26 @@ export interface AppSnapshot {
   progress: LearnerProgress;
   /** Where the signed-in learner stands in the curriculum; null when signed out. */
   standing?: Standing | null;
+  /** The lesson Ella, as mentor, has ready: Home's Today's talk is then that
+   * lesson, and the mentor card on Talk partners offers it. Null when she has
+   * none, and when signed out. */
+  lesson?: MentorLesson | null;
   engine_status: EngineStatus;
+}
+
+/** The lesson Ella has ready, as Home's Today's talk and the mentor card
+ * show it (Ella Mobile's `lessonView`). */
+export interface MentorLesson {
+  /** The skill it teaches, by the name the recap gives it: "Past time words". */
+  title: string;
+  /** What Ella can honestly say about it: what she noticed, what grew, or
+   * just that two talks have been had. */
+  detail: string;
+  /** The talk "Start the lesson" opens it in: today's, as Home offers it. */
+  topic: Topic;
+  /** The learner went past it in a talk since it was ready: before any other
+   * talk, Ella asks them to talk to her first. */
+  overdue: boolean;
 }
 
 /**
@@ -420,6 +439,9 @@ export interface EllaBridge {
   /** Stores a `#RRGGBB` avatar colour on the signed-in learner. */
   saveAvatarColor(color: string): Promise<Learner>;
   startSession(topicId: string): Promise<Session>;
+  /** Ella's lesson, the one she has ready, in today's talk. With none ready
+   * any more, today's talk as an ordinary talk. */
+  startLesson(): Promise<Session>;
   /** The placement chat: a friendly first talk that ends once Ella has heard
    * enough to read a level, between five answers and twelve. Its last turn
    * closes the session, as a conversation's last turn does. */

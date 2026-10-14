@@ -10,7 +10,7 @@ import {
   unfinishedSession,
   weeklyDigest,
 } from "../lib/presentation";
-import type { AppSnapshot, Tone, Topic } from "../types";
+import type { AppSnapshot, MentorLesson, Tone, Topic } from "../types";
 
 /** The four cards under "More topics": one tall, two small, one wide, each in
  * its own colour. Topics fill them in the order the backend offers them. */
@@ -26,6 +26,7 @@ export function HomeScreen({
   busy,
   mood = "eager",
   onStart,
+  onLesson,
   onResume,
   onLevels,
   onAllTopics,
@@ -36,6 +37,8 @@ export function HomeScreen({
    * or happy once they have finished one. */
   mood?: "eager" | "happy";
   onStart: (topic: Topic) => void;
+  /** Today's talk once Ella has a lesson ready: her lesson, in today's topic. */
+  onLesson: (lesson: MentorLesson) => void;
   onResume: (sessionId: string) => void;
   onLevels: () => void;
   /** "View all": every topic at the learner's level, on a page of its own. */
@@ -48,9 +51,12 @@ export function HomeScreen({
   // a remaining "today" cell means they have not said anything to Ella yet.
   const talkedToday = !run.week.some((day) => day.state === "today");
 
-  const recommended = recommendedTopicId(snapshot);
+  // Today's talk is Ella's lesson once she has one ready, as on Ella Mobile:
+  // the skill it teaches, what she says of it, and "Start the lesson".
+  const lesson = snapshot.lesson ?? null;
+  const recommended = lesson?.topic.id ?? recommendedTopicId(snapshot);
   const featured =
-    snapshot.topics.find((topic) => topic.id === recommended) ?? snapshot.topics[0];
+    snapshot.topics.find((topic) => topic.id === recommended) ?? lesson?.topic ?? snapshot.topics[0];
   const others = snapshot.topics.filter((topic) => topic.id !== featured?.id);
   const shown = others.slice(0, SLOTS.length);
 
@@ -73,15 +79,19 @@ export function HomeScreen({
                 expression={mood === "happy" ? "homeHappy" : "homeEager"}
                 decorative
               />
-              <div className="today__card">
+              <div className={`today__card ${lesson ? "today__card--lesson" : ""}`.trim()}>
                 <div className="today__text">
-                  <p className="eyebrow">Today&rsquo;s talk</p>
-                  <h2 className="today__title">{featured.label}</h2>
-                  <p className="today__blurb">{featured.blurb}</p>
+                  <p className="eyebrow">{lesson ? "Today’s lesson" : "Today’s talk"}</p>
+                  <h2 className="today__title">{lesson?.title ?? featured.label}</h2>
+                  <p className="today__blurb">{lesson?.detail ?? featured.blurb}</p>
                 </div>
-                <button className="btn btn--violet btn--talk" disabled={busy} onClick={() => onStart(featured)}>
+                <button
+                  className="btn btn--violet btn--talk"
+                  disabled={busy}
+                  onClick={() => (lesson ? onLesson(lesson) : onStart(featured))}
+                >
                   <MicGlyph size={17} />
-                  Start talking
+                  {lesson ? "Start the lesson" : "Start talking"}
                 </button>
               </div>
             </section>

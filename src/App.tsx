@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { CircleCheck, LoaderCircle, X } from "lucide-react";
 import { CastScreen } from "./components/CastScreen";
 import { HomeScreen } from "./components/HomeScreen";
+import { LessonNudge } from "./components/LessonNudge";
 import { LevelsScreen } from "./components/LevelsScreen";
 import { MicRecheck, OnboardingFlow } from "./components/OnboardingFlow";
 import { PlacementTalk } from "./components/PlacementTalk";
@@ -13,7 +14,7 @@ import { TalkScreen } from "./components/TalkScreen";
 import { TopicsScreen } from "./components/TopicsScreen";
 import { avatarColorFor, forgetLegacyAvatarColor, legacyAvatarColor } from "./lib/avatar";
 import { bridge } from "./lib/bridge";
-import { chorePartner, nextTopicLabel, recommendedTopicId, streak } from "./lib/presentation";
+import { CAST, chorePartner, nextTopicLabel, recommendedTopicId, streak } from "./lib/presentation";
 import { useSetup } from "./lib/setup";
 import { catalogueTopic } from "./lib/topics";
 import {
@@ -97,6 +98,9 @@ export default function App() {
   const [assessing, setAssessing] = useState<Assessing | null>(null);
   const [movedOn, setMovedOn] = useState<Assessment | null>(null);
   const [busy, setBusy] = useState(false);
+  // A talk the learner picked while Ella's lesson is overdue, held while she
+  // asks them to talk to her first: what they picked, and how to open it.
+  const [nudge, setNudge] = useState<{ instead: string; go: () => void } | null>(null);
   // Where a placement chat skipped part-way goes back to: the level map, or
   // the profile when Hello, Ella's sheet started it.
   const [placementBack, setPlacementBack] = useState<"levels" | "profile">("levels");
@@ -270,6 +274,38 @@ export default function App() {
     void refreshSnapshot();
   }
 
+  /** Ella's lesson, the one she has ready: Home's Today's talk once she has
+   * one, the mentor card's "Start the lesson", or "Talk with Ella" when she
+   * asks for a chat first. */
+  async function handleLesson() {
+    await run(async () => {
+      const created = await bridge.startLesson();
+      setSession(created);
+      setTopicPartner(null);
+      setFinished(null);
+      setScreen("talk");
+    });
+  }
+
+  /**
+   * Opens a talk the learner picked, unless they have gone past Ella's
+   * lesson: then she asks for a chat first, as on Ella Mobile, and the talk
+   * waits on their answer. `instead` is what they picked, by the name they
+   * know it by: a topic's title, or a partner's.
+   */
+  function throughEllaFirst(instead: string, go: () => void) {
+    if (snapshot?.lesson?.overdue) {
+      setNudge({ instead, go });
+      return;
+    }
+    go();
+  }
+
+  /** A partner's name, as the cast shows it. */
+  function partnerName(partner: CastId | null): string | null {
+    return CAST.find((member) => member.id === partner)?.name ?? null;
+  }
+
   /** A talk on a topic: Ella's, or `partner`'s when their card started it. */
   async function handleStart(topic: Topic, partner: CastId | null = null) {
     await run(async () => {
@@ -317,7 +353,21 @@ export default function App() {
   function handleBadgeStart(start: BadgeStart) {
     if (start.kind === "partners") setScreen("cast");
     else if (start.kind === "placement") openPlacement("profile");
-    else void handleStartTopic(start.topicId);
+    else {
+      const { topicId } = start;
+      throughEllaFirst(topicLabel(topicId), () => void handleStartTopic(topicId));
+    }
+  }
+
+  /** What the learner knows a topic as; the recommended one for none. */
+  function topicLabel(topicId: string | null): string {
+    if (!snapshot) return "today’s talk";
+    const wanted = topicId ?? recommendedTopicId(snapshot);
+    return (
+      snapshot.topics.find((candidate) => candidate.id === wanted)?.label ??
+      catalogueTopic(wanted)?.label ??
+      "today’s talk"
+    );
   }
 
   function openPlacement(from: "levels" | "profile") {
@@ -532,7 +582,8 @@ export default function App() {
             snapshot={snapshot}
             busy={busy}
             mood={finished && finished.topicId !== "placement" ? "happy" : "eager"}
-            onStart={(topic) => void handleStart(topic)}
+            onStart={(topic) => throughEllaFirst(topic.label, () => void handleStart(topic))}
+            onLesson={() => void handleLesson()}
             onResume={(sessionId) => void handleResume(sessionId)}
             onLevels={openLevels}
             onAllTopics={() => setScreen("topics")}
@@ -543,14 +594,18 @@ export default function App() {
             topics={snapshot.topics}
             busy={busy}
             onBack={() => setScreen("home")}
-            onStart={(topic) => void handleStart(topic)}
+            onStart={(topic) => throughEllaFirst(topic.label, () => void handleStart(topic))}
           />
         )}
         {screen === "cast" && (
           <CastScreen
             learner={snapshot.learner}
+            lesson={snapshot.lesson ?? null}
             busy={busy}
-            onStartGoal={(goal, partner) => void handleStartGoal(goal, partner)}
+            onStartGoal={(goal, partner) =>
+              throughEllaFirst(partnerName(partner) ?? goal.title, () => void handleStartGoal(goal, partner))
+            }
+            onLesson={() => void handleLesson()}
           />
         )}
         {screen === "profile" && (
@@ -572,7 +627,12 @@ export default function App() {
             avatarColor={avatarColor}
             busy={busy}
             onBack={() => setScreen("profile")}
-            onPractise={() => void handleStartTopic(null)}
+            // Today's talk, which is Ella's lesson once she has one ready.
+            onPractise={() =>
+              snapshot.lesson
+                ? void handleLesson()
+                : throughEllaFirst(topicLabel(null), () => void handleStartTopic(null))
+            }
             onFindLevel={() => openPlacement("levels")}
             onBadgeStart={handleBadgeStart}
           />
@@ -620,7 +680,9 @@ export default function App() {
               setMovedOn((current) => (current?.session_id === summary.session_id ? null : current))
             }
             onDone={() => setScreen("home")}
-            onTryAgain={(choreId) => void handleStartChore(choreId)}
+            onTryAgain={(choreId) =>
+              throughEllaFirst(partnerName(chorePartner(choreId)) ?? "this talk", () => void handleStartChore(choreId))
+            }
             onLevels={openLevels}
           />
         )}
@@ -633,6 +695,22 @@ export default function App() {
             openLevels();
           }}
           onClose={() => setMovedOn(null)}
+        />
+      )}
+      {nudge && snapshot.lesson && (
+        <LessonNudge
+          lesson={snapshot.lesson}
+          instead={nudge.instead}
+          busy={busy}
+          onLesson={() => {
+            setNudge(null);
+            void handleLesson();
+          }}
+          onContinue={() => {
+            setNudge(null);
+            nudge.go();
+          }}
+          onClose={() => setNudge(null)}
         />
       )}
       {updateToast}

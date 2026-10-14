@@ -1647,3 +1647,130 @@ describe("Ella badges", () => {
     expect(await screen.findByText("My profile")).toBeInTheDocument();
   });
 });
+
+describe("Ella's lessons", () => {
+  beforeEach(() => window.localStorage.clear());
+
+  /** Home with Ella's lesson ready on today's talk, as the backend sends it
+   * once a skill is stuck or two talks have counted. */
+  function withLesson(overdue: boolean) {
+    const read = bridge.bootstrap.bind(bridge);
+    return vi.spyOn(bridge, "bootstrap").mockImplementation(async () => {
+      const snapshot = await read();
+      return snapshot.learner
+        ? {
+            ...snapshot,
+            lesson: {
+              title: "Past time words",
+              detail: "You did well with saying hello in your last talks. Let's build on it with something new.",
+              topic: snapshot.topics[0],
+              overdue,
+            },
+          }
+        : snapshot;
+    });
+  }
+
+  it("makes Today's talk her lesson once she has one ready", async () => {
+    await bridge.saveLearner("Asha", 14);
+    const ready = withLesson(false);
+    const lesson = vi.spyOn(bridge, "startLesson");
+    try {
+      render(<App />);
+      await screen.findByText("Namaste, Asha!");
+      const today = document.querySelector(".today__card") as HTMLElement;
+      expect(today).toHaveClass("today__card--lesson");
+      expect(within(today).getByText("Today’s lesson")).toBeInTheDocument();
+      expect(within(today).getByRole("heading", { name: "Past time words" })).toBeInTheDocument();
+      expect(within(today).getByText(/You did well with saying hello/)).toBeInTheDocument();
+
+      fireEvent.click(within(today).getByRole("button", { name: /start the lesson/i }));
+      await screen.findByText("End talk");
+      expect(lesson).toHaveBeenCalledTimes(1);
+    } finally {
+      ready.mockRestore();
+      lesson.mockRestore();
+    }
+  });
+
+  it("keeps the mentor card's nothing-to-fix line until she has one", async () => {
+    await openTalkPartners("Aarav", "14");
+    expect(screen.getByText(/Nothing to fix yet/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /start the lesson/i })).not.toBeInTheDocument();
+  });
+
+  it("offers it on the mentor card", async () => {
+    await bridge.saveLearner("Asha", 14);
+    const ready = withLesson(false);
+    const lesson = vi.spyOn(bridge, "startLesson");
+    try {
+      render(<App />);
+      await screen.findByText("Namaste, Asha!");
+      fireEvent.click(screen.getByRole("button", { name: "Talk partners" }));
+      const card = (await screen.findByText("Your mentor")).closest(".mentor") as HTMLElement;
+      expect(within(card).getByText("Past time words.")).toBeInTheDocument();
+      expect(within(card).queryByText(/Nothing to fix yet/)).not.toBeInTheDocument();
+      fireEvent.click(within(card).getByRole("button", { name: /start the lesson/i }));
+      await screen.findByText("End talk");
+      expect(lesson).toHaveBeenCalledTimes(1);
+    } finally {
+      ready.mockRestore();
+      lesson.mockRestore();
+    }
+  });
+
+  it("asks for a chat first before any other talk once her lesson was gone past", async () => {
+    await bridge.saveLearner("Asha", 14);
+    const ready = withLesson(true);
+    const lesson = vi.spyOn(bridge, "startLesson");
+    const talk = vi.spyOn(bridge, "startSession");
+    try {
+      render(<App />);
+      await screen.findByText("Namaste, Asha!");
+      const picked = document.querySelector(".topics .topic") as HTMLElement;
+      const title = picked.querySelector(".topic__title")?.textContent ?? "";
+
+      // Closed: neither talk.
+      fireEvent.click(picked);
+      const sheet = await screen.findByRole("dialog", { name: "Let’s have a chat first" });
+      expect(sheet).toHaveTextContent("I have a short lesson ready for you on past time words.");
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(talk).not.toHaveBeenCalled();
+
+      // Carried on with: the talk they picked.
+      fireEvent.click(picked);
+      fireEvent.click(await screen.findByRole("button", { name: `Continue with ${title}` }));
+      await screen.findByText("End talk");
+      expect(talk).toHaveBeenCalledTimes(1);
+      expect(lesson).not.toHaveBeenCalled();
+    } finally {
+      ready.mockRestore();
+      lesson.mockRestore();
+      talk.mockRestore();
+    }
+  });
+
+  it("opens the lesson instead when the learner talks to Ella first", async () => {
+    await bridge.saveLearner("Aarav", 14);
+    const ready = withLesson(true);
+    const lesson = vi.spyOn(bridge, "startLesson");
+    const chore = vi.spyOn(bridge, "startChore");
+    try {
+      render(<App />);
+      await screen.findByText("Namaste, Aarav!");
+      fireEvent.click(screen.getByRole("button", { name: "Talk partners" }));
+      fireEvent.click(await screen.findByRole("button", { name: /talk a stall price down/i }));
+      const sheet = await screen.findByRole("dialog", { name: "Let’s have a chat first" });
+      expect(within(sheet).getByRole("button", { name: "Continue with Bippo" })).toBeInTheDocument();
+      fireEvent.click(within(sheet).getByRole("button", { name: "Talk with Ella" }));
+      await screen.findByText("End talk");
+      expect(lesson).toHaveBeenCalledTimes(1);
+      expect(chore).not.toHaveBeenCalled();
+    } finally {
+      ready.mockRestore();
+      lesson.mockRestore();
+      chore.mockRestore();
+    }
+  });
+});

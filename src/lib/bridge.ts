@@ -160,6 +160,7 @@ class TauriBridge implements EllaBridge {
   saveLearner = (name: string, age?: number | null) =>
     invoke<Learner>("save_learner", { name, age: age ?? null });
   startSession = (topicId: string) => invoke<Session>("start_session", { topicId });
+  startLesson = () => invoke<Session>("start_lesson");
   startPlacement = () => invoke<Session>("start_placement");
   /** The scores come back early on a channel of this call's own. */
   assessSession = (sessionId: string, onScored?: (scored: Assessment) => void) =>
@@ -393,6 +394,10 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
         : [],
       progress: learner ? progressOf(state.sessions) : emptyProgress(),
       standing: learner ? standingAt(positionOf(learner) ?? START, Boolean(learner.placed)) : null,
+      // The preview scores no talk, so none is ever counted towards a lesson
+      // and no skill is ever stuck: as the backend's demo mode, Ella never
+      // has one ready.
+      lesson: null,
       engine_status: {
         mode: "demo",
         label: "Browser demo",
@@ -580,6 +585,15 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
       if (!topic) throw new Error("Choose one of the available topics.");
       const learner = talker(state);
       return openSession(state, topic.id, topic.label, openingFor(topic.id, learner.name));
+    },
+    /** With no lesson ever ready in the preview, today's talk, as the
+     * backend opens it when it has none. */
+    async startLesson() {
+      const state = read();
+      const learner = talker(state);
+      const today = snapshot(state).topics[0];
+      if (!today) throw new Error("Ella has no talk to give her lesson in just now.");
+      return openSession(state, today.id, today.label, openingFor(today.id, learner.name));
     },
     async startChore(choreId) {
       const state = read();

@@ -862,6 +862,9 @@ button { font-family: inherit; }
   text-wrap: pretty;
 }
 .btn--talk { flex: none; }
+/* Ella's lesson in Today's talk's place: her lilac, as on the mentor card. */
+.today__card--lesson { border-color: rgba(147, 71, 221, 0.22); background: var(--lilac); }
+.today__card--lesson .eyebrow { color: var(--violet-deep); }
 
 /* More topics: one tall card, two small ones and a wide one beneath them. */
 .topics {
@@ -1115,6 +1118,8 @@ button { font-family: inherit; }
   color: var(--ink-70);
   text-wrap: pretty;
 }
+.mentor__note strong { color: var(--ink); font-weight: 700; }
+.mentor__start { align-self: flex-start; height: 46px; margin-top: 16px; padding: 0 24px; font-size: 15px; }
 
 .screen--cast .section-head { margin-top: 30px; }
 
@@ -1547,6 +1552,48 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 }
 .badge-bar > span { display: block; height: 100%; border-radius: inherit; }
 .check-glyph { fill: none; stroke: currentColor; stroke-width: 3.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Ella asking for a chat before the next talk, once her lesson was gone past:
+   the badge sheet's frame, with her mark, a line and two ways on. */
+.lesson-nudge__card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 420px;
+  text-align: center;
+}
+.lesson-nudge__ella {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  background: var(--lilac);
+}
+.lesson-nudge__title { margin: 16px 0 0; font-size: 28px; line-height: 1.1; }
+.lesson-nudge__text {
+  max-width: 330px;
+  margin: 10px 0 0;
+  font-size: 15.5px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: rgba(38, 38, 38, 0.72);
+  text-wrap: pretty;
+}
+.lesson-nudge__talk { width: 100%; height: 52px; margin-top: 22px; }
+.lesson-nudge__continue {
+  margin-top: 6px;
+  padding: 12px 8px;
+  border: none;
+  background: none;
+  color: var(--ink-55);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.lesson-nudge__continue:not(:disabled):hover { color: var(--ink); }
+.lesson-nudge__continue:disabled { opacity: 0.55; cursor: not-allowed; }
 
 /* One badge over the whole window: how it is going, what earns it, where. */
 .badge-sheet {
