@@ -85,11 +85,12 @@ pub fn went_well(answers: &[&str], chore: Option<&ChoreRecap>) -> Vec<String> {
 /// first. Each corrected line is matched to the answer it is closest to
 /// rather than by position, because the model sometimes repeats an answer
 /// before correcting it. A change that only writes the same words another way
-/// is no change at all (`sounds_the_same`). A line that was rewritten rather
-/// than corrected, or corrected in more than a few words at once, is left
-/// alone, and so is a change no grammar fix makes (`fixes_grammar`). Of what
-/// is left, a changed word is preferred to one only added or dropped, and
-/// then the earliest.
+/// is no change at all (`sounds_the_same`), and neither is a word said twice
+/// and dropped once (`said_again`). A line that was rewritten rather than
+/// corrected is left alone, and so is a change of more than a few words at
+/// once, or one no grammar fix makes (`fixes_grammar`). Of what is left, a
+/// changed word is preferred to one only added or dropped, and then the
+/// earliest.
 ///
 /// Each answer gives one at most, its best: two out of one answer would show
 /// the same few words twice, each with the other's mistake still in it. A
@@ -171,13 +172,27 @@ fn fixes_in(said: &[Vec<Token>], line: &str) -> Option<(usize, Vec<(Rank, Fix, M
         .filter(|(_, _, similarity)| *similarity >= 0.6)
         .max_by(|a, b| a.2.total_cmp(&b.2))?;
     let answer = &said[index];
-    let changed: usize = segments
+    // A change no grammar fix explains is the model rewriting rather than
+    // correcting, and a line with much of that is left alone. The fixes
+    // themselves do not count against it: an answer with three mistakes is
+    // corrected in three places, and while they counted, "He have two sister
+    // and they is very kind" gave no fix at all, however well corrected.
+    let unexplained: usize = segments
         .iter()
-        .filter(|segment| !segment.equal)
+        .filter(|segment| {
+            !segment.equal
+                && (segment.said.len() > 3
+                    || segment.fixed.len() > 3
+                    || !fixes_grammar(
+                        &answer[segment.said.clone()],
+                        &fixed[segment.fixed.clone()],
+                        answer.get(segment.said.end),
+                    ))
+        })
         .map(|segment| segment.said.len() + segment.fixed.len())
         .sum();
     let mut found = Vec::new();
-    if changed == 0 || changed * 2 > answer.len().max(4) {
+    if unexplained * 2 > answer.len().max(4) {
         return Some((index, found));
     }
     for (position, segment) in segments.iter().enumerate() {
@@ -293,7 +308,9 @@ fn diff(a: &[Token], b: &[Token]) -> Vec<Segment> {
 fn heard_alike(said: &[Token], fixed: &[Token], segments: Vec<Segment>) -> Vec<Segment> {
     let mut joined: Vec<Segment> = Vec::new();
     for segment in segments {
-        let equal = segment.equal || sounds_the_same(&said[segment.said.clone()], &fixed[segment.fixed.clone()]);
+        let equal = segment.equal
+            || sounds_the_same(&said[segment.said.clone()], &fixed[segment.fixed.clone()])
+            || (segment.fixed.is_empty() && said_again(said, segment.said.clone()));
         match joined.last_mut() {
             Some(last) if last.equal && equal => {
                 last.said.end = segment.said.end;
@@ -303,6 +320,24 @@ fn heard_alike(said: &[Token], fixed: &[Token], segments: Vec<Segment>) -> Vec<S
         }
     }
     joined
+}
+
+/// Whether the words a correction drops, `dropped` of `said`, only say again
+/// what was just said: "in in fact", "I am I am doing", "anything my my".
+/// Said aloud while thinking, a repeated word is not a grammar mistake, and a
+/// tester's recap on 2026-10-14 showed "In in fact I didn't" against "In
+/// fact I didn't" as its one fix, with real mistakes in the same talk.
+fn said_again(said: &[Token], dropped: std::ops::Range<usize>) -> bool {
+    let keys = |range: std::ops::Range<usize>| -> Vec<&str> { said[range].iter().map(|token| token.key.as_str()).collect() };
+    let length = dropped.len();
+    if length == 0 {
+        return false;
+    }
+    let these = keys(dropped.clone());
+    let before = dropped.start.checked_sub(length).map(|start| keys(start..dropped.start));
+    let after = (dropped.end + length <= said.len()).then(|| keys(dropped.end..dropped.end + length));
+    let doubled = length % 2 == 0 && these[..length / 2] == these[length / 2..];
+    doubled || before.as_deref() == Some(&these[..]) || after.as_deref() == Some(&these[..])
 }
 
 /// Whether `said` and `fixed` are the same words written down another way.
@@ -857,6 +892,45 @@ mod tests {
 
     fn fix(said: &str, better: &str) -> Option<Fix> {
         Some(Fix { said: said.into(), better: better.into() })
+    }
+
+    #[test]
+    fn a_word_said_twice_is_not_a_mistake() {
+        // Lines from a tester's offline talks on 2026-10-14, as the laptop's
+        // model corrected them.
+        for (said, corrected) in [
+            ("In in fact I didn't use the hook", "In fact I didn't use the hook"),
+            ("I am I am pursuing my engineering", "I am pursuing my engineering"),
+            ("I do I do morning exercise eating fruits", "I do morning exercise eating fruits"),
+            ("If I stay in village I can't do anything my my", "If I stay in village I can't do anything"),
+        ] {
+            assert_eq!(fix_from(&[said], &owned(&[corrected])), None, "{said}");
+        }
+        assert_eq!(
+            fix_from(&["I I goes to school every day"], &owned(&["I go to school every day"])),
+            fix("I I goes to school every", "I go to school every"),
+            "a real mistake beside a repeat is still found, in the learner's own words"
+        );
+    }
+
+    #[test]
+    fn an_answer_with_several_mistakes_still_gives_its_best_fix() {
+        assert_eq!(
+            fix_from(
+                &["Yesterday I go to market and buyed two apple"],
+                &owned(&["Yesterday I went to the market and bought two apples"])
+            ),
+            fix("Yesterday I go", "Yesterday I went")
+        );
+        assert_eq!(
+            fix_from(&["He have two sister and they is very kind"], &owned(&["He has two sisters and they are very kind"])),
+            fix("He have two", "He has two")
+        );
+        assert_eq!(
+            fix_from(&["600 is too much for this shirt"], &owned(&["The price of this shirt is far too high"])),
+            None,
+            "a rewrite is still left alone"
+        );
     }
 
     #[test]
