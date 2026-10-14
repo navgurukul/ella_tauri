@@ -33,7 +33,7 @@ const RECHECK: Duration = Duration::from_secs(30);
 /// first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Errand {
-    /// Reading a finished talk: what it showed and its one fix, or the level a
+    /// Reading a finished talk: what it showed and its fixes, or the level a
     /// placement found. The recap shows them.
     Assess,
     /// Getting a talk the learner is likely to open next ready, so its first

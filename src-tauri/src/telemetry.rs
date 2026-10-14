@@ -823,7 +823,7 @@ struct AssessmentEvent<'a> {
     /// From asking to what the talk counted being kept: when the recap's
     /// skills, and any step or level finished, are on screen.
     scored_ms: Option<u64>,
-    /// From asking to the whole of it kept, the one fix included.
+    /// From asking to the whole of it kept, the fixes included.
     total_ms: u64,
     judges: &'a [JudgeTiming],
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -521,8 +521,8 @@ use std::sync::RwLock;
 use std::collections::HashMap;
 
 use crate::domain::{
-    ChoreContext, EngineComponent, EngineStatus, Message, Pitch, PlacementReading, Readiness,
-    Scorable, Topic, TutorRequest,
+    ChoreContext, Corrections, EngineComponent, EngineStatus, Message, Pitch, PlacementReading,
+    Readiness, Scorable, Topic, TutorRequest,
 };
 use crate::infrastructure::engines::{
     GeneratedReply, NextRecap, NextTalk, SpeechSink, SynthesizedAudio, TutorEngine,
@@ -767,7 +767,7 @@ impl TutorEngine for DeferredEngine {
         self.with_engine(|engine| engine.score(skills, messages))
     }
 
-    fn correct(&self, answers: &[&str], settled: &dyn Fn(&[String]) -> bool) -> EllaResult<Option<Vec<String>>> {
+    fn correct(&self, answers: &[&str], settled: &dyn Fn(&[String]) -> bool) -> EllaResult<Option<Corrections>> {
         self.with_engine(|engine| engine.correct(answers, settled))
     }
 

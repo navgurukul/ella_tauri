@@ -22,9 +22,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     domain::{
-        AudioPayload, ChoreContext, Confidence, Direction, EngineComponent, EngineStatus, Focus, LedgerSpec,
-        Message, PhonemeSpan, Pitch, PlacementReading, Readiness, Scorable, Speaker, Topic, TurnSignal,
-        TutorRequest, WordSpan,
+        AudioPayload, ChoreContext, Confidence, Corrections, Direction, EngineComponent, EngineStatus,
+        Focus, LedgerSpec, Message, PhonemeSpan, Pitch, PlacementReading, Readiness, Scorable, Speaker,
+        Topic, TurnSignal, TutorRequest, WordSpan,
     },
     error::{EllaError, EllaResult},
     infrastructure::{
@@ -1800,8 +1800,8 @@ fn score_prompt(skills: &[Scorable]) -> String {
     )
 }
 
-/// Corrects the learner's answers for the recap's one fix. The model rewrites
-/// every answer with its mistakes fixed, and `notes::fix_from` compares the
+/// Corrects the learner's answers for the recap's fixes. The model rewrites
+/// every answer with its mistakes fixed, and `notes::fixes_from` compares the
 /// two, so the phrase the recap quotes is always the learner's own.
 ///
 /// Measured against Ella's 3B model on nine sample talks. Asked for the one
@@ -2945,18 +2945,19 @@ pub trait TutorEngine: Send + Sync {
     }
 
     /// The learner's `answers`, each with its grammar mistakes fixed and
-    /// otherwise word for word, for the recap's one fix. `None` without a
+    /// otherwise word for word, for the recap's fixes. `None` without a
     /// judge; an error when its answer could not be read.
     ///
-    /// `settled` is asked, as the corrected answers come in, whether those so
-    /// far already decide what the caller makes of them. Once it says so the
-    /// rest is not waited for, and only those come back: fewer lines than
-    /// answers.
+    /// `settled` is asked, as the laptop's model writes the corrected
+    /// answers, whether those so far already decide what the caller makes of
+    /// them. Once it says so the rest is not waited for, and only those come
+    /// back: fewer lines than answers. The cloud's model writes all of them in
+    /// a few seconds, and is read to the end.
     fn correct(
         &self,
         _answers: &[&str],
         _settled: &dyn Fn(&[String]) -> bool,
-    ) -> EllaResult<Option<Vec<String>>> {
+    ) -> EllaResult<Option<Corrections>> {
         Ok(None)
     }
 
@@ -3803,7 +3804,6 @@ struct CloudJudgeRun {
     first_word_ms: u64,
     read_tokens: u64,
     written_tokens: u64,
-    stopped_early: bool,
 }
 
 /// What a judge's failure says of an answer it could not read. The answer
@@ -4570,7 +4570,7 @@ impl TutorEngine for LocalEngine {
             }),
         ];
         self.judge_aside("place", "read a level off the placement", request, 80, None, read_placement, None)
-            .map(Some)
+            .map(|(reading, _)| Some(reading))
     }
 
     fn score(
@@ -4600,12 +4600,12 @@ impl TutorEngine for LocalEngine {
             |value| read_scores(value, skills, &learner),
             None,
         )
-        .map(Some)
+        .map(|(scores, _)| Some(scores))
     }
 
-    fn correct(&self, answers: &[&str], settled: &dyn Fn(&[String]) -> bool) -> EllaResult<Option<Vec<String>>> {
+    fn correct(&self, answers: &[&str], settled: &dyn Fn(&[String]) -> bool) -> EllaResult<Option<Corrections>> {
         if answers.is_empty() {
-            return Ok(Some(Vec::new()));
+            return Ok(Some(Corrections { lines: Vec::new(), cloud: false }));
         }
         let request = vec![
             json!({"role": "system", "content": CORRECTION_PROMPT}),
@@ -4629,7 +4629,9 @@ impl TutorEngine for LocalEngine {
         // On a laptop's CPU each corrected answer is seconds of the recap's
         // wait, so `settled` is asked as each one comes in. The lines it has
         // already said no to are not put to it again, even when the answer
-        // starts over after a talk.
+        // starts over after a talk. The cloud's answer is read whole: all of
+        // it took 2-4.5 s for testers' talks on 2026-10-13, and the recap
+        // shows more than one fix from it.
         let asked = Cell::new(0);
         let settle = |text: &str| {
             let lines = lines_so_far(text);
@@ -4648,7 +4650,7 @@ impl TutorEngine for LocalEngine {
             |value| read_corrections(value, answers.len()),
             Some(&settle),
         )
-        .map(Some)
+        .map(|(lines, cloud)| Some(Corrections { lines, cloud }))
     }
 
     fn opening_in_chore(&self, context: &ChoreContext, learner_name: &str) -> EllaResult<String> {
@@ -5198,7 +5200,7 @@ impl LocalEngine {
         read: impl Fn(&Value) -> Option<T>,
     ) -> EllaResult<T> {
         if let Some(cloud) = self.cloud.as_ref().filter(|cloud| cloud.usable()) {
-            match self.judge_cloud(cloud, label, &messages, max_tokens, &read, None) {
+            match self.judge_cloud(cloud, label, &messages, max_tokens, &read) {
                 Ok((value, _)) => return Ok(value),
                 Err(why) => eprintln!(
                     "[LATENCY]     judge> {label}: the cloud did not answer ({why}); asking the local model"
@@ -5255,7 +5257,7 @@ impl LocalEngine {
     }
 
     /// `judge` for what no learner sits waiting on — a finished talk's scores
-    /// and its one fix, the level a placement found — run as an errand: only
+    /// and its fixes, the level a placement found — run as an errand: only
     /// while no talk is open, with its prompt read a piece at a time and its
     /// answer streamed, so a talk opened while it runs waits for the piece in
     /// hand rather than all of it. See `ModelQueue`. Stopped, it starts again
@@ -5267,11 +5269,12 @@ impl LocalEngine {
     /// and kept the first time, restored in milliseconds every time after,
     /// before the rest is read. The prompt itself is unchanged.
     ///
-    /// `settle`, when given, is asked as the answer streams in whether what
-    /// has come is enough already; once it is, the rest is not waited for.
+    /// `settle`, when given, is asked as the laptop's answer streams in
+    /// whether what has come is enough already; once it is, the rest is not
+    /// waited for. The cloud's answer is read whole.
     ///
-    /// `name` is the judge's, for the assessment's telemetry
-    /// (`telemetry::record_judge`).
+    /// With the answer, whether the cloud's model gave it. `name` is the
+    /// judge's, for the assessment's telemetry (`telemetry::record_judge`).
     #[allow(clippy::too_many_arguments)]
     fn judge_aside<T>(
         &self,
@@ -5282,13 +5285,13 @@ impl LocalEngine {
         schema: Option<Value>,
         read: impl Fn(&Value) -> Option<T>,
         settle: Settle<'_, T>,
-    ) -> EllaResult<T> {
+    ) -> EllaResult<(T, bool)> {
         // The cloud answers many requests at once, so its judges wait for
         // nothing: not a talk, not an errand, not the hold. One that went
         // down a moment ago is looked at again first (`usable_for_judge`).
         if let Some(cloud) = self.cloud.as_ref().filter(|cloud| cloud.usable_for_judge()) {
             let asked = Instant::now();
-            let judged = self.judge_cloud(cloud, label, &messages, max_tokens, &read, settle);
+            let judged = self.judge_cloud(cloud, label, &messages, max_tokens, &read);
             let (status, run, error) = match &judged {
                 Ok((_, run)) => ("ok", run.clone(), None),
                 Err(why) => ("error", CloudJudgeRun::default(), Some(in_brief(why))),
@@ -5303,11 +5306,10 @@ impl LocalEngine {
                 attempts: run.attempts,
                 read_tokens: run.read_tokens,
                 written_tokens: run.written_tokens,
-                stopped_early: run.stopped_early,
                 ..JudgeTiming::default()
             });
             match judged {
-                Ok((value, _)) => return Ok(value),
+                Ok((value, _)) => return Ok((value, true)),
                 Err(why) => eprintln!(
                     "[LATENCY]     judge> {label}: the cloud did not answer ({why}); asking the local model"
                 ),
@@ -5440,7 +5442,9 @@ impl LocalEngine {
             });
         }
         record_judge(timing);
-        outcome.unwrap_or_else(|| Err(EllaError::Engine("Ella is closing.".into())))
+        outcome
+            .unwrap_or_else(|| Err(EllaError::Engine("Ella is closing.".into())))
+            .map(|value| (value, false))
     }
 
     /// Has `prompt`, the instructions a likely next talk starts with, evaluated
@@ -5893,13 +5897,11 @@ impl LocalEngine {
         messages: &[Value],
         max_tokens: u32,
         read: &dyn Fn(&Value) -> Option<T>,
-        settle: Settle<'_, T>,
     ) -> Result<(T, CloudJudgeRun), String> {
         let mut run = CloudJudgeRun::default();
         let mut failure = String::new();
         for attempt in 1..=2 {
             run.attempts = attempt;
-            let mut settled = None;
             let asked = cloud.ask(
                 messages,
                 Ask {
@@ -5908,10 +5910,7 @@ impl LocalEngine {
                     json: true,
                     first_word: cloud_llm::JUDGE_FIRST_WORD,
                 },
-                |_, whole| {
-                    settled = settle.and_then(|settle| settle(whole));
-                    settled.is_none()
-                },
+                |_, _| true,
             );
             match asked {
                 Asked::Answered(answer) => {
@@ -5920,14 +5919,6 @@ impl LocalEngine {
                     }
                     run.read_tokens += answer.usage.prompt;
                     run.written_tokens += answer.usage.completion;
-                    if let Some(value) = settled {
-                        run.stopped_early = true;
-                        eprintln!(
-                            "[LATENCY]     judge> {label}: cloud attempt {attempt} had all it needed after {:.0}ms, so the rest was not waited for",
-                            answer.ms
-                        );
-                        return Ok((value, run));
-                    }
                     eprintln!(
                         "[LATENCY]     judge> {label}: cloud attempt {attempt} took {:.0}ms: {}",
                         answer.ms,
@@ -9255,22 +9246,23 @@ mod errand_tests {
         let fake = FakeLlama::start(pace(5, 30, 16));
         let engine = fake.engine(Duration::from_secs(60));
         let asked = Mutex::new(Vec::new());
-        let lines = engine
+        let corrected = engine
             .correct(&SCHOOL, &|lines| {
                 asked.lock().unwrap().push(lines.len());
                 true
             })
             .unwrap()
             .unwrap();
-        assert_eq!(lines, [SCHOOL[0].replace("it have", "it has")]);
+        assert_eq!(corrected.lines, [SCHOOL[0].replace("it have", "it has")]);
+        assert!(!corrected.cloud, "the laptop's model wrote it");
         assert_eq!(*asked.lock().unwrap(), [1], "asked once the first line was whole");
         eventually("the rest of the answer was not waited for", || {
             fake.completions().iter().any(|seen| seen.dropped && seen.body["stream"] == true)
         });
 
         // Not settled, it reads every line, and the whole answer.
-        let lines = engine.correct(&SCHOOL, &|_| false).unwrap().unwrap();
-        assert_eq!(lines.len(), SCHOOL.len());
+        let corrected = engine.correct(&SCHOOL, &|_| false).unwrap().unwrap();
+        assert_eq!(corrected.lines.len(), SCHOOL.len());
     }
 
     #[test]
@@ -9391,8 +9383,12 @@ mod errand_tests {
         let [judged] = fake.cloud_chats().try_into().unwrap();
         assert_eq!(judged.body["response_format"], json!({"type": "json_object"}));
 
-        let lines = engine.correct(&SCHOOL, &|_| false).unwrap().unwrap();
-        assert_eq!(lines[0], SCHOOL[0].replace("it have", "it has"));
+        // Read whole, though the lines so far would settle it: the recap shows
+        // more than one fix from the cloud's correction.
+        let corrected = engine.correct(&SCHOOL, &|_| true).unwrap().unwrap();
+        assert_eq!(corrected.lines.len(), SCHOOL.len());
+        assert_eq!(corrected.lines[0], SCHOOL[0].replace("it have", "it has"));
+        assert!(corrected.cloud);
         assert!(fake.completions().is_empty());
     }
 

@@ -267,6 +267,14 @@ pub struct SkillGrowth {
     pub count: u32,
 }
 
+/// The skill a talk aimed at, as the recap names it: its short label, and
+/// what the learner can do with it, in the curriculum's words.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillAim {
+    pub label: String,
+    pub text: String,
+}
+
 /// What a finished talk did for the learner, worked out once and kept on the
 /// talk, so asking again answers the same and counts nothing twice.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -281,8 +289,13 @@ pub struct Assessment {
     /// A step or a level this talk finished; `None` when it moved nobody on.
     pub advanced: Option<Advance>,
     /// The skills this talk counted: its aim first, then the surest, at most
-    /// three.
+    /// three. Only ever skills that grew: Ella's lessons praise them.
     pub skills: Vec<SkillGrowth>,
+    /// The skill this talk aimed at, which the recap suggests trying next
+    /// time when the talk counted none. `None` for a placement, and for
+    /// assessments kept before the recap suggested one.
+    #[serde(default)]
+    pub aim: Option<SkillAim>,
     /// Whether anything judged the talk. Not when the learner said nothing,
     /// when there is no model to judge with, or when its answer could not be
     /// read — and none of those count against the learner.
@@ -294,16 +307,21 @@ pub struct Assessment {
     pub notes: Option<TalkNotes>,
 }
 
-/// What the recap says about a talk: what went well, and one thing to say
-/// better.
+/// What the recap says about a talk: what went well, and a thing or three to
+/// say better.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TalkNotes {
     /// At most two short lines, read off what the learner actually said
     /// (`notes::went_well`), so they hold with or without a model.
     pub went_well: Vec<String>,
     /// One of the learner's own phrases and how to say it, when the model found
-    /// a mistake worth fixing.
+    /// a mistake worth fixing: the best of them.
     pub fix: Option<Fix>,
+    /// The next best, up to two more, when the cloud's model corrected the
+    /// talk (`notes::fixes_from`). Empty after the laptop's, and in notes kept
+    /// before there were more.
+    #[serde(default)]
+    pub more_fixes: Vec<Fix>,
     /// Whether a model looked for a mistake at all. Without one (demo mode, or
     /// an answer that could not be read) no fix does not mean nothing to fix.
     pub checked: bool,
@@ -449,6 +467,17 @@ pub struct PlacementReading {
 pub struct Scorable {
     pub key: String,
     pub text: String,
+}
+
+/// The learner's answers with their grammar mistakes fixed, as a judge wrote
+/// them, and whether the cloud's model did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Corrections {
+    /// One per answer, in order; fewer when the laptop's model was stopped
+    /// once those it had written were enough.
+    pub lines: Vec<String>,
+    /// Written by the cloud's model, whole. Otherwise the laptop's.
+    pub cloud: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

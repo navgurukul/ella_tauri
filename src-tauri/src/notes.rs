@@ -1,5 +1,5 @@
-//! Ella's notes on a finished talk, for its recap: what went well, and one
-//! thing to say better.
+//! Ella's notes on a finished talk, for its recap: what went well, and a
+//! thing or three to say better.
 //!
 //! What went well is read off the learner's own words by the rules below, not
 //! asked of the model. Ella's 3B model, asked for praise, described what the
@@ -7,10 +7,10 @@
 //! list of praise to pick from, it picked the same two for every talk. The
 //! rules hold with or without a model, and say nothing the words do not show.
 //!
-//! The fix is the model's, but only as a correction of what the learner said:
-//! it rewrites each answer with its mistakes fixed, and `fix_from` compares
-//! the two, so the phrase shown as said is always one the learner said, word
-//! for word, and the fix is one they could hear.
+//! The fixes are the model's, but only as a correction of what the learner
+//! said: it rewrites each answer with its mistakes fixed, and `fixes_from`
+//! compares the two, so the phrase shown as said is always one the learner
+//! said, word for word, and the fix is one they could hear.
 
 use crate::domain::{ChoreRecap, Fix};
 
@@ -22,6 +22,10 @@ pub const NOTES_MIN_WORDS: usize = 12;
 /// Its answer is as long as they are, and on a laptop's CPU every word of it
 /// is a moment the recap waits.
 pub const MAX_CHECKED_ANSWERS: usize = 8;
+/// The most fixes a recap shows, when the cloud's model corrected the talk.
+/// A tester on 2026-10-13 made several mistakes a talk and asked to see more
+/// than one; the laptop's model still gives one (see `fixes_from`'s caller).
+pub const MAX_FIXES: usize = 3;
 
 /// Too little said for notes to say anything true.
 pub fn too_short(answers: &[&str]) -> bool {
@@ -77,22 +81,49 @@ pub fn went_well(answers: &[&str], chore: Option<&ChoreRecap>) -> Vec<String> {
         .collect()
 }
 
-/// The one fix, out of the model's corrected answers. Each corrected line is
-/// matched to the answer it is closest to rather than by position, because
-/// the model sometimes repeats an answer before correcting it. A change that
-/// only writes the same words another way is no change at all
-/// (`sounds_the_same`). A line that was rewritten rather than corrected, or
-/// corrected in more than a few words at once, is left alone, and so is a
-/// change no grammar fix makes (`fixes_grammar`). Of what is left, a changed
-/// word is preferred to one only added or dropped, and then the earliest.
-pub fn fix_from(answers: &[&str], corrected: &[String]) -> Option<Fix> {
+/// The fixes, out of the model's corrected answers: at most `most`, best
+/// first. Each corrected line is matched to the answer it is closest to
+/// rather than by position, because the model sometimes repeats an answer
+/// before correcting it. A change that only writes the same words another way
+/// is no change at all (`sounds_the_same`). A line that was rewritten rather
+/// than corrected, or corrected in more than a few words at once, is left
+/// alone, and so is a change no grammar fix makes (`fixes_grammar`). Of what
+/// is left, a changed word is preferred to one only added or dropped, and
+/// then the earliest.
+///
+/// Each answer gives one at most, its best: two out of one answer would show
+/// the same few words twice, each with the other's mistake still in it. A
+/// mistake already shown is not shown again from another answer — "I go" to
+/// "I went" once is enough — so each fix teaches something new.
+pub fn fixes_from(answers: &[&str], corrected: &[String], most: usize) -> Vec<Fix> {
     let said: Vec<Vec<Token>> = answers.iter().map(|answer| tokens_of(answer)).collect();
-    corrected
+    let mut found: Vec<(Rank, Fix, Mistake)> = corrected
         .iter()
         .filter_map(|line| fixes_in(&said, line))
         .flat_map(|(_, found)| found)
-        .min_by_key(|(rank, _)| *rank)
-        .map(|(_, fix)| fix)
+        .collect();
+    // Stable, so of two that rank the same the one found first is kept.
+    found.sort_by_key(|(rank, _, _)| *rank);
+    let mut fixes = Vec::new();
+    let mut answers_fixed = Vec::new();
+    let mut mistakes = Vec::new();
+    for ((_, answer, _), fix, mistake) in found {
+        if fixes.len() == most {
+            break;
+        }
+        if answers_fixed.contains(&answer) || mistakes.contains(&mistake) {
+            continue;
+        }
+        answers_fixed.push(answer);
+        mistakes.push(mistake);
+        fixes.push(fix);
+    }
+    fixes
+}
+
+/// The best fix alone: the first of `fixes_from`.
+pub fn fix_from(answers: &[&str], corrected: &[String]) -> Option<Fix> {
+    fixes_from(answers, corrected, 1).into_iter().next()
 }
 
 /// Whether `corrected`, the first of the corrected answers, already decide
@@ -110,7 +141,7 @@ pub fn fix_settled(answers: &[&str], corrected: &[String]) -> bool {
     let mut best: Option<Rank> = None;
     for (index, found) in corrected.iter().filter_map(|line| fixes_in(&said, line)) {
         corrected_already[index] = true;
-        for (rank, _) in found {
+        for (rank, _, _) in found {
             best = Some(best.map_or(rank, |best| best.min(rank)));
         }
     }
@@ -121,9 +152,13 @@ pub fn fix_settled(answers: &[&str], corrected: &[String]) -> bool {
 /// one only added or dropped, then by answer, then by where in it.
 type Rank = (bool, usize, usize);
 
+/// What a fix changes, as compared: the words said, and the words instead.
+/// The same in two answers is the same mistake made twice.
+type Mistake = (Vec<String>, Vec<String>);
+
 /// The answer a corrected `line` belongs to, the one it is closest to, if any
-/// is close enough; and the fixes in it, ranked. See `fix_from`.
-fn fixes_in(said: &[Vec<Token>], line: &str) -> Option<(usize, Vec<(Rank, Fix)>)> {
+/// is close enough; and the fixes in it, ranked. See `fixes_from`.
+fn fixes_in(said: &[Vec<Token>], line: &str) -> Option<(usize, Vec<(Rank, Fix, Mistake)>)> {
     let fixed = tokens_of(line);
     let (index, segments, _) = said
         .iter()
@@ -155,7 +190,9 @@ fn fixes_in(said: &[Vec<Token>], line: &str) -> Option<(usize, Vec<(Rank, Fix)>)
         }
         if let Some(fix) = phrase_around(answer, &fixed, &segments, position) {
             let added_or_dropped = segment.said.is_empty() || segment.fixed.is_empty();
-            found.push(((added_or_dropped, index, segment.said.start), fix));
+            let keys = |tokens: &[Token]| tokens.iter().map(|token| token.key.clone()).collect();
+            let mistake = (keys(&answer[segment.said.clone()]), keys(&fixed[segment.fixed.clone()]));
+            found.push(((added_or_dropped, index, segment.said.start), fix, mistake));
         }
     }
     Some((index, found))
@@ -820,6 +857,37 @@ mod tests {
 
     fn fix(said: &str, better: &str) -> Option<Fix> {
         Some(Fix { said: said.into(), better: better.into() })
+    }
+
+    #[test]
+    fn more_fixes_come_from_other_answers_and_each_shows_another_mistake() {
+        let answers = [
+            "Yesterday I go to market and buy vegetables",
+            "Then I go home with my sister",
+            "My brother have a new bicycle",
+            "We plays cricket in the evening",
+            "She help me with my homework",
+        ];
+        let corrected = owned(&[
+            "Yesterday I went to market and bought vegetables",
+            "Then I went home with my sister",
+            "My brother has a new bicycle",
+            "We play cricket in the evening",
+            "She helps me with my homework",
+        ]);
+        let fixes: Vec<Option<Fix>> = fixes_from(&answers, &corrected, MAX_FIXES).into_iter().map(Some).collect();
+        assert_eq!(
+            fixes,
+            [
+                fix("Yesterday I go to market", "Yesterday I went to market"),
+                fix("My brother have a new bicycle", "My brother has a new bicycle"),
+                fix("We plays cricket", "We play cricket"),
+            ],
+            "one an answer, \"I go\" once, and three at most"
+        );
+        assert_eq!(fix_from(&answers, &corrected), fixes[0], "the best is the one fix alone");
+        assert_eq!(fixes_from(&answers, &corrected[..1], MAX_FIXES).len(), 1, "only what has been corrected");
+        assert!(fixes_from(&answers, &answers.map(str::to_owned), MAX_FIXES).is_empty(), "nothing to fix");
     }
 
     #[test]

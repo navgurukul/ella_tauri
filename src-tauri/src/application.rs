@@ -14,7 +14,7 @@ use crate::{
         chores, find_character, find_chore, topics, Advance, AppSnapshot, Assessment,
         ChoreContext, ChoreRecap, Fix, Focus, LedgerTurn, AudioPayload, LedgerView, Learner, LearnerProfile,
         LearnerProgress, LessonTurn, LevelSkillView, LevelState, LevelView, MentorLesson, Message, PhonemeSpan,
-        Pitch, PlacementBrief, PlacementReading, Readiness, Scorable, Session, SessionSummary,
+        Pitch, PlacementBrief, PlacementReading, Readiness, Scorable, Session, SessionSummary, SkillAim,
         SpeechStreamEvent, SpokenLine, Standing, StepView, TalkNotes, TurnSignal, WinCondition,
         Speaker, Topic, TurnResult, TutorRequest, WordSpan,
     },
@@ -564,10 +564,11 @@ impl AppService {
         })
     }
 
-    /// The recap's one fix, said the right way, so the learner can hear it.
-    /// Only ever the fix kept on the talk: the window names the talk, not the
-    /// words. Synthesized whole, since nothing is waiting to highlight it.
-    pub fn speak_fix(&self, session_id: &str) -> EllaResult<SpokenLine> {
+    /// One of the recap's fixes, said the right way, so the learner can hear
+    /// it: the `index`-th, the best first. Only ever a fix kept on the talk:
+    /// the window names the talk and which fix, not the words. Synthesized
+    /// whole, since nothing is waiting to highlight it.
+    pub fn speak_fix(&self, session_id: &str, index: usize) -> EllaResult<SpokenLine> {
         let meta = self.database.session_curriculum(session_id)?;
         let fix = meta
             .assessment
@@ -575,7 +576,7 @@ impl AppService {
             .map(read_assessment)
             .transpose()?
             .and_then(|assessment| assessment.notes)
-            .and_then(|notes| notes.fix)
+            .and_then(|notes| notes.fix.into_iter().chain(notes.more_fixes).nth(index))
             .ok_or_else(|| EllaError::NotFound("There is nothing to hear for this talk.".into()))?;
         let synthesized = self.engine.speak(&fix.better, None)?;
         Ok(SpokenLine {
@@ -1746,24 +1747,32 @@ impl AppService {
         Ok(Some(notes::went_well(&answers, chore.as_ref())))
     }
 
-    /// The other half: one fix, if the model finds a mistake in the learner's
-    /// answers, and whether a model looked at all. A fix that could not be
-    /// read leaves the notes without one rather than failing the assessment,
-    /// so the talk still counts; nothing then claims there was nothing to fix.
+    /// The other half: the fixes, if the model finds mistakes in the
+    /// learner's answers, best first, and whether a model looked at all. A
+    /// correction that could not be read leaves the notes without any rather
+    /// than failing the assessment, so the talk still counts; nothing then
+    /// claims there was nothing to fix.
     ///
-    /// The correction is read only as far as it decides the fix: see
-    /// `notes::fix_settled`.
-    fn fix_for(&self, session: &Session, trace: &mut AssessmentTrace) -> (Option<Fix>, bool) {
+    /// Up to `notes::MAX_FIXES` when the cloud's model corrected the talk,
+    /// and one when the laptop's did. The laptop's 3B model misses mistakes
+    /// and now and then "fixes" what was right, and a wrong fix is worse than
+    /// none; its correction is also read only as far as it decides that one
+    /// fix (`notes::fix_settled`), since each line of it is seconds of the
+    /// recap's wait there.
+    fn fixes_for(&self, session: &Session, trace: &mut AssessmentTrace) -> (Vec<Fix>, bool) {
         let answers = answers_in(session);
         let checked = notes::answers_to_check(&answers);
         trace.checked(checked.len());
         let settled = |corrected: &[String]| notes::fix_settled(&checked, corrected);
         match self.engine.correct(&checked, &settled) {
-            Ok(Some(corrected)) => (notes::fix_from(&checked, &corrected), true),
-            Ok(None) => (None, false),
+            Ok(Some(corrected)) => {
+                let most = if corrected.cloud { notes::MAX_FIXES } else { 1 };
+                (notes::fixes_from(&checked, &corrected.lines, most), true)
+            }
+            Ok(None) => (Vec::new(), false),
             Err(error) => {
                 eprintln!("[recap] correcting {}: {error}", session.id);
-                (None, false)
+                (Vec::new(), false)
             }
         }
     }
@@ -1885,9 +1894,9 @@ impl AppService {
 
     /// `assess_session`, handing `scored` the assessment as soon as the talk
     /// is scored and what it counted is kept, while the model still looks for
-    /// its one fix: the recap shows the skills, and any step or level
-    /// finished, that much sooner. What went well is in already; the fix is
-    /// not, and is not claimed to be missing. Never for a placement, nor for
+    /// its fixes: the recap shows the skills, and any step or level finished,
+    /// that much sooner. What went well is in already; the fixes are not, and
+    /// are not claimed to be missing. Never for a placement, nor for
     /// an assessment kept before: those come back whole.
     ///
     /// Each assessment worked out is timed into the telemetry, as each turn
@@ -1985,6 +1994,7 @@ impl AppService {
                 closing: Some(closing),
                 advanced: None,
                 skills: Vec::new(),
+                aim: None,
                 scored: reading.is_some(),
                 notes: None,
             };
@@ -2000,7 +2010,7 @@ impl AppService {
 
     /// A talk's assessment, kept in two parts. The scores, what went well and
     /// everything they change are committed together, and handed to `scored`;
-    /// then the one fix is looked for and filled in. The model reads the talk
+    /// then the fixes are looked for and filled in. The model reads the talk
     /// for both under one hold, so nothing less urgent gets it in between.
     ///
     /// A talk that counted is one Ella's lessons are counted by, and any talk
@@ -2037,11 +2047,13 @@ impl AppService {
         let notes = self.went_well_in(session)?.map(|went_well| TalkNotes {
             went_well,
             fix: None,
+            more_fixes: Vec::new(),
             checked: false,
         });
         let has_notes = notes.is_some();
         // A successful talk: scored, and long enough for notes.
         let counted = scores.is_some() && has_notes;
+        let aim = target.as_deref().and_then(aim_of);
         let today = today();
         let keep_day = today.clone();
         let topic_id = session.topic_id.clone();
@@ -2113,6 +2125,7 @@ impl AppService {
                 closing: None,
                 advanced,
                 skills: grown,
+                aim,
                 scored: scores.is_some(),
                 notes,
             };
@@ -2120,20 +2133,25 @@ impl AppService {
             Ok(write)
         }, keep)?;
         trace.scored();
-        // A talk too short for notes has no fix to look for. One whose
+        // A talk too short for notes has no fixes to look for. One whose
         // assessment another ask kept while this one read it has that ask to
-        // fill its fix in.
+        // fill its fixes in.
         if !committed.get() || !has_notes {
             return Ok(kept);
         }
         let assessment = read_assessment(&kept)?;
         scored(&assessment);
 
-        let (fix, checked) = self.fix_for(session, trace);
+        let (fixes, checked) = self.fixes_for(session, trace);
         if !checked {
             return Ok(kept);
         }
-        let notes = assessment.notes.clone().map(|notes| TalkNotes { fix, checked, ..notes });
+        let mut fixes = fixes.into_iter();
+        let (fix, more_fixes) = (fixes.next(), fixes.collect());
+        let notes = assessment
+            .notes
+            .clone()
+            .map(|notes| TalkNotes { fix, more_fixes, checked, ..notes });
         let finished = to_json(&Assessment { notes, ..assessment })?;
         match self.database.finish_assessment(&session.id, &kept, &finished) {
             Ok(true) => Ok(finished),
@@ -2272,6 +2290,14 @@ fn standing_at(position: &Position, placed: bool, known: &ProgressMap) -> Standi
         percent: progress::level_percent(position, known),
         placed,
     }
+}
+
+/// What the recap says a talk aimed at (`Assessment::aim`).
+fn aim_of(target: &str) -> Option<SkillAim> {
+    curriculum::skill_at(target).map(|(_, _, skill)| SkillAim {
+        label: skill.label.clone(),
+        text: skill.text.clone(),
+    })
 }
 
 /// What a talk's instructions say about the skill it aims at.
@@ -3195,7 +3221,7 @@ mod tests {
 mod curriculum_flow_tests {
     use super::*;
     use crate::{
-        domain::{Confidence, EngineStatus},
+        domain::{Confidence, Corrections, EngineStatus},
         infrastructure::{
             database::Database,
             engines::{DemoEngine, SynthesizedAudio},
@@ -3239,6 +3265,8 @@ mod curriculum_flow_tests {
         fail_next_reply: Arc<std::sync::atomic::AtomicBool>,
         /// Whether a correction comes back unreadable.
         correct_fails: bool,
+        /// Whether it corrects as the cloud's model does: every line, whole.
+        corrects_in_cloud: bool,
         /// Its judgement of every answer in a lesson.
         lesson_used: Option<bool>,
         /// The answer from which it says goodbye in a lesson.
@@ -3256,6 +3284,7 @@ mod curriculum_flow_tests {
                 confidence: 0.95,
                 fail_next_reply: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 correct_fails: false,
+                corrects_in_cloud: false,
                 lesson_used: Some(true),
                 goodbye_from: u32::MAX,
                 teaches: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -3329,22 +3358,24 @@ mod curriculum_flow_tests {
             self.heard.lock().unwrap().scored.push(skills.iter().map(|skill| skill.key.clone()).collect());
             Ok(Some(skills.iter().map(|skill| (skill.key.clone(), self.confidence)).collect()))
         }
-        /// Knows one mistake, and corrects every "it have". Like the real one,
-        /// it stops writing once the lines so far are settled.
-        fn correct(&self, answers: &[&str], settled: &dyn Fn(&[String]) -> bool) -> EllaResult<Option<Vec<String>>> {
+        /// Knows three mistakes, and corrects every one of them it hears. Like
+        /// the real one, on the laptop it stops writing once the lines so far
+        /// are settled, and in the cloud it writes them all.
+        fn correct(&self, answers: &[&str], settled: &dyn Fn(&[String]) -> bool) -> EllaResult<Option<Corrections>> {
+            const KNOWN: [(&str, &str); 3] = [("it have", "it has"), ("We plays", "We play"), ("she go ", "she went ")];
             self.heard.lock().unwrap().corrected.push(answers.iter().map(|answer| (*answer).to_owned()).collect());
             if self.correct_fails {
                 return Err(EllaError::Engine("The model could not correct the answers: an answer that could not be read".into()));
             }
             let mut lines = Vec::new();
             for answer in answers {
-                lines.push(answer.replace("it have", "it has"));
-                if lines.len() < answers.len() && settled(&lines) {
+                lines.push(KNOWN.iter().fold((*answer).to_owned(), |line, (said, right)| line.replace(said, right)));
+                if !self.corrects_in_cloud && lines.len() < answers.len() && settled(&lines) {
                     break;
                 }
             }
             self.heard.lock().unwrap().written.push(lines.len());
-            Ok(Some(lines))
+            Ok(Some(Corrections { lines, cloud: self.corrects_in_cloud }))
         }
         fn uses_native_stt(&self) -> bool {
             false
@@ -3535,6 +3566,7 @@ mod curriculum_flow_tests {
                     said: "It have a big playground".into(),
                     better: "It has a big playground".into(),
                 }),
+                more_fixes: Vec::new(),
                 checked: true,
             })
         );
@@ -3543,7 +3575,8 @@ mod curriculum_flow_tests {
         // Kept with the rest of the assessment: asking again asks nothing.
         assert_eq!(service.assess_session(&id).unwrap(), assessment);
         assert_eq!(heard.lock().unwrap().corrected.len(), 1);
-        assert!(service.speak_fix(&id).is_ok());
+        assert!(service.speak_fix(&id, 0).is_ok());
+        assert!(matches!(service.speak_fix(&id, 1), Err(EllaError::NotFound(_))), "there is only the one");
     }
 
     #[test]
@@ -3582,6 +3615,7 @@ mod curriculum_flow_tests {
             Some(TalkNotes {
                 went_well: vec!["Gave reasons".into(), "Full sentences".into()],
                 fix: None,
+                more_fixes: Vec::new(),
                 checked: false,
             }),
             "what went well is in, and nothing is said about a fix yet"
@@ -3605,9 +3639,58 @@ mod curriculum_flow_tests {
             "Our teacher is very kind and she helps everyone",
         ];
         let (id, _) = talk_of(&service, &answers);
-        let fix = service.assess_session(&id).unwrap().notes.unwrap().fix.unwrap();
-        assert_eq!(fix.said, "It have a big playground");
+        let notes = service.assess_session(&id).unwrap().notes.unwrap();
+        assert_eq!(notes.fix.unwrap().said, "It have a big playground");
+        assert_eq!(notes.more_fixes, [], "the laptop's model gives one");
         assert_eq!(heard.lock().unwrap().written, [1], "the first answer's fix could not be beaten");
+    }
+
+    /// Answers with three mistakes the fake corrects, the first made twice.
+    const MISTAKES_TALK: [&str; 4] = [
+        "My school is very big and it have a big playground",
+        "We plays football there because it is fun",
+        "Yesterday she go to the market with her mother",
+        "Our library is small but it have many good books",
+    ];
+
+    #[test]
+    fn a_talk_the_cloud_corrected_has_up_to_three_fixes_each_a_new_mistake() {
+        let heard: Arc<Mutex<Heard>> = Arc::default();
+        let service = judged(Judge { corrects_in_cloud: true, ..Judge::new(&heard) });
+        let (id, _) = talk_of(&service, &MISTAKES_TALK);
+        let notes = service.assess_session(&id).unwrap().notes.unwrap();
+        let fix = |said: &str, better: &str| crate::domain::Fix { said: said.into(), better: better.into() };
+        assert_eq!(notes.fix, Some(fix("It have a big playground", "It has a big playground")));
+        assert_eq!(
+            notes.more_fixes,
+            [
+                fix("We plays football there", "We play football there"),
+                fix("Yesterday she go to the market", "Yesterday she went to the market"),
+            ],
+            "the library's \"it have\" is a mistake already shown"
+        );
+        assert_eq!(heard.lock().unwrap().written, [MISTAKES_TALK.len()], "the cloud's correction is read whole");
+        assert!(service.speak_fix(&id, 2).is_ok());
+        assert!(matches!(service.speak_fix(&id, 3), Err(EllaError::NotFound(_))));
+    }
+
+    #[test]
+    fn a_talk_says_what_it_aimed_at_so_the_recap_can_suggest_it_when_nothing_grew() {
+        let service = judged(Judge { confidence: 0.2, ..Judge::new(&Arc::default()) });
+        let (id, _) = talk_of(&service, &SCHOOL_TALK);
+        let assessment = service.assess_session(&id).unwrap();
+        assert!(assessment.scored);
+        assert_eq!(assessment.skills, [], "nothing shown surely enough to count");
+        let target = service.database.session_curriculum(&id).unwrap().target_skill.unwrap();
+        let (_, _, skill) = curriculum::skill_at(&target).unwrap();
+        assert_eq!(assessment.aim, Some(SkillAim { label: skill.label.clone(), text: skill.text.clone() }));
+
+        // A talk that counted skills still says what it aimed at.
+        let service = judged(Judge::new(&Arc::default()));
+        let (id, _) = talk_of(&service, &SCHOOL_TALK);
+        let assessment = service.assess_session(&id).unwrap();
+        assert!(!assessment.skills.is_empty());
+        assert!(assessment.aim.is_some());
     }
 
     #[test]
@@ -3620,7 +3703,7 @@ mod curriculum_flow_tests {
         let notes = assessment.notes.unwrap();
         assert_eq!(notes.went_well.len(), 2);
         assert_eq!((notes.fix, notes.checked), (None, false), "not the same as nothing to fix");
-        assert!(matches!(service.speak_fix(&id), Err(EllaError::NotFound(_))));
+        assert!(matches!(service.speak_fix(&id, 0), Err(EllaError::NotFound(_))));
     }
 
     #[test]
