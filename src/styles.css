@@ -3548,7 +3548,16 @@ button.step-row__face:hover .step-row__chevron svg { stroke: var(--ink); }
   line-height: 1.4;
   color: rgba(38, 38, 38, 0.65);
 }
+/* One short line of guidance, under a heading or above an action. */
+.level-page__hint {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: rgba(38, 38, 38, 0.66);
+}
 .level-page__actions { display: flex; flex-direction: column; align-items: stretch; gap: 10px; margin-top: 20px; }
+.level-page__actions .level-page__hint { margin: 0; text-align: center; }
 .level-page__practise { width: 100%; height: 52px; font-size: 15px; }
 
 /* The anytime badges' page. */

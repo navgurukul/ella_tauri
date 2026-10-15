@@ -1139,7 +1139,7 @@ describe("Ella levels", () => {
     const path = await screen.findByRole("list", { name: "Levels" });
     expect(path.querySelectorAll(".level-stop")).toHaveLength(6);
     expect(path.querySelector(".level-stop.is-current")).toHaveTextContent("You’re here · 0% to level 4");
-    expect(path.querySelector(".level-stop.is-current")).toHaveTextContent("Step 1 of 5 · 0 of 4 skills");
+    expect(path.querySelector(".level-stop.is-current")).toHaveTextContent("Step 1 of 5 · 0 of 4 skills passed");
     const page = screen.getByRole("region", { name: "Level 3: Finding My Voice" });
     expect(page).toHaveTextContent("Step 1 of 5 on the way to level 4.");
     // The step the learner is on is a card of its skills, none started yet.
@@ -1209,7 +1209,7 @@ describe("Ella levels", () => {
       fireEvent.click(await screen.findByRole("button", { name: /See all levels/ }));
       const path = await screen.findByRole("list", { name: "Levels" });
       // One of the four has passed, which is what moves the level's bar.
-      expect(path.querySelector(".level-stop.is-current")).toHaveTextContent("Step 3 of 5 · 1 of 4 skills");
+      expect(path.querySelector(".level-stop.is-current")).toHaveTextContent("Step 3 of 5 · 1 of 4 skills passed");
       const page = screen.getByRole("region", { name: "Level 3: Finding My Voice" });
       expect(page).toHaveTextContent("Step 3 of 5 on the way to level 4.");
 
