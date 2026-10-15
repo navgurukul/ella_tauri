@@ -250,14 +250,8 @@ function LevelStop({
           <small className="level-stop__status">{status(level, count)}</small>
           {level.state === "current" && (
             <>
-              <span
-                className="level-stop__bar"
-                role="progressbar"
-                aria-label={`Level ${level.number} progress`}
-                aria-valuenow={level.percent}
-                aria-valuemin={0}
-                aria-valuemax={100}
-              >
+              {/* Drawn only: the status says the percentage, and a progressbar in the button would add its bare value to the button's name. */}
+              <span className="level-stop__bar" aria-hidden="true">
                 <span style={{ width: `${level.percent}%` }} />
               </span>
               {here && (

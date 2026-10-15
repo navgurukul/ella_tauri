@@ -71,20 +71,16 @@ describe("Levels and badges", () => {
     // The progress the learner can read: their step, and the level's percentage.
     expect(screen.getByText("Step 1 of 5 · 0 of 4 skills passed")).toBeInTheDocument();
     expect(screen.getByText("You’re here · 0% to level 4")).toBeInTheDocument();
-    expect(screen.getByRole("progressbar", { name: "Level 3 progress" })).toHaveAttribute(
-      "aria-valuenow",
-      "0",
-    );
+    // The bar only draws that percentage, so a screen reader hears it once.
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   });
 
   it("shows a higher level percentage as a talk moves the learner on", async () => {
     const levels = vi.spyOn(bridge, "levels").mockResolvedValue(levelsAt({ level: "A2", step: 1 }));
     const view = show(standing(1, 0));
-    await screen.findByRole("list", { name: "Levels" });
-    expect(screen.getByRole("progressbar", { name: "Level 3 progress" })).toHaveAttribute(
-      "aria-valuenow",
-      "0",
-    );
+    const path = await screen.findByRole("list", { name: "Levels" });
+    const bar = () => path.querySelector(".level-stop.is-current .level-stop__bar > span");
+    expect(bar()).toHaveStyle({ width: "0%" });
 
     // A talk passed the step's last skill: the app reads where the learner
     // stands again, and the bar and its step text move with them.
@@ -93,12 +89,7 @@ describe("Levels and badges", () => {
       <LevelsScreen snapshot={snapshot(standing(2, 20))} avatarColor="#9347DD" busy={false} {...handlers} />,
     );
 
-    await waitFor(() =>
-      expect(screen.getByRole("progressbar", { name: "Level 3 progress" })).toHaveAttribute(
-        "aria-valuenow",
-        "20",
-      ),
-    );
+    await waitFor(() => expect(bar()).toHaveStyle({ width: "20%" }));
     expect(screen.getByText("You’re here · 20% to level 4")).toBeInTheDocument();
     expect(screen.getByText("Step 2 of 5 · 0 of 4 skills passed")).toBeInTheDocument();
   });
