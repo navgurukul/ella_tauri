@@ -184,6 +184,9 @@ function earnedLine(badges: LearnerBadge[]): string {
   return `${badges.filter((badge) => badge.earned).length} of ${badges.length} earned`;
 }
 
+/** The one hint above a list of badges: what opening one shows. */
+const BADGE_HINT = "Open a badge to see what earns it.";
+
 /**
  * The step the learner is on in `level`, when it is their own. The snapshot
  * says, unless it has moved on to another level before the ladder is read
@@ -247,12 +250,13 @@ function LevelStop({
           <small className="level-stop__status">{status(level, count)}</small>
           {level.state === "current" && (
             <>
-              <span className="level-stop__bar">
+              {/* Drawn only: the status says the percentage, and a progressbar in the button would add its bare value to the button's name. */}
+              <span className="level-stop__bar" aria-hidden="true">
                 <span style={{ width: `${level.percent}%` }} />
               </span>
               {here && (
                 <small className="level-stop__progress">
-                  Step {here.number} of {level.steps.length} · {passedIn(here)} of {here.skills.length} skills
+                  Step {here.number} of {level.steps.length} · {passedIn(here)} of {here.skills.length} skills passed
                 </small>
               )}
             </>
@@ -355,7 +359,7 @@ function LevelPage({
             <h3>Skills</h3>
             <span>{skillLine}</span>
           </div>
-          {current && step !== null ? <OwnLevel level={level} step={step} /> : <OtherLevel level={level} />}
+          {current && step !== null ? <OwnLevel level={level} count={count} step={step} /> : <OtherLevel level={level} />}
         </div>
 
         <div className="level-page__col">
@@ -363,6 +367,7 @@ function LevelPage({
             <h3>Badges at {levelLabel(level.number)}</h3>
             {badges.length > 0 && <span>{earnedLine(badges)}</span>}
           </div>
+          {badges.length > 0 && <p className="level-page__hint">{BADGE_HINT}</p>}
           {badges.length > 0 ? (
             <ul className="badge-list">
               {badges.map((badge) => (
@@ -374,6 +379,7 @@ function LevelPage({
           )}
           {current && (
             <div className="level-page__actions">
+              <p className="level-page__hint">Each talk with Ella practises the skills of your current step.</p>
               <button className="btn btn--violet level-page__practise" onClick={onPractise} disabled={busy}>
                 <MicGlyph size={16} />
                 Practise with Ella
@@ -393,7 +399,7 @@ function LevelPage({
 
 /** The learner's own level: the steps behind them, the one they are on, the
  * steps ahead, then what the circles mean. */
-function OwnLevel({ level, step }: { level: LevelView; step: number }) {
+function OwnLevel({ level, count, step }: { level: LevelView; count: number; step: number }) {
   const behind = level.steps.filter((candidate) => candidate.number < step);
   const here = level.steps.find((candidate) => candidate.number === step);
   const ahead = level.steps.filter((candidate) => candidate.number > step);
@@ -414,7 +420,7 @@ function OwnLevel({ level, step }: { level: LevelView; step: number }) {
           ))}
         </ul>
       )}
-      <Legend />
+      <Legend level={level.number} count={count} steps={level.steps.length} />
     </div>
   );
 }
@@ -583,8 +589,10 @@ function Circles({ standing }: { standing: SkillStanding }) {
   );
 }
 
-/** What the circles mean, under the steps: one filled, one to fill. */
-function Legend() {
+/** What the circles mean, under the steps: one filled, one to fill, and what
+ * finishing every step of the level takes. */
+function Legend({ level, count, steps }: { level: number; count: number; steps: number }) {
+  const closing = level < count ? "open the next level" : "complete the last level";
   return (
     <p className="skill-legend">
       <span className="skill-circles skill-circles--legend" aria-hidden="true">
@@ -593,7 +601,8 @@ function Legend() {
         </i>
         <i className="is-next" />
       </span>
-      The first circle fills when you use a skill in a talk. Keep using it on different topics to fill the second.
+      The first circle fills when you use a skill in a talk. Keep using it on different topics to fill the second. Finish
+      all {steps} steps to {closing}; a step is done once all of its skills pass.
     </p>
   );
 }
@@ -616,7 +625,7 @@ function AnytimePage({
         </span>
         <div className="level-page__title">
           <h2 className="display">Anytime badges</h2>
-          <p>Streaks and talk counts. These work at every level.</p>
+          <p>Earned by talking on consecutive days, or by finishing a set number of talks. These work at every level.</p>
         </div>
       </header>
       <div className="anytime-page__body">
@@ -624,6 +633,7 @@ function AnytimePage({
           <h3>Badges</h3>
           <span>{earnedLine(badges)}</span>
         </div>
+        <p className="level-page__hint">{BADGE_HINT}</p>
         <ul className="badge-list badge-list--two">
           {badges.map((badge) => (
             <BadgeRow key={badge.id} badge={badge} today={today} onOpen={onOpen} />
