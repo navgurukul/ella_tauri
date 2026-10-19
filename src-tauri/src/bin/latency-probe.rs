@@ -14,6 +14,10 @@
 //!   * `sapi` — that fallback (`WindowsStt`) on a WAV, Windows only.
 //!   * `canary_load` — loading Canary as the app does at launch, with and
 //!     without the SHA-256 of the whole model it does by default.
+//!   * `launch` — building the local engine as the setup screen does on every
+//!     launch: Canary, Piper, and llama-server started and waited for. The
+//!     cloud is switched off so its first look is not in the number. Not in
+//!     the default set; ask for it with `--only launch`.
 //!
 //! ```bash
 //! ELLA_ENGINE_ROOT="$PWD/engines" cargo run --release --bin latency-probe -- \
@@ -31,7 +35,7 @@ use ella_tauri_lib::{
     domain::{Message, Session, Speaker},
     infrastructure::{
         database::{Database, LessonMark},
-        engines::probe,
+        engines::{engine_from_environment, probe, EnginePaths},
         stt::{CanaryStt, SpeechToTextEngine, CANARY_FILE_NAME},
         windows_stt::WindowsStt,
     },
@@ -107,6 +111,9 @@ fn run() -> Result<(), String> {
         if model.is_file() {
             results.insert("canary_load".into(), canary_load(&model, config.rounds.min(3)));
         }
+    }
+    if config.only.as_ref().is_some_and(|only| only.iter().any(|o| o == "launch")) {
+        results.insert("launch".into(), launch(&config.engine_root, config.rounds.min(3)));
     }
     let _ = fs::remove_dir_all(&work);
 
@@ -329,6 +336,25 @@ fn canary_load(model: &Path, rounds: usize) -> Value {
         }
     }
     Value::Object(out)
+}
+
+fn launch(engine_root: &Path, rounds: usize) -> Value {
+    env::set_var("ELLA_ENGINE_MODE", "local");
+    env::set_var("ELLA_CLOUD", "off");
+    env::remove_var("ELLA_LLM_BASE_URL");
+    let paths = || EnginePaths {
+        engine_root: Some(engine_root.to_path_buf()),
+        models_root: Some(engine_root.join("models")),
+    };
+    let mut times = vec![];
+    for _ in 0..rounds.max(1) {
+        let started = Instant::now();
+        let engine = engine_from_environment(paths());
+        times.push(ms(started));
+        // Stops llama-server before the next launch is timed.
+        drop(engine);
+    }
+    json!({ "engine_ready_ms": stats(&times) })
 }
 
 fn read_wav(path: &Path) -> Result<(Vec<i16>, u32), String> {
