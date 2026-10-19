@@ -1,0 +1,132 @@
+{
+  "_comment": "Windows results of the Latency probe workflow (.github/workflows/latency-probe.yml), copied from the run's notices. GitHub windows-latest: 2 cores / 4 threads, CPU only, Defender real-time scanning switched on. Run-to-run variance is large (different EPYC hosts); compare within a run.",
+  "run": "https://github.com/navgurukul/ella_tauri/actions/runs/39226475986",
+  "commit": "2131aa6",
+  "machine": "cpu=AMD EPYC 9V74 80-Core Processor                 cores=2 threads=4 os=Microsoft Windows Server 2025 Datacenter defender_realtime=True temp=C:\\Users\\RUNNER~1\\AppData\\Local\\Temp",
+  "launch_ab_engine_ready_ms_p50_per_round": "before=2861.99 after=2524.8 before=2600.13 after=2522.88 before=2868.9 after=2534.25",
+  "windows": {
+    "arch": "x86_64",
+    "canary_load": {
+      "first_unverified_ms": 6247.8166,
+      "unverified_ms": "p50=184.17 p95=185.17 n=3",
+      "verified_ms": "p50=327.88 p95=338.32 n=3"
+    },
+    "os": "windows",
+    "piper": {
+      "last_sentence_audio_ms": 2603.265306122449,
+      "path": "binary",
+      "reply_4_sentences_ms": "p50=833.87 p95=1343.19 n=10",
+      "sentence_answer_ms": "p50=212.0 p95=292.48 n=40",
+      "sentence_handoff_ms": "p50=0.45 p95=0.56 n=40",
+      "sentence_total_ms": "p50=212.45 p95=295.18 n=40",
+      "warm_ms": 416.105
+    },
+    "rounds": 10,
+    "sapi": {
+      "audio_ms": 11000.0,
+      "text": "And death of ayatollah Mac and at nine and one of the brain and over your loan at point you can do we all of",
+      "transcribe_ms": "p50=1657.1 p95=3347.65 n=3"
+    },
+    "spawn": {
+      "piper_version": "p50=6.29 p95=107.47 n=10",
+      "powershell_add_type_speech": "p50=189.55 p95=284.34 n=10",
+      "powershell_exit": "p50=132.79 p95=179.51 n=10"
+    },
+    "sqlite": {
+      "persist_turn_ms": "p50=0.2 p95=0.28 n=100"
+    },
+    "temp_dir": "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\",
+    "tempfs": {
+      "data_dir": {
+        "read_ms": "p50=0.04 p95=0.07 n=200",
+        "remove_ms": "p50=0.06 p95=0.07 n=200",
+        "round_trip_ms": "p50=0.22 p95=0.26 n=200",
+        "write_ms": "p50=0.11 p95=0.15 n=200"
+      },
+      "temp_dir": {
+        "read_ms": "p50=0.05 p95=0.07 n=200",
+        "remove_ms": "p50=0.11 p95=0.14 n=200",
+        "round_trip_ms": "p50=0.41 p95=0.52 n=200",
+        "write_ms": "p50=0.25 p95=0.33 n=200"
+      }
+    }
+  },
+  "canary-threads-4": {
+    "audio_duration_ms": 4214.0,
+    "canary": {
+      "backend": "CPU",
+      "engine": "canary-180m-flash-q8_0",
+      "latencies_ms": [
+        302.2692,
+        303.08619999999996,
+        303.5219,
+        326.033,
+        331.50390000000004,
+        346.4264,
+        350.1765
+      ],
+      "median_ms": 326.033,
+      "transcript": "And so, my fellow Americans, ask not."
+    },
+    "canary_delta_vs_fixed_baseline_ms": -3060.967,
+    "canary_speedup_vs_fixed_baseline": 10.388518953602855,
+    "fixture": "..\\bench\\fixtures\\jfk.wav",
+    "iterations": 7,
+    "schema_version": 1,
+    "warmup": 1,
+    "whisper_fixed_baseline_ms": 3387.0,
+    "whisper_live": null
+  },
+  "canary-threads-2": {
+    "audio_duration_ms": 4214.0,
+    "canary": {
+      "backend": "CPU",
+      "engine": "canary-180m-flash-q8_0",
+      "latencies_ms": [
+        328.9198,
+        335.3816,
+        348.01910000000004,
+        353.497,
+        370.8816,
+        409.5108,
+        435.8875
+      ],
+      "median_ms": 353.497,
+      "transcript": "And so, my fellow Americans, ask not."
+    },
+    "canary_delta_vs_fixed_baseline_ms": -3033.503,
+    "canary_speedup_vs_fixed_baseline": 9.581410874774043,
+    "fixture": "..\\bench\\fixtures\\jfk.wav",
+    "iterations": 7,
+    "schema_version": 1,
+    "warmup": 1,
+    "whisper_fixed_baseline_ms": 3387.0,
+    "whisper_live": null
+  },
+  "canary-threads-0": {
+    "audio_duration_ms": 4214.0,
+    "canary": {
+      "backend": "CPU",
+      "engine": "canary-180m-flash-q8_0",
+      "latencies_ms": [
+        334.48299999999995,
+        349.2675,
+        350.57480000000004,
+        351.1571,
+        447.7916,
+        467.7809,
+        528.0002999999999
+      ],
+      "median_ms": 351.1571,
+      "transcript": "And so, my fellow Americans, ask not."
+    },
+    "canary_delta_vs_fixed_baseline_ms": -3035.8429,
+    "canary_speedup_vs_fixed_baseline": 9.645255641990437,
+    "fixture": "..\\bench\\fixtures\\jfk.wav",
+    "iterations": 7,
+    "schema_version": 1,
+    "warmup": 1,
+    "whisper_fixed_baseline_ms": 3387.0,
+    "whisper_live": null
+  }
+}
