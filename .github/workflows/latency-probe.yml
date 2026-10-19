@@ -71,6 +71,15 @@ jobs:
           cargo build --release --bin latency-probe --bin stt-benchmark
           Copy-Item transcribe-libs\*.dll target\release\
 
+      # The hosted image turns real-time scanning off; a learner's laptop has
+      # it on, and it is what makes small files in %TEMP% slow. Probe with it on.
+      - name: Turn Defender's real-time scanning on
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $false
+          Start-Sleep -Seconds 5
+
       - name: Machine
         shell: pwsh
         run: |
@@ -89,8 +98,16 @@ jobs:
 
       - name: Canary
         working-directory: src-tauri
+        shell: pwsh
         run: |
-          target\release\stt-benchmark.exe --audio ..\bench\fixtures\jfk.wav --duration-ms 4214 --warmup 1 --iterations 5 --canary-model resources\engines\models\stt\canary-180m-flash-Q8_0.gguf --output probe-results\canary.json
+          $out = & target\release\stt-benchmark.exe --audio ..\bench\fixtures\jfk.wav --duration-ms 4214 --warmup 1 --iterations 5 --canary-model resources\engines\models\stt\canary-180m-flash-Q8_0.gguf --output probe-results\canary.json 2>&1
+          $code = $LASTEXITCODE
+          $out | Write-Host
+          if ($code -ne 0) {
+            $tail = (($out | Select-Object -Last 8) -join ' | ') -replace '[\r\n]', ' '
+            Write-Host "::error title=canary::exit $code: $tail"
+            exit $code
+          }
 
       - name: Post results
         if: always()
