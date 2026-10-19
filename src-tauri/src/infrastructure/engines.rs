@@ -6582,6 +6582,48 @@ fn opening_for(topic_id: &str, learner_name: &str) -> String {
     )
 }
 
+/// What `bin/latency-probe.rs` drives: the resident Piper exactly as a reply
+/// uses it, without an LLM or a window around it.
+#[doc(hidden)]
+pub mod probe {
+    use super::*;
+
+    pub struct PiperTiming {
+        /// Until Piper said the audio was ready: synthesis, and on the
+        /// binary path Piper writing the WAV.
+        pub answer_ms: f64,
+        /// Until Ella held the PCM: on the binary path, reading the WAV back
+        /// and removing it as well.
+        pub total_ms: f64,
+        pub pcm_bytes: usize,
+        pub sample_rate: u32,
+    }
+
+    /// The Piper this engine root would run resident, as the app picks it;
+    /// `force_binary` takes the standalone binary even where a venv exists.
+    pub fn resident_piper(engine_root: &Path, voice: &Path, force_binary: bool) -> Option<Arc<PiperDaemon>> {
+        let binary = default_piper_binary(engine_root);
+        if force_binary {
+            return binary.is_file().then(|| PiperDaemon::binary(binary, voice.to_path_buf()));
+        }
+        super::resident_piper(&binary, voice)
+    }
+
+    pub fn is_binary(daemon: &PiperDaemon) -> bool {
+        matches!(daemon.resident, Resident::Binary { .. })
+    }
+
+    pub fn speak(daemon: &PiperDaemon, text: &str) -> EllaResult<PiperTiming> {
+        let speech = daemon.synthesize(text)?;
+        Ok(PiperTiming {
+            answer_ms: speech.first_audio_ms,
+            total_ms: speech.completion_ms,
+            pcm_bytes: speech.pcm.len(),
+            sample_rate: speech.sample_rate,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

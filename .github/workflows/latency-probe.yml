@@ -1,0 +1,117 @@
+# Measures, on a Windows machine, the per-turn work whose cost depends on the
+# operating system (src-tauri/src/bin/latency-probe.rs) and Canary's
+# stop-to-final time (stt-benchmark), for the commit pushed.
+#
+# A development Mac cannot build the MSVC target, so this is how a change to a
+# Windows path gets a before and an after: push the branch with the change and
+# compare with the run of the commit before it. The runner is a CPU-only VM
+# with Defender's real-time scanning on, not a classroom laptop, so its numbers
+# are for comparing commits with each other, not for promising a learner a time.
+#
+# Each result is posted as a notice on the run (readable without signing in)
+# and uploaded as an artifact.
+name: Latency probe
+
+on:
+  push:
+    branches: ["perf/**"]
+    paths:
+      - "src-tauri/**"
+      - ".github/workflows/latency-probe.yml"
+
+env:
+  ELLA_LLAMA_TAG: b11405
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install the Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1.6.0
+        with:
+          install_runtime: false
+          cache: true
+
+      # Tauri's context macro reads the built frontend.
+      - run: npm ci
+      - run: npm run build
+
+      # The public en_US voice: the probe needs a voice, not Ella's.
+      - name: Stage the Windows engines
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/fetch-windows-engines.ps1
+
+      - name: Fetch Canary
+        shell: bash
+        run: |
+          mkdir -p src-tauri/resources/engines/models/stt
+          curl -sSfL --retry 5 -o src-tauri/resources/engines/models/stt/canary-180m-flash-Q8_0.gguf \
+            https://huggingface.co/handy-computer/canary-180m-flash-gguf/resolve/456e6049062ecf06f1a0f4607f2ee3dc80ebbf8a/canary-180m-flash-Q8_0.gguf
+
+      - name: Build
+        working-directory: src-tauri
+        run: |
+          cargo build --release --bin latency-probe --bin stt-benchmark
+          Copy-Item transcribe-libs\*.dll target\release\
+
+      - name: Machine
+        shell: pwsh
+        run: |
+          $cpu = (Get-CimInstance Win32_Processor | Select-Object -First 1)
+          $mp = Get-MpComputerStatus
+          $line = "cpu=$($cpu.Name) cores=$($cpu.NumberOfCores) threads=$($cpu.NumberOfLogicalProcessors) os=$((Get-CimInstance Win32_OperatingSystem).Caption) defender_realtime=$($mp.RealTimeProtectionEnabled) temp=$env:TEMP"
+          Write-Host $line
+          Write-Host "::notice title=machine::$line"
+
+      - name: Latency probe
+        working-directory: src-tauri
+        env:
+          ELLA_ENGINE_ROOT: ${{ github.workspace }}\src-tauri\resources\engines
+        run: |
+          target\release\latency-probe.exe --rounds 10 --audio ..\bench\fixtures\jfk.wav --output probe-results\windows.json
+
+      - name: Canary
+        working-directory: src-tauri
+        run: |
+          target\release\stt-benchmark.exe --audio ..\bench\fixtures\jfk.wav --duration-ms 4214 --warmup 1 --iterations 5 --canary-model resources\engines\models\stt\canary-180m-flash-Q8_0.gguf --output probe-results\canary.json
+
+      - name: Post results
+        if: always()
+        shell: python
+        run: |
+          import json, pathlib
+          def brief(value):
+              if isinstance(value, dict) and "p50" in value:
+                  return f"p50={value['p50']} p95={value['p95']} n={value['n']}"
+              if isinstance(value, dict):
+                  return {key: brief(inner) for key, inner in value.items()}
+              return value
+          for path in sorted(pathlib.Path("src-tauri/probe-results").glob("*.json")):
+              data = json.loads(path.read_text())
+              for key, value in data.items():
+                  if isinstance(value, (dict, list)):
+                      text = json.dumps(brief(value), separators=(",", ":"))
+                      print(f"::notice title={path.stem}.{key}::{text}")
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: latency-probe-${{ github.sha }}
+          path: src-tauri/probe-results/
