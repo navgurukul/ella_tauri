@@ -158,17 +158,30 @@ jobs:
           }
           exit $failed
 
-      # The suite on Windows, where the changes being measured run.
+      # The suite on Windows, where the changes being measured run, and the
+      # same suite at main's sources, to tell a new failure from an old one.
       - name: Tests
         working-directory: src-tauri
         shell: pwsh
         run: |
-          $out = cargo test --release 2>&1 | Out-String
-          $code = $LASTEXITCODE
-          Write-Host $out
-          $results = ($out -split "`n" | Where-Object { $_ -match '^test result|FAILED|panicked' }) -join ' | '
-          Write-Host "::notice title=tests::exit $code $results"
-          exit $code
+          $PSNativeCommandUseErrorActionPreference = $false
+          $ErrorActionPreference = 'Continue'
+          $codes = @{}
+          foreach ($which in 'head', 'main') {
+            if ($which -eq 'main') {
+              git fetch -q --depth 1 origin main
+              git checkout FETCH_HEAD -- src
+            }
+            $out = cargo test --release 2>&1 | Out-String
+            $codes[$which] = $LASTEXITCODE
+            Write-Host $out
+            $lines = $out -split "`n"
+            $failed = ($lines | Where-Object { $_ -cmatch '^test .* FAILED' } | ForEach-Object { ($_ -split ' ')[1] }) -join ', '
+            $summary = ($lines | Where-Object { $_ -cmatch '^test result: FAILED|^test result: ok\. [1-9]' }) -join ' | '
+            Write-Host "::notice title=tests $which::exit $($codes[$which]) $summary FAILED: $failed"
+          }
+          git checkout HEAD -- src
+          exit $codes['head']
 
       - name: Post results
         if: always()
