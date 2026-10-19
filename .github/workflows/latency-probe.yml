@@ -158,6 +158,18 @@ jobs:
           }
           exit $failed
 
+      # The suite on Windows, where the changes being measured run.
+      - name: Tests
+        working-directory: src-tauri
+        shell: pwsh
+        run: |
+          $out = cargo test --release 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          $results = ($out -split "`n" | Where-Object { $_ -match '^test result|FAILED|panicked' }) -join ' | '
+          Write-Host "::notice title=tests::exit $code $results"
+          exit $code
+
       - name: Post results
         if: always()
         shell: python
