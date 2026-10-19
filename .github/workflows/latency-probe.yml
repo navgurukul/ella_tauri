@@ -21,12 +21,14 @@ on:
 
 env:
   ELLA_LLAMA_TAG: b11405
-  # The commit an A/B step compares HEAD with: the one before the change
-  # being measured.
-  PROBE_BEFORE: HEAD~1
+  # What the launch A/B compares HEAD with: the commit before "Load Canary
+  # while llama-server starts", which already has the launch probe.
+  PROBE_BEFORE: 6a70923
 
 jobs:
   windows:
+    # A commit marked [launch-ab] runs only the launch A/B below.
+    if: ${{ !contains(github.event.head_commit.message, '[launch-ab]') }}
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -70,23 +72,9 @@ jobs:
           curl -sSfL --retry 5 -o src-tauri/resources/engines/models/stt/canary-180m-flash-Q8_0.gguf \
             https://huggingface.co/handy-computer/canary-180m-flash-gguf/resolve/456e6049062ecf06f1a0f4607f2ee3dc80ebbf8a/canary-180m-flash-Q8_0.gguf
 
-      # The language model the launch A/B starts llama-server with.
-      - name: Fetch the language model
-        shell: bash
-        run: |
-          mkdir -p src-tauri/resources/engines/models/llm
-          curl -sSfL --retry 5 -o src-tauri/resources/engines/models/llm/model.gguf \
-            https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf
-
-      # The probe as of PROBE_BEFORE, built from the same checkout so only the
-      # sources differ, then HEAD's.
       - name: Build
         working-directory: src-tauri
         run: |
-          git checkout $env:PROBE_BEFORE -- src
-          cargo build --release --bin latency-probe
-          Copy-Item target\release\latency-probe.exe target\release\latency-probe-before.exe
-          git checkout HEAD -- src
           cargo build --release --bin latency-probe --bin stt-benchmark
           Copy-Item transcribe-libs\*.dll target\release\
 
@@ -115,26 +103,6 @@ jobs:
         run: |
           target\release\latency-probe.exe --rounds 10 --audio ..\bench\fixtures\jfk.wav --output probe-results\windows.json
 
-      # Engine start-up as the setup screen waits for it on every launch,
-      # before and after, alternating so both see the same machine state.
-      - name: Launch A/B
-        working-directory: src-tauri
-        shell: pwsh
-        env:
-          ELLA_ENGINE_ROOT: ${{ github.workspace }}\src-tauri\resources\engines
-        run: |
-          $summary = @()
-          foreach ($round in 1, 2, 3) {
-            foreach ($which in 'before', 'after') {
-              $exe = if ($which -eq 'before') { 'latency-probe-before.exe' } else { 'latency-probe.exe' }
-              & "target\release\$exe" --only launch --rounds 3 --output "probe-results\launch-$which-$round.json" | Out-Null
-              $p50 = (Get-Content "probe-results\launch-$which-$round.json" | ConvertFrom-Json).launch.engine_ready_ms.p50
-              Write-Host "launch $which round $round p50=$p50 ms"
-              $summary += "$which=$p50"
-            }
-          }
-          Write-Host "::notice title=launch A/B (engine_ready_ms p50 per round of 3)::$($summary -join ' ')"
-
       # Canary at the library's default thread count (every logical CPU, at
       # most 8: what the app uses) and at fixed counts, to see whether
       # hyperthreads help it on a CPU-only Windows machine.
@@ -158,30 +126,22 @@ jobs:
           }
           exit $failed
 
-      # The suite on Windows, where the changes being measured run, and the
-      # same suite at main's sources, to tell a new failure from an old one.
+      # The suite on Windows, where the changes being measured run. -cmatch:
+      # PowerShell's -match ignores case, and test names say "failed" too.
       - name: Tests
         working-directory: src-tauri
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $false
           $ErrorActionPreference = 'Continue'
-          $codes = @{}
-          foreach ($which in 'head', 'main') {
-            if ($which -eq 'main') {
-              git fetch -q --depth 1 origin main
-              git checkout FETCH_HEAD -- src
-            }
-            $out = cargo test --release 2>&1 | Out-String
-            $codes[$which] = $LASTEXITCODE
-            Write-Host $out
-            $lines = $out -split "`n"
-            $failed = ($lines | Where-Object { $_ -cmatch '^test .* FAILED' } | ForEach-Object { ($_ -split ' ')[1] }) -join ', '
-            $summary = ($lines | Where-Object { $_ -cmatch '^test result: FAILED|^test result: ok\. [1-9]' }) -join ' | '
-            Write-Host "::notice title=tests $which::exit $($codes[$which]) $summary FAILED: $failed"
-          }
-          git checkout HEAD -- src
-          exit $codes['head']
+          $out = cargo test --release 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          $lines = $out -split "`n"
+          $failed = ($lines | Where-Object { $_ -cmatch '^test .* FAILED' } | ForEach-Object { ($_ -split ' ')[1] }) -join ', '
+          $summary = ($lines | Where-Object { $_ -cmatch '^test result: FAILED|^test result: ok\. [1-9]' }) -join ' | '
+          Write-Host "::notice title=tests::exit $code $summary FAILED: $failed"
+          exit $code
 
       - name: Post results
         if: always()
@@ -206,3 +166,111 @@ jobs:
         with:
           name: latency-probe-${{ github.sha }}
           path: src-tauri/probe-results/
+
+  # Engine start-up (what the setup screen waits for on every launch) at
+  # PROBE_BEFORE and at HEAD, on one machine. Each sample is its own process
+  # (`--rounds 1`), the two are interleaved in ABBA order so drift over the job
+  # falls on both equally, and an A/A arm (HEAD against a copy of itself) run
+  # the same way measures the noise floor. Every raw sample is posted.
+  launch-ab:
+    if: ${{ contains(github.event.head_commit.message, '[launch-ab]') }}
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 30
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install the Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1.6.0
+        with:
+          install_runtime: false
+          cache: true
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Stage the Windows engines
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/fetch-windows-engines.ps1
+
+      - name: Fetch Canary and the language model
+        shell: bash
+        run: |
+          mkdir -p src-tauri/resources/engines/models/stt src-tauri/resources/engines/models/llm
+          curl -sSfL --retry 5 -o src-tauri/resources/engines/models/stt/canary-180m-flash-Q8_0.gguf \
+            https://huggingface.co/handy-computer/canary-180m-flash-gguf/resolve/456e6049062ecf06f1a0f4607f2ee3dc80ebbf8a/canary-180m-flash-Q8_0.gguf
+          curl -sSfL --retry 5 -o src-tauri/resources/engines/models/llm/model.gguf \
+            https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf
+
+      # Both from the same checkout, so only src/ differs.
+      - name: Build before and after
+        working-directory: src-tauri
+        run: |
+          git checkout $env:PROBE_BEFORE -- src
+          cargo build --release --bin latency-probe
+          Copy-Item target\release\latency-probe.exe target\release\probe-before.exe
+          git checkout HEAD -- src
+          cargo build --release --bin latency-probe
+          Copy-Item target\release\latency-probe.exe target\release\probe-after.exe
+          Copy-Item target\release\latency-probe.exe target\release\probe-after2.exe
+          Copy-Item transcribe-libs\*.dll target\release\
+
+      - name: Turn Defender's real-time scanning on
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $false
+          Start-Sleep -Seconds 5
+
+      - name: Machine
+        shell: pwsh
+        run: |
+          $cpu = (Get-CimInstance Win32_Processor | Select-Object -First 1)
+          $mp = Get-MpComputerStatus
+          Write-Host "::notice title=machine::cpu=$($cpu.Name) cores=$($cpu.NumberOfCores) threads=$($cpu.NumberOfLogicalProcessors) defender_realtime=$($mp.RealTimeProtectionEnabled)"
+
+      # One unrecorded launch of each binary first: the first start after a
+      # build pays for Defender scanning the new files, which is not the change.
+      - name: Launch A/B and A/A
+        working-directory: src-tauri
+        shell: pwsh
+        env:
+          ELLA_ENGINE_ROOT: ${{ github.workspace }}\src-tauri\resources\engines
+        run: |
+          function Launch($exe) {
+            & "target\release\$exe" --only launch --rounds 1 --output probe-results\launch.json | Out-Null
+            [math]::Round((Get-Content probe-results\launch.json | ConvertFrom-Json).launch.engine_ready_ms.p50, 1)
+          }
+          foreach ($exe in 'probe-before.exe', 'probe-after.exe', 'probe-after2.exe') { Launch $exe | Out-Null }
+          $samples = @{ 'ab_before' = @(); 'ab_after' = @(); 'aa_a' = @(); 'aa_b' = @() }
+          foreach ($block in 1..10) {
+            # ABBA within each block, alternating which arm leads.
+            $order = if ($block % 2) { 'before','after','after','before' } else { 'after','before','before','after' }
+            foreach ($which in $order) {
+              $exe = if ($which -eq 'before') { 'probe-before.exe' } else { 'probe-after.exe' }
+              $samples["ab_$which"] += Launch $exe
+            }
+            $order = if ($block % 2) { 'a','b','b','a' } else { 'b','a','a','b' }
+            foreach ($which in $order) {
+              $exe = if ($which -eq 'a') { 'probe-after.exe' } else { 'probe-after2.exe' }
+              $samples["aa_$which"] += Launch $exe
+            }
+          }
+          foreach ($arm in 'ab_before', 'ab_after', 'aa_a', 'aa_b') {
+            Write-Host "::notice title=$arm (engine_ready_ms, n=$($samples[$arm].Count))::$($samples[$arm] -join ' ')"
+          }
