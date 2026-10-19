@@ -465,7 +465,9 @@ pub fn validate_canary_model(path: &Path, verify_sha256: bool) -> Result<(), Str
     if verify_sha256 {
         let mut digest = Sha256::new();
         digest.update(magic);
-        let mut buffer = [0_u8; 1024 * 1024];
+        // On the heap: a 1 MiB array is the whole of a Windows main thread's
+        // stack, and overflows it before the first read.
+        let mut buffer = vec![0_u8; 1024 * 1024];
         loop {
             let count = file
                 .read(&mut buffer)
