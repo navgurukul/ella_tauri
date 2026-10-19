@@ -21,6 +21,9 @@ on:
 
 env:
   ELLA_LLAMA_TAG: b11405
+  # The commit an A/B step compares HEAD with: the one before the change
+  # being measured.
+  PROBE_BEFORE: HEAD~1
 
 jobs:
   windows:
@@ -28,6 +31,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 20
 
       - uses: actions/setup-node@v4
         with:
@@ -65,9 +70,23 @@ jobs:
           curl -sSfL --retry 5 -o src-tauri/resources/engines/models/stt/canary-180m-flash-Q8_0.gguf \
             https://huggingface.co/handy-computer/canary-180m-flash-gguf/resolve/456e6049062ecf06f1a0f4607f2ee3dc80ebbf8a/canary-180m-flash-Q8_0.gguf
 
+      # The language model the launch A/B starts llama-server with.
+      - name: Fetch the language model
+        shell: bash
+        run: |
+          mkdir -p src-tauri/resources/engines/models/llm
+          curl -sSfL --retry 5 -o src-tauri/resources/engines/models/llm/model.gguf \
+            https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf
+
+      # The probe as of PROBE_BEFORE, built from the same checkout so only the
+      # sources differ, then HEAD's.
       - name: Build
         working-directory: src-tauri
         run: |
+          git checkout $env:PROBE_BEFORE -- src
+          cargo build --release --bin latency-probe
+          Copy-Item target\release\latency-probe.exe target\release\latency-probe-before.exe
+          git checkout HEAD -- src
           cargo build --release --bin latency-probe --bin stt-benchmark
           Copy-Item transcribe-libs\*.dll target\release\
 
@@ -95,6 +114,26 @@ jobs:
           ELLA_ENGINE_ROOT: ${{ github.workspace }}\src-tauri\resources\engines
         run: |
           target\release\latency-probe.exe --rounds 10 --audio ..\bench\fixtures\jfk.wav --output probe-results\windows.json
+
+      # Engine start-up as the setup screen waits for it on every launch,
+      # before and after, alternating so both see the same machine state.
+      - name: Launch A/B
+        working-directory: src-tauri
+        shell: pwsh
+        env:
+          ELLA_ENGINE_ROOT: ${{ github.workspace }}\src-tauri\resources\engines
+        run: |
+          $summary = @()
+          foreach ($round in 1, 2, 3) {
+            foreach ($which in 'before', 'after') {
+              $exe = if ($which -eq 'before') { 'latency-probe-before.exe' } else { 'latency-probe.exe' }
+              & "target\release\$exe" --only launch --rounds 3 --output "probe-results\launch-$which-$round.json" | Out-Null
+              $p50 = (Get-Content "probe-results\launch-$which-$round.json" | ConvertFrom-Json).launch.engine_ready_ms.p50
+              Write-Host "launch $which round $round p50=$p50 ms"
+              $summary += "$which=$p50"
+            }
+          }
+          Write-Host "::notice title=launch A/B (engine_ready_ms p50 per round of 3)::$($summary -join ' ')"
 
       # Canary at the library's default thread count (every logical CPU, at
       # most 8: what the app uses) and at fixed counts, to see whether
@@ -131,11 +170,11 @@ jobs:
                   return {key: brief(inner) for key, inner in value.items()}
               return value
           for path in sorted(pathlib.Path("src-tauri/probe-results").glob("*.json")):
+              if path.stem.startswith("launch-"):
+                  continue
               data = json.loads(path.read_text())
-              for key, value in data.items():
-                  if isinstance(value, (dict, list)):
-                      text = json.dumps(brief(value), separators=(",", ":"))
-                      print(f"::notice title={path.stem}.{key}::{text}")
+              text = json.dumps(brief(data), separators=(",", ":"))
+              print(f"::notice title={path.stem}::{text[:4000]}")
 
       - uses: actions/upload-artifact@v4
         if: always()
