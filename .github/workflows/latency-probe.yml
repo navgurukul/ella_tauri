@@ -96,18 +96,28 @@ jobs:
         run: |
           target\release\latency-probe.exe --rounds 10 --audio ..\bench\fixtures\jfk.wav --output probe-results\windows.json
 
+      # Canary at the library's default thread count (every logical CPU, at
+      # most 8: what the app uses) and at fixed counts, to see whether
+      # hyperthreads help it on a CPU-only Windows machine.
       - name: Canary
         working-directory: src-tauri
         shell: pwsh
         run: |
-          $out = & target\release\stt-benchmark.exe --audio ..\bench\fixtures\jfk.wav --duration-ms 4214 --warmup 1 --iterations 5 --canary-model resources\engines\models\stt\canary-180m-flash-Q8_0.gguf --output probe-results\canary.json 2>&1
-          $code = $LASTEXITCODE
-          $out | Write-Host
-          if ($code -ne 0) {
-            $tail = (($out | Select-Object -Last 8) -join ' | ') -replace '[\r\n]', ' '
-            Write-Host "::error title=canary::exit $code: $tail"
-            exit $code
+          $PSNativeCommandUseErrorActionPreference = $false
+          $ErrorActionPreference = 'Continue'
+          Get-ChildItem target\release\*.dll | ForEach-Object { Write-Host "dll: $($_.Name)" }
+          $failed = 0
+          foreach ($threads in 0, 2, 4) {
+            $out = & target\release\stt-benchmark.exe --audio ..\bench\fixtures\jfk.wav --duration-ms 4214 --warmup 1 --iterations 7 --threads $threads --canary-model resources\engines\models\stt\canary-180m-flash-Q8_0.gguf --output "probe-results\canary-threads-$threads.json" 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            Write-Host $out
+            if ($code -ne 0) {
+              $tail = (($out -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 6) -join ' | ')
+              Write-Host "::error title=canary threads=$threads::exit $code $tail"
+              $failed = 1
+            }
           }
+          exit $failed
 
       - name: Post results
         if: always()

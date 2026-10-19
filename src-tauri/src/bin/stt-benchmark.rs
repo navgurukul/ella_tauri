@@ -15,6 +15,8 @@ struct Config {
     whisper_baseline_ms: f64,
     verify_sha256: bool,
     duration_ms: Option<u64>,
+    /// Canary's CPU threads; 0 is the library default, as in the app.
+    threads: i32,
 }
 
 fn main() -> ExitCode {
@@ -46,7 +48,7 @@ fn run() -> Result<(), String> {
         config.audio.display()
     );
 
-    let canary = CanaryStt::new(&config.canary_model, 0, config.verify_sha256);
+    let canary = CanaryStt::new(&config.canary_model, config.threads, config.verify_sha256);
     let canary_status = canary.status();
     if !canary_status.ready {
         return Err(canary_status.detail);
@@ -194,6 +196,7 @@ fn parse_args() -> Result<Config, String> {
     let mut whisper_baseline_ms = 3_387.0;
     let mut verify_sha256 = true;
     let mut duration_ms = None;
+    let mut threads = 0;
     let mut args = env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -224,11 +227,16 @@ fn parse_args() -> Result<Config, String> {
                         .map_err(|_| "--duration-ms must be an integer".to_string())?,
                 )
             }
+            "--threads" => {
+                threads = value(&mut args, "--threads")?
+                    .parse()
+                    .map_err(|_| "--threads must be an integer".to_string())?
+            }
             "--help" | "-h" => {
                 println!(
                     "Usage: stt-benchmark --audio FILE [--canary-model FILE] [--whisper-url URL] \
                      [--iterations 5] [--warmup 1] [--output report.json] \
-                     [--whisper-baseline-ms 3387] [--duration-ms 4214] [--skip-sha256]"
+                     [--whisper-baseline-ms 3387] [--duration-ms 4214] [--threads 0] [--skip-sha256]"
                 );
                 std::process::exit(0);
             }
@@ -248,6 +256,7 @@ fn parse_args() -> Result<Config, String> {
         whisper_baseline_ms,
         verify_sha256,
         duration_ms,
+        threads,
     })
 }
 
