@@ -4370,27 +4370,31 @@ impl LocalEngine {
         let verify_checksum = env::var("ELLA_CANARY_VERIFY_SHA256")
             .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
             .unwrap_or(true);
-        let canary = || {
-            Box::new(CanaryStt::new(
-                canary_path.clone(),
-                canary_threads,
-                verify_checksum,
-            )) as Box<dyn SpeechToTextEngine>
-        };
-        let windows_stt = || Box::new(WindowsStt::default()) as Box<dyn SpeechToTextEngine>;
-
         // Canary is primary everywhere. On Windows, SAPI is the fallback;
         // elsewhere there is none. `ELLA_STT_ENGINE=windows` swaps the
         // Windows order back to SAPI first.
         let stt_engine = env::var("ELLA_STT_ENGINE").unwrap_or_else(|_| "canary".into());
 
-        let stt = if stt_engine.eq_ignore_ascii_case("windows") {
-            SttRouter::new(windows_stt(), Some(canary()))
-        } else if cfg!(target_os = "windows") {
-            SttRouter::new(canary(), Some(windows_stt()))
-        } else {
-            SttRouter::new(canary(), None)
-        };
+        // Loaded while llama-server starts rather than before it: checking
+        // Canary's whole model against its SHA-256 takes as long as a warm
+        // llama-server does, and neither needs the other.
+        let stt_loading = thread::spawn(move || {
+            let canary = || {
+                Box::new(CanaryStt::new(
+                    canary_path.clone(),
+                    canary_threads,
+                    verify_checksum,
+                )) as Box<dyn SpeechToTextEngine>
+            };
+            let windows_stt = || Box::new(WindowsStt::default()) as Box<dyn SpeechToTextEngine>;
+            if stt_engine.eq_ignore_ascii_case("windows") {
+                SttRouter::new(windows_stt(), Some(canary()))
+            } else if cfg!(target_os = "windows") {
+                SttRouter::new(canary(), Some(windows_stt()))
+            } else {
+                SttRouter::new(canary(), None)
+            }
+        });
 
         let piper_binary = env::var("ELLA_PIPER_BINARY")
             .map(PathBuf::from)
@@ -4448,6 +4452,9 @@ impl LocalEngine {
             (None, Some(_)) => "failed",
             (None, None) => "external",
         };
+        let stt = stt_loading
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
         let (primary_stt, fallback_stt) = stt.status();
         let details = EngineDetails {
             llm_server,
