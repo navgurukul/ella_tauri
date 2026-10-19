@@ -12,6 +12,8 @@
 //!   * `spawn` — starting a process: `piper --version`, and on Windows
 //!     PowerShell, which the Windows speech fallback starts for every answer.
 //!   * `sapi` — that fallback (`WindowsStt`) on a WAV, Windows only.
+//!   * `canary_load` — loading Canary as the app does at launch, with and
+//!     without the SHA-256 of the whole model it does by default.
 //!
 //! ```bash
 //! ELLA_ENGINE_ROOT="$PWD/engines" cargo run --release --bin latency-probe -- \
@@ -30,7 +32,7 @@ use ella_tauri_lib::{
     infrastructure::{
         database::{Database, LessonMark},
         engines::probe,
-        stt::SpeechToTextEngine,
+        stt::{CanaryStt, SpeechToTextEngine, CANARY_FILE_NAME},
         windows_stt::WindowsStt,
     },
 };
@@ -98,6 +100,12 @@ fn run() -> Result<(), String> {
     if wants("sapi") && cfg!(target_os = "windows") {
         if let Some(audio) = &config.audio {
             results.insert("sapi".into(), sapi(audio, config.rounds.min(3))?);
+        }
+    }
+    if wants("canary_load") {
+        let model = config.engine_root.join("models/stt").join(CANARY_FILE_NAME);
+        if model.is_file() {
+            results.insert("canary_load".into(), canary_load(&model, config.rounds.min(3)));
         }
     }
     let _ = fs::remove_dir_all(&work);
@@ -296,6 +304,31 @@ fn sapi(audio: &Path, rounds: usize) -> Result<Value, String> {
         "transcribe_ms": stats(&times),
         "text": text,
     }))
+}
+
+fn canary_load(model: &Path, rounds: usize) -> Value {
+    let mut out = Map::new();
+    // The first load also initialises the backends, once per process.
+    let started = Instant::now();
+    let _ = CanaryStt::new(model, 0, false);
+    out.insert("first_unverified_ms".into(), json!(ms(started)));
+    for (name, verify) in [("verified_ms", true), ("unverified_ms", false)] {
+        let mut times = vec![];
+        for _ in 0..rounds.max(1) {
+            let started = Instant::now();
+            let canary = CanaryStt::new(model, 0, verify);
+            let elapsed = ms(started);
+            if !canary.status().ready {
+                out.insert(name.into(), json!(canary.status().detail));
+                break;
+            }
+            times.push(elapsed);
+        }
+        if !out.contains_key(name) {
+            out.insert(name.into(), stats(&times));
+        }
+    }
+    Value::Object(out)
 }
 
 fn read_wav(path: &Path) -> Result<(Vec<i16>, u32), String> {
