@@ -3,7 +3,11 @@
   "run": "https://github.com/navgurukul/ella_tauri/actions/runs/39226475986",
   "commit": "2131aa6",
   "machine": "cpu=AMD EPYC 9V74 80-Core Processor                 cores=2 threads=4 os=Microsoft Windows Server 2025 Datacenter defender_realtime=True temp=C:\\Users\\RUNNER~1\\AppData\\Local\\Temp",
-  "launch_ab_engine_ready_ms_p50_per_round": "before=2861.99 after=2524.8 before=2600.13 after=2522.88 before=2868.9 after=2534.25",
+  "launch_ab_engine_ready_ms_p50_per_round": {
+    "superseded_by": "launch_ab_controlled",
+    "values": "before=2861.99 after=2524.8 before=2600.13 after=2522.88 before=2868.9 after=2534.25",
+    "note": "Informal: 3 rounds of 3 launches per side, medians only. An A/A rerun of the same harness showed single rounds ~250 ms off (one llama-server /health poll tick), so these cannot show a ~250 ms effect."
+  },
   "windows": {
     "arch": "x86_64",
     "canary_load": {
@@ -128,5 +132,128 @@
     "warmup": 1,
     "whisper_fixed_baseline_ms": 3387.0,
     "whisper_live": null
+  },
+  "launch_ab_controlled": {
+    "run": "https://github.com/navgurukul/ella_tauri/actions/runs/39234791307",
+    "machine": "cpu=AMD EPYC 9V45 96-Core Processor                 cores=2 threads=4 defender_realtime=True",
+    "before": "6a70923 (src/ differs from after only in engines.rs: Canary loaded beside llama-server)",
+    "after": "0662719",
+    "method": "Engine start-up (latency-probe --only launch --rounds 1: engine_from_environment until llama-server answers /health, cloud off), one process per sample, one unrecorded warm-up launch per binary, 10 blocks each of ABBA (lead alternating per block) for A/B then for A/A (HEAD vs a byte-identical copy). 20 samples per arm. Readiness is polled every 250 ms, so samples fall on a 250 ms grid.",
+    "samples_ms": {
+      "aa_b": [
+        2019.7,
+        2024.8,
+        2026.0,
+        2019.9,
+        2020.9,
+        2021.0,
+        2274.9,
+        2031.1,
+        2024.6,
+        2024.2,
+        2019.6,
+        2273.0,
+        2021.1,
+        2020.2,
+        2027.0,
+        2027.1,
+        2020.3,
+        2019.8,
+        2033.6,
+        2023.1
+      ],
+      "aa_a": [
+        2037.9,
+        2019.7,
+        2020.2,
+        2025.1,
+        2022.6,
+        2032.6,
+        2270.5,
+        2030.8,
+        2271.2,
+        2276.7,
+        2273.5,
+        2025.7,
+        2271.7,
+        2033.0,
+        2019.7,
+        2018.6,
+        2020.8,
+        2269.3,
+        2030.8,
+        2033.6
+      ],
+      "ab_after": [
+        2033.2,
+        2022.8,
+        2019.5,
+        2019.5,
+        2021.7,
+        2041.3,
+        2289.9,
+        2275.5,
+        2024.3,
+        2020.5,
+        2276.1,
+        2020.4,
+        2270.6,
+        2035.4,
+        2026.1,
+        2033.1,
+        2280.3,
+        2030.2,
+        2029.6,
+        2026.4
+      ],
+      "ab_before": [
+        2308.5,
+        2320.7,
+        2297.6,
+        2302.3,
+        2050.4,
+        2057.7,
+        2570.5,
+        2337.9,
+        2313.8,
+        2317.9,
+        2607.3,
+        2305.4,
+        2310.4,
+        2318.7,
+        2308.1,
+        2307.0,
+        2316.5,
+        2326.9,
+        2316.2,
+        2315.0
+      ]
+    },
+    "stats": {
+      "ab": {
+        "median_before": 2314.4,
+        "median_after": 2029.9,
+        "median_diff": -284.5,
+        "hodges_lehmann": -282.0,
+        "bootstrap95_median_diff": [
+          -292.2,
+          -272.6
+        ],
+        "mann_whitney_z": -5.14,
+        "p": 2.8e-07
+      },
+      "aa": {
+        "median_a": 2031.7,
+        "median_b": 2023.7,
+        "median_diff": -8.0,
+        "hodges_lehmann": -5.9,
+        "bootstrap95_median_diff": [
+          -130.5,
+          0.3
+        ],
+        "mann_whitney_z": -1.65,
+        "p": 0.099
+      }
+    }
   }
 }

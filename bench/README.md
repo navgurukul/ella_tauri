@@ -90,4 +90,22 @@ and [`results/probe-mac-m1pro.json`](results/probe-mac-m1pro.json):
 | SAPI fallback, 11 s of audio | 1.7–2.0 s | – |
 | Canary load, verified / unverified | 328 / 184 ms | 724 / 80 ms |
 | Canary, 4.2 s fixture, threads default / 2 / 4 | 351 / 353 / 326 ms | 211 ms (Intel Mac, CPU) |
-| Engine start-up, Canary loaded before / beside llama-server | 2777 → 2527 ms | 1502 → 773 ms |
+| Engine start-up, Canary loaded before / beside llama-server (median) | 2314 → 2030 ms | 1502 → 773 ms |
+
+### Engine start-up A/B, measured properly
+
+llama-server's readiness is polled every 250 ms, so start-up times fall on a
+250 ms grid and a few medians cannot show a change of about one step. The
+controlled run ([39234791307](https://github.com/navgurukul/ella_tauri/actions/runs/39234791307),
+one runner, EPYC 9V45 2c/4t, Defender on) takes 20 single-launch samples per
+arm in ABBA order, with an A/A arm of the same binary for the noise floor:
+
+| Comparison | Median before → after | Hodges–Lehmann shift | Bootstrap 95% CI | Mann–Whitney |
+|---|---:|---:|---:|---:|
+| A/B, Canary loaded before → beside llama-server | 2314 → 2030 ms | −282 ms | [−292, −273] ms | z = −5.14, p = 3e-7 |
+| A/A control, same binary | 2032 → 2024 ms | −6 ms | [−131, 0] ms | z = −1.65, p = 0.10 |
+
+Raw samples are in the results file. One runner and one run: the same
+direction was seen on two other runners with the informal harness, and on the
+M1 Pro (alternating rounds), but the controlled measurement itself has not
+been repeated on other hardware.
