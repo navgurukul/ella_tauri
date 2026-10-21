@@ -646,6 +646,65 @@ are marked when another copy is installed or the llama-server is another
 build's, and the updater's steps and version changes follow as a timeline.
 The report reads a file saved through PowerShell's `>`, which is UTF-16.
 
+### Weekly latency report
+
+Once a week the team gets one report across every tester's laptop: the
+latency KPIs, volume and errors, against the week before. The events go
+from the laptops to a private repository, `navgurukul/ella-telemetry`, never
+to this public one, and the scripts that make the report live here.
+
+1. **Upload.** Each tester names their laptop once (`lab-win-hp-02`,
+   `akshat-m1pro`: never a learner's name) and, every week before Monday
+   11:00 IST, uploads the whole `latency.jsonl`, renamed `<label>.jsonl`, to
+   that repository's `inbox/` on GitHub (Add file → Upload files). The file
+   only grows, and the whole of it goes every time: nothing is counted twice.
+   The `stt-failures` recordings and `ella.sqlite3` never go.
+2. **Ingest**, on each upload, runs
+   `npm run telemetry:sanitize -- inbox/*.jsonl --data data/`. It keeps only
+   the fields [`scripts/telemetry-fields.json`](scripts/telemetry-fields.json)
+   allows, so a field the app starts writing stays behind until someone names
+   it there, and says what it left behind. Errors become their code
+   (`NO_SPEECH_DETECTED`, else `other`), and why the cloud went down one of a
+   fixed list (`could_not_connect`, `http_503`, `proxy_cap`, else `other`),
+   since a proxy's refusal carries its own words; the launch and talk IDs are hashed;
+   `topic`, `level` and `interaction_id` are dropped. Each event gets an
+   `event_id`, from its launch, time and kind, and only events not already
+   under `data/` are written, to a new `data/<week>/<ingest>.jsonl`. The raw
+   upload is kept as a 90-day Actions artifact and removed from `inbox/`.
+   It stays in that repository's history: a known compromise until the app
+   can export a sanitized file itself.
+3. **Report**, Mondays at 12:00 IST, runs
+   `npm run telemetry:weekly -- data/ --out reports/` for the last whole week,
+   Monday to Sunday in IST, commits `reports/<week>.md` and `.json`, and opens
+   an issue, "Latency report <week>", with the Markdown.
+
+The report's latency is over the voice turns that succeeded, P50/P95/P99
+(nearest rank, as `telemetry:report` counts): the wait, from the learner
+stopping to Ella starting to speak (`speech_ms`), and the total, each also
+split by who answered, the laptop or the cloud; then speech to text, the
+model's first token and completion, Piper's first audio, the recap, and the
+cold start from launch to the engine being ready. Volume: turns, talks,
+launches, laptops, the builds that ran; the system error rate, with "didn't
+hear you" (`NO_SPEECH_DETECTED`) counted apart as the no-speech rate; errors
+by stage and code; how much the cloud answered and how often it failed; STT
+fallbacks; recaps and failed judges.
+
+A flag (▲) is a reason to look at the events, not a measured regression: a
+P50 or P95 at least 15% **and** 200 ms slower than the week before, with 30 or
+more turns in both weeks, or a system error rate 2 points higher. The report
+also says when the mix moved (the cloud's share by more than 20 points, or
+the build most turns ran) and how many of last week's events came after last
+week's report. Claiming a change still takes the raw samples and a test. The
+JSON's keys stay put; a change to what they mean bumps `report_version`.
+
+Either script also reads a laptop's own file, to see a week locally:
+
+```bash
+npm run telemetry:weekly -- "$HOME/Library/Application Support/org.navgurukul.ella.desktop/telemetry/latency.jsonl" --week 2026-W42
+```
+
+`npm run test:telemetry` tests both.
+
 ## Latency on laptops
 
 Most of the laptops Ella runs on have no GPU llama.cpp can use, so the model

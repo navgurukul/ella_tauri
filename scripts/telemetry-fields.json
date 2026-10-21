@@ -1,0 +1,93 @@
+{
+  "_about": [
+    "What of latency.jsonl may leave a laptop for the team's private telemetry",
+    "store: an allowlist, read by scripts/latency-sanitize.py. A field the app",
+    "starts writing is dropped until it is named here, and every sanitize run",
+    "counts what it dropped. Free-text errors become a code (`error_code`):",
+    "the word before a colon, such as NO_SPEECH_DETECTED, else `other`. IDs that",
+    "would tie events to a laptop's own database are hashed. `topic`, `level`",
+    "and `interaction_id` are left behind: the level is the learner's, and the",
+    "report needs neither. See README, Weekly latency report.",
+    "",
+    "`ella_cloud.reason` becomes `reason_code`, one of `cloud_reasons` below:",
+    "the reason is free text. A refusal carries the proxy's own message, which",
+    "can quote DeepSeek's (`upstream_config`), from any server ELLA_CLOUD_URL",
+    "names; a stream that broke says what the OS said (cloud_llm.rs: refusal,",
+    "send, short, ask, probe, token). A reason not listed becomes `other`."
+  ],
+  "every_event": ["event", "schema_version", "timestamp", "app_version", "launch_id"],
+  "hashed": {
+    "launch_id": "launch",
+    "session_id": "talk_id"
+  },
+  "coded": {
+    "error": "error_code",
+    "reason": "reason_code"
+  },
+  "cloud_reasons": {
+    "exact": {
+      "timed out": "timed_out",
+      "could not connect": "could_not_connect",
+      "an answer that could not be read": "unreadable_answer",
+      "the request failed": "request_failed",
+      "the proxy has no model to ask": "no_model",
+      "the proxy gave no install token": "no_install_token",
+      "the answer broke off": "broke_off",
+      "the request stopped": "request_stopped"
+    },
+    "prefix": {
+      "no first word in ": "no_first_word",
+      "silent for ": "silent_partway"
+    },
+    "proxy": [
+      "bad_request", "unauthorized", "limit", "cap", "not_configured", "upstream_config",
+      "upstream_busy", "upstream", "upstream_rejected", "not_found", "internal"
+    ]
+  },
+  "objects": {
+    "machine": [
+      "on_ac", "battery_pct", "battery_saver", "power_mode", "cpu_mhz", "cpu_mhz_max",
+      "cpu_mhz_limit", "cpu_busy_pct", "cpu_ella_pct", "ram_free_mb"
+    ],
+    "install": ["bundle", "place", "also_at"],
+    "warm_up": ["began_ms_before", "ms", "restored_tokens", "evaluated_tokens", "errand"],
+    "llm_runs": [
+      "why", "backend", "failed", "wait_ms", "errand", "ttft_ms", "ms", "prompt_tokens",
+      "prompt_evaluated", "prompt_ms", "gen_tokens", "gen_ms"
+    ],
+    "stt_pieces": [
+      "part", "audio_ms", "speech_ms", "engine", "words", "ms", "queued_ms", "attempts",
+      "done_ms", "cut"
+    ],
+    "judges": [
+      "judge", "backend", "status", "error", "waited_ms", "ms", "gave_way", "attempts",
+      "restored_tokens", "read_tokens", "written_tokens", "stopped_early"
+    ]
+  },
+  "events": {
+    "ella_turn_latency": [
+      "status", "error", "failed_at", "kind", "session_id", "talk", "turn", "talk_over",
+      "learner_words", "reply_words",
+      "audio_input_ms", "audio_after_vad_ms", "vad_ms",
+      "stt_ms", "stt_engine", "stt_backend", "stt_fallback_from", "stt_mel_ms",
+      "stt_encode_ms", "stt_decode_ms", "stt_pieces",
+      "llm_start_ms", "llm_ttft_ms", "llm_completion_ms", "llm_runs", "warm_up", "notes",
+      "tts_first_audio_ms", "tts_completion_ms", "tts_path", "tts_sentences",
+      "speech_ms", "total_ms", "machine"
+    ],
+    "ella_assessment": [
+      "status", "error", "session_id", "kind", "answers", "checked_answers",
+      "since_close_ms", "scored_ms", "total_ms", "judges", "machine"
+    ],
+    "ella_launch": [
+      "os", "arch", "cpu", "cores_physical", "cores_logical", "ram_mb", "machine",
+      "install", "previous_version"
+    ],
+    "ella_engine": [
+      "since_launch_ms", "llm_server", "llama_threads", "llama_build", "llama_expected",
+      "llm_ctx", "llm_model_mb", "stt", "stt_threads", "piper", "cloud", "error"
+    ],
+    "ella_cloud": ["up", "reason"],
+    "ella_update": ["step", "version", "ms", "bytes", "via", "error"]
+  }
+}

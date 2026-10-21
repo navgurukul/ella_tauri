@@ -21,6 +21,9 @@
     "benchmark:stt": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin stt-benchmark --",
     "check": "npm run test && npm run build && cargo test --manifest-path src-tauri/Cargo.toml",
     "telemetry:report": "python3 scripts/latency-report.py",
+    "telemetry:sanitize": "python3 scripts/latency-sanitize.py",
+    "telemetry:weekly": "python3 scripts/latency-weekly.py",
+    "test:telemetry": "python3 -m unittest discover -s scripts -p 'test_*.py'",
     "bench:chore": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin chore-bench --"
   },
   "dependencies": {
