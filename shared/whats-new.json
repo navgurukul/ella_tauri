@@ -1,4 +1,7 @@
 {
+  "0.1.25": [
+    "Ella gets ready a little faster when you open her."
+  ],
   "0.1.24": [
     "Levels and badges now shows how you move up: a step is done when all its skills pass, and finishing every step opens the next level.",
     "Each badge list now reminds you that you can open a badge to see what earns it."
