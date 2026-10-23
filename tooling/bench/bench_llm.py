@@ -20,11 +20,21 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 DEFAULT_DATASET = Path(__file__).with_name("llm_conversations.json")
 DEFAULT_BASE_URL = "http://127.0.0.1:39091/v1"
 DEFAULT_MAX_TOKENS = 50
 DEFAULT_TEMPERATURE = 0.65
+
+
+def health_url(base_url: str) -> str:
+    parsed = urlsplit(base_url)
+    path = parsed.path.rstrip("/")
+    if path.endswith("/v1"):
+        path = path[:-3]
+    path = f"{path}/health" if path else "/health"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 def load_dataset(path: Path) -> tuple[dict[str, Any], str]:
@@ -205,10 +215,17 @@ def run(args: argparse.Namespace) -> int:
                         f"{scenario['name']} #{turn_index} iteration {iteration}: "
                         f"TTFT {result['ttft_ms']} ms, total {result['completion_ms']} ms"
                     )
+    except urllib.error.HTTPError as exc:
+        response = exc.read().decode("utf-8", "replace").strip()
+        exc.close()
+        detail = f"HTTP {exc.code} {exc.reason}"
+        if response:
+            detail = f"{detail}: {response}"
+        raise RuntimeError(f"llama-server rejected the request at {args.base_url}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(
             f"could not reach llama-server at {args.base_url}. Start it first and confirm "
-            "http://127.0.0.1:39091/health responds; see the Windows benchmark instructions."
+            f"{health_url(args.base_url)} responds; see the Windows benchmark instructions."
         ) from exc
 
     report = {

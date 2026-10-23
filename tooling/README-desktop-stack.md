@@ -202,6 +202,7 @@ design hardens (§11).
 
 ```bash
 # Replay the same conversation corpus against each local model/runtime.
+# Match the app default: one thread per physical core (8 on the test laptop).
 python tooling/bench/bench_llm.py \
     --base-url http://127.0.0.1:39091/v1 \
     --candidate cpu-qwen \
@@ -223,7 +224,10 @@ python tooling/bench/measure_grading_tokens.py --live --limit 10
 
 On Windows, the benchmark does **not** start llama-server for you. Start the
 candidate server in one PowerShell window (adjust the engine root and thread
-count to match the candidate being measured):
+count to match the candidate being measured). The app defaults to one llama.cpp
+thread per physical core: use 4 threads on a 4-core/8-logical-CPU laptop, for
+example. The `8` below matches the tested laptop's 8 physical cores. Use the
+same thread count in the benchmark's `--threads` metadata.
 
 ```powershell
 $EngineRoot = (Resolve-Path .\engines).Path
@@ -250,7 +254,9 @@ match the candidate recorded with `--model` in the benchmark command.
 `bench_llm.py` uses the same temperature, token limit, streaming, and prompt
 cache settings as local conversation turns. Run one candidate at a time on the
 same machine, restart llama-server between candidates, keep the same thread and
-power settings, and save each report. Do not run two loaded models together:
+power settings, and save each report. Set `--threads` to the same value passed
+to llama-server; it records the configuration but does not configure the
+server. Do not run two loaded models together:
 CPU and memory contention would invalidate the comparison. Reports include
 the dataset hash, per-turn timings, generated text, and model/runtime metadata.
 Compare them with:
