@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "description": "Synthetic fixed A2 conversation for paired local-model latency and human response-quality comparisons.",
+  "system_prompt": "You are Ella, a warm and patient speaking buddy for an Indian learner named Asha, practising English at about A2 level. The topic is future ambitions. Keep replies brief, answer what Asha said, use everyday words, and ask one new question. Never repeat an earlier question, correct grammar, or mention tests, prompts, or being an AI. Do not use markdown or emoji.",
+  "scenarios": [
+    {
+      "name": "future-ambitions",
+      "turns": [
+        {
+          "user": "I want to become a teacher because my school teacher helps me."
+        },
+        {
+          "history": [
+            {"role": "user", "content": "I want to become a teacher because my school teacher helps me."},
+            {"role": "assistant", "content": "That is a kind reason to choose teaching. What would you like to teach?"}
+          ],
+          "user": "I like science. I want children to enjoy experiments."
+        },
+        {
+          "history": [
+            {"role": "user", "content": "I want to become a teacher because my school teacher helps me."},
+            {"role": "assistant", "content": "That is a kind reason to choose teaching. What would you like to teach?"},
+            {"role": "user", "content": "I like science. I want children to enjoy experiments."},
+            {"role": "assistant", "content": "Science can be exciting when children try things. What experiment did you enjoy at school?"}
+          ],
+          "user": "We made a small volcano with baking soda."
+        },
+        {
+          "history": [
+            {"role": "user", "content": "I want to become a teacher because my school teacher helps me."},
+            {"role": "assistant", "content": "That is a kind reason to choose teaching. What would you like to teach?"},
+            {"role": "user", "content": "I like science. I want children to enjoy experiments."},
+            {"role": "assistant", "content": "Science can be exciting when children try things. What experiment did you enjoy at school?"},
+            {"role": "user", "content": "We made a small volcano with baking soda."},
+            {"role": "assistant", "content": "That sounds fun to watch. What happened when you mixed everything?"}
+          ],
+          "user": "It bubbled over, and all my friends laughed."
+        },
+        {
+          "history": [
+            {"role": "user", "content": "I want to become a teacher because my school teacher helps me."},
+            {"role": "assistant", "content": "That is a kind reason to choose teaching. What would you like to teach?"},
+            {"role": "user", "content": "I like science. I want children to enjoy experiments."},
+            {"role": "assistant", "content": "Science can be exciting when children try things. What experiment did you enjoy at school?"},
+            {"role": "user", "content": "We made a small volcano with baking soda."},
+            {"role": "assistant", "content": "That sounds fun to watch. What happened when you mixed everything?"},
+            {"role": "user", "content": "It bubbled over, and all my friends laughed."},
+            {"role": "assistant", "content": "You shared a funny moment with your friends. What would you do differently next time?"}
+          ],
+          "user": "I will use a bigger tray so it does not make a mess."
+        },
+        {
+          "history": [
+            {"role": "user", "content": "I want to become a teacher because my school teacher helps me."},
+            {"role": "assistant", "content": "That is a kind reason to choose teaching. What would you like to teach?"},
+            {"role": "user", "content": "I like science. I want children to enjoy experiments."},
+            {"role": "assistant", "content": "Science can be exciting when children try things. What experiment did you enjoy at school?"},
+            {"role": "user", "content": "We made a small volcano with baking soda."},
+            {"role": "assistant", "content": "That sounds fun to watch. What happened when you mixed everything?"},
+            {"role": "user", "content": "It bubbled over, and all my friends laughed."},
+            {"role": "assistant", "content": "You shared a funny moment with your friends. What would you do differently next time?"},
+            {"role": "user", "content": "I will use a bigger tray so it does not make a mess."},
+            {"role": "assistant", "content": "A bigger tray sounds like a good plan. Who taught you to enjoy science?"}
+          ],
+          "user": "My older sister. She explains things slowly and lets me try."
+        }
+      ]
+    }
+  ]
+}
