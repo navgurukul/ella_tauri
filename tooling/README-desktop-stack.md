@@ -201,8 +201,16 @@ These decide things the architecture currently assumes. Run them before the
 design hardens (§11).
 
 ```bash
-# Is the KV cache actually being reused, and does decode outrun speech? (§4, §5)
-python desktop/bench/bench_llm.py --base-url http://127.0.0.1:8080/v1
+# Replay the same conversation corpus against each local model/runtime.
+# Match the app default: one thread per physical core (8 on the test laptop).
+python tooling/bench/bench_llm.py \
+    --base-url http://127.0.0.1:39091/v1 \
+    --candidate cpu-qwen \
+    --model qwen2.5-3b-instruct-q4_k_m \
+    --runtime llama.cpp-cpu \
+    --threads 8 \
+    --power-note "AC; Windows best performance" \
+    --output bench/results/llm-cpu-qwen.json
 
 # small vs base on real student audio. (§3)
 python desktop/bench/bench_whisper.py \
@@ -214,9 +222,63 @@ python tooling/bench/measure_grading_tokens.py --from-db backend/zoe.db
 python tooling/bench/measure_grading_tokens.py --live --limit 10
 ```
 
-`bench_llm.py` is the one to run first. If it prints *"KV CACHE IS NOT BEING
-REUSED"*, nothing else matters until that is fixed — every turn is paying a
-full prefill and the product is unusable regardless of how good the model is.
+On Windows, the benchmark does **not** start llama-server for you. Start the
+candidate server in one PowerShell window (adjust the engine root and thread
+count to match the candidate being measured). The app defaults to one llama.cpp
+thread per physical core: use 4 threads on a 4-core/8-logical-CPU laptop, for
+example. The `8` below matches the tested laptop's 8 physical cores. Use the
+same thread count in the benchmark's `--threads` metadata.
+
+```powershell
+$EngineRoot = (Resolve-Path .\engines).Path
+$env:PATH = "$EngineRoot\bin\llama;$env:PATH"
+& "$EngineRoot\bin\llama\llama-server.exe" `
+  --model "$EngineRoot\models\llm\model.gguf" `
+  --host 127.0.0.1 --port 39091 `
+  --ctx-size 4096 --threads 8 --parallel 1
+```
+
+Wait for the model to load, then check it from a second PowerShell window:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:39091/health
+```
+
+Only after the health check succeeds, run the Python benchmark command in that
+second window. Keep the server window open during the benchmark; press Ctrl+C
+there after all candidates have been tested. The command above uses the
+repository's normal `engines\models\llm\model.gguf` location. For a candidate
+stored elsewhere, point `--model` at that file instead. The model file must
+match the candidate recorded with `--model` in the benchmark command.
+
+`bench_llm.py` uses the same temperature, token limit, streaming, and prompt
+cache settings as local conversation turns. Run one candidate at a time on the
+same machine, restart llama-server between candidates, keep the same thread and
+power settings, and save each report. Set `--threads` to the same value passed
+to llama-server; it records the configuration but does not configure the
+server. Do not run two loaded models together:
+CPU and memory contention would invalidate the comparison. Reports include
+the dataset hash, per-turn timings, generated text, and model/runtime metadata.
+Compare them with:
+
+```bash
+python tooling/bench/bench_llm.py \
+    --compare bench/results/llm-cpu-qwen.json bench/results/llm-cpu-smaller.json
+```
+
+Replace both report paths with files actually written by successful benchmark
+runs; the second path above is an example filename, not a report created by
+the benchmark automatically.
+
+The checked-in conversation corpus is synthetic and intentionally fixed so
+every candidate sees identical prompts, including identical prior assistant
+messages. It is a reproducible bake-off, not a verbatim capture of a learner's
+conversation or the full production system prompt. Use `--dataset` with a
+reviewed, de-identified dataset if a closer production prompt match is needed.
+The comparison prints paired responses for a human quality review; it does not
+automatically score conversational quality. The first request is reported
+separately from the warm-turn medians, and llama.cpp prompt/decode timings are
+included when the server provides them.
 
 ---
 
