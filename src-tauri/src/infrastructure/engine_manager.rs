@@ -525,7 +525,7 @@ use crate::domain::{
     Readiness, Scorable, Topic, TutorRequest,
 };
 use crate::infrastructure::engines::{
-    GeneratedReply, NextRecap, NextTalk, SpeechSink, SynthesizedAudio, TutorEngine,
+    CloudJson, GeneratedReply, NextRecap, NextTalk, SpeechSink, SynthesizedAudio, TutorEngine,
 };
 use crate::infrastructure::lesson_prompt::LessonAsk;
 use crate::infrastructure::model_queue::Held;
@@ -769,6 +769,18 @@ impl TutorEngine for DeferredEngine {
 
     fn correct(&self, answers: &[&str], settled: &dyn Fn(&[String]) -> bool) -> EllaResult<Option<Corrections>> {
         self.with_engine(|engine| engine.correct(answers, settled))
+    }
+
+    /// `None` while there is no engine, as without the cloud.
+    fn correct_online(&self, answers: &[&str]) -> Option<Corrections> {
+        let slot = self.inner.read().ok()?;
+        slot.as_ref()?.correct_online(answers)
+    }
+
+    /// `None` while there is no engine: the word talk says its own line.
+    fn cloud_json(&self, messages: &[serde_json::Value], why: &'static str) -> Option<CloudJson> {
+        let slot = self.inner.read().ok()?;
+        slot.as_ref()?.cloud_json(messages, why)
     }
 
     fn opening_in_chore(&self, context: &ChoreContext, learner_name: &str) -> EllaResult<String> {

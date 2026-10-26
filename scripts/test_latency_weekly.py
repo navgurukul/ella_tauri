@@ -228,6 +228,19 @@ class Reporting(unittest.TestCase):
         self.assertEqual(report["this"]["latency"]["wait_ms_local"]["p50"], 700)
         self.assertTrue(any("cloud answered 50%" in note for note in report["notes"]))
 
+    def test_word_of_the_day_is_counted_apart_from_the_kpis(self):
+        talks = week_of_turns("2026-10-20", 10, 3000)
+        words = [turn(f"2026-10-20T10:00:0{i}Z", 400, talk="word", cloud=True) for i in range(5)]
+        recap = {"event": "ella_assessment", "timestamp": "2026-10-20T10:01:00Z", "status": "ok", "kind": "word", "total_ms": 900}
+        report = self.report(talks + words + [recap])
+        self.assertEqual(report["this"]["latency"]["total_ms"]["n"], 10)
+        self.assertEqual(report["this"]["latency"]["total_ms"]["p50"], 3000)
+        self.assertEqual(report["this"]["latency"]["wait_ms_cloud"]["n"], 0)
+        self.assertEqual(report["this"]["latency"]["recap_total_ms"]["n"], 0)
+        volume = report["this"]["volume"]
+        self.assertEqual((volume["turns"], volume["word_turns"], volume["recaps"]), (10, 5, 0))
+        self.assertIn("| Word of the day turns (not in the KPIs) | 5 |", weekly.markdown(report))
+
     def test_late_events_for_last_week_are_counted(self):
         last = week_of_turns("2026-10-13", 4, 1000)
         before = self.report(last[:3], week="2026-W42")

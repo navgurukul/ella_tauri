@@ -8,6 +8,7 @@ import {
 } from "./EllaMascot";
 import { PartnerFigure } from "./CastScreen";
 import { MicGlyph } from "./HomeScreen";
+import { isWordForm, WordCard } from "./WordOfTheDay";
 import { bridge } from "../lib/bridge";
 import { castName } from "../lib/presentation";
 import {
@@ -119,6 +120,9 @@ export function TalkScreen({
   // Ella's opening, kept so "Hear it again" can replay it with its timings
   // instead of dropping to the system voice.
   const [openingLine, setOpeningLine] = useState<SpokenLine | null>(null);
+  // Word of the day: the playback that is Ella saying the word on its card,
+  // so its disc shows her wave while she does.
+  const [wordPlayback, setWordPlayback] = useState<number | null>(null);
   // What Ella says when a recording had no words in it. Shown in place of the
   // last real reply while it is on screen, but never written into
   // `session.messages` - there is nothing to persist or replay, and the
@@ -400,6 +404,27 @@ export function TalkScreen({
         if (!mounted.current || playbackGeneration.current !== generation) return;
         playElla(fallbackText);
       });
+  }
+
+  /**
+   * Ella says today's word, from the disc on its card. As with "Hear it
+   * again", an answer being given is put down unsent, and the mic opens again
+   * once she has said it.
+   */
+  async function hearWord() {
+    const word = session.word;
+    if (!word) return;
+    setReaction(null);
+    setRetryPrompt(null);
+    if (state === "listening") void dropCapture();
+    stopPlayback();
+    const generation = playbackGeneration.current;
+    setWordPlayback(generation);
+    const line = await bridge.speakWord?.(session.id).catch(() => undefined);
+    if (!mounted.current || playbackGeneration.current !== generation) return;
+    playElla(word.text, line?.audio ? line : undefined);
+    // `playElla` starts a playback of its own; the disc follows that one.
+    setWordPlayback(playbackGeneration.current);
   }
 
   /**
@@ -840,6 +865,7 @@ export function TalkScreen({
   // playing" would show the reply at full contrast and then dim it the instant
   // she starts, which reads as a flicker.
   const followingWords = following && state === "speaking";
+  const sayingWord = state === "speaking" && wordPlayback === playbackGeneration.current;
   const interactionLocked = sending || micStarting || state === "thinking";
   // Ella now starts talking while the turn is still committing, so for a moment
   // she is speaking and the microphone is not yet available. Promising an
@@ -908,6 +934,15 @@ export function TalkScreen({
 
       <div className="talk-stage">
         <div className="talk-copy">
+          {session.word && (
+            <WordCard
+              word={session.word}
+              saying={sayingWord}
+              disabled={interactionLocked}
+              onSay={() => void hearWord()}
+            />
+          )}
+
           <div className="talk-cue" aria-hidden="true">
             {micStarting ? (
               <LoaderCircle className="spin" size={20} />
@@ -921,7 +956,13 @@ export function TalkScreen({
           <p className="talk-prompt">
             {promptWords.map((word, index) => (
               <Fragment key={`${index}-${word}`}>
-                <span className={wordClass(index, spokenIndex, followingWords)}>{word}</span>
+                <span
+                  className={`${wordClass(index, spokenIndex, followingWords)}${
+                    session.word && isWordForm(word, session.word) ? " is-todays-word" : ""
+                  }`}
+                >
+                  {word}
+                </span>
                 {index < promptWords.length - 1 ? " " : ""}
               </Fragment>
             ))}

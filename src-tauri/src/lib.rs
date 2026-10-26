@@ -13,6 +13,7 @@ mod setup;
 pub mod skill_forms;
 mod telemetry;
 pub mod topics;
+pub mod words;
 mod window_fit;
 
 use std::sync::Arc;
@@ -152,11 +153,13 @@ pub fn run() {
             ipc::save_avatar_color,
             ipc::start_session,
             ipc::start_lesson,
+            ipc::start_word,
             ipc::start_placement,
             ipc::start_chore,
             ipc::speak_opening,
             ipc::speak_retry_prompt,
             ipc::speak_fix,
+            ipc::speak_word,
             ipc::get_session,
             ipc::send_text_turn,
             ipc::send_voice_turn,

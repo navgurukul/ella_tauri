@@ -16,7 +16,7 @@ use crate::{
         LearnerProgress, LessonTurn, LevelSkillView, LevelState, LevelView, MentorLesson, Message, PhonemeSpan,
         Pitch, PlacementBrief, PlacementReading, Readiness, Scorable, Session, SessionSummary, SkillAim,
         SpeechStreamEvent, SpokenLine, Standing, StepView, TalkNotes, TurnSignal, WinCondition,
-        Speaker, Topic, TurnResult, TutorRequest, WordSpan,
+        Speaker, Topic, TurnResult, TutorRequest, WordShown, WordSpan,
     },
     error::{EllaError, EllaResult},
     infrastructure::{
@@ -28,11 +28,13 @@ use crate::{
         },
         lesson_prompt::{self, LessonAsk},
         safety,
+        word_prompt::{self, Knowing, Reaction},
     },
     lesson::{self, LessonPlan},
     notes,
     progress::{self, ProgressMap, SkillProgress},
     telemetry::{AssessmentTrace, LatencyTrace, SttPiece},
+    words::{self, Knew, Meaning, WordAnswer, WordTalk},
 };
 
 /// The placement chat is a session like any other, marked with this kind. Its
@@ -40,6 +42,8 @@ use crate::{
 const PLACEMENT_KIND: &str = "placement";
 /// Ella's lesson is a session like any other too, marked with this kind.
 const LESSON_KIND: &str = "lesson";
+/// So is Word of the day (`crate::words`).
+const WORD_KIND: &str = "word";
 pub const PLACEMENT_TOPIC_ID: &str = "placement";
 const PLACEMENT_LABEL: &str = "First talk";
 
@@ -284,6 +288,13 @@ impl AppService {
             (Vec::new(), LearnerProgress::default(), None)
         };
         let (topics, tomorrow_topic) = self.offering(learner.as_ref())?;
+        let word = match &learner {
+            Some(_) => self.word_today().unwrap_or_else(|error| {
+                eprintln!("[word] could not tell today's word: {error}");
+                None
+            }),
+            None => None,
+        };
         let mut lesson = None;
         if let Some(learner) = &learner {
             // Today's talk is Ella's lesson, once she has one ready.
@@ -315,8 +326,36 @@ impl AppService {
             progress,
             standing,
             lesson,
+            word,
             engine_status: self.engine.status(),
         })
+    }
+
+    /// Today's word, for Home's daily card: the one the learner's word talk
+    /// teaches today, until they have played it today. Then the card leaves
+    /// Home, as on the phone.
+    fn word_today(&self) -> EllaResult<Option<WordShown>> {
+        let today = today();
+        if self.database.word_played_on(&today)? {
+            return Ok(None);
+        }
+        Ok(Some(self.word_on(&today)?.shown()))
+    }
+
+    /// The word talk the learner would start on `today`, at their level: the
+    /// same word all day, and a new one on each day they play (`words::plan_word`).
+    fn word_on(&self, today: &str) -> EllaResult<WordTalk> {
+        let (position, _) = self.placement()?;
+        Ok(words::plan_word(&position.level, &self.database.words_before(today)?))
+    }
+
+    /// Where a Word of the day talk is; `None` for any other talk.
+    fn word_talk_of(&self, session_id: &str) -> EllaResult<Option<WordTalk>> {
+        let meta = self.database.session_curriculum(session_id)?;
+        if meta.kind.as_deref() != Some(WORD_KIND) {
+            return Ok(None);
+        }
+        Ok(meta.word_talk.as_deref().and_then(words::read_word_talk))
     }
 
     /// The lesson Ella has ready for the learner where they stand, and what
@@ -587,6 +626,21 @@ impl AppService {
         })
     }
 
+    /// Today's word, said by Ella, for the speaker on its card. Synthesized
+    /// whole: it is one word.
+    pub fn speak_word(&self, session_id: &str) -> EllaResult<SpokenLine> {
+        let talk = self
+            .word_talk_of(session_id)?
+            .ok_or_else(|| EllaError::NotFound("There is no word to hear in this talk.".into()))?;
+        let synthesized = self.engine.speak(&format!("{}.", talk.entry().word), None)?;
+        Ok(SpokenLine {
+            streamed_segments: synthesized.segments,
+            audio: synthesized.audio,
+            speech_words: synthesized.words,
+            speech_phonemes: synthesized.phonemes,
+        })
+    }
+
     /// A talk on a topic. Every one quietly aims at a skill of the learner's
     /// step, picked here and kept on the session, so each turn's instructions
     /// say the same and the talk is scored against it when it ends.
@@ -622,6 +676,7 @@ impl AppService {
             started_at,
             completed_at: None,
             messages: vec![opening.clone()],
+            word: None,
         };
         self.database.create_session(
             &session,
@@ -673,6 +728,7 @@ impl AppService {
             started_at,
             completed_at: None,
             messages: vec![opening.clone()],
+            word: None,
         };
         self.database.create_session(
             &session,
@@ -685,6 +741,41 @@ impl AppService {
                 strengths: plan.strengths,
             },
         )?;
+        Ok(session)
+    }
+
+    /// Word of the day: a short talk on today's word (`crate::words`), as
+    /// Home's daily card offers it. Its opening is the app's own line, so it
+    /// opens at once. It aims at no skill, and goes past no lesson: as on the
+    /// phone, it is practice of another kind, and Ella's lessons are not
+    /// counted by it.
+    pub fn start_word(&self) -> EllaResult<Session> {
+        let learner = self.database.signed_in_learner()?.ok_or_else(|| {
+            EllaError::Conflict("Tell Ella your name before starting a conversation.".into())
+        })?;
+        let (position, _) = self.placement()?;
+        let talk = words::plan_word(&position.level, &self.database.words_before(&today())?);
+        let started_at = now();
+        let opening = Message {
+            id: Uuid::new_v4().to_string(),
+            speaker: Speaker::Ella,
+            content: words::opening_line(&talk, first_name(&learner.name)),
+            turn: 0,
+            created_at: started_at.clone(),
+        };
+        let topic = words::topic();
+        let session = Session {
+            id: Uuid::new_v4().to_string(),
+            topic_id: topic.id,
+            topic_label: topic.label,
+            status: "active".into(),
+            started_at,
+            completed_at: None,
+            messages: vec![opening.clone()],
+            word: Some(talk.shown()),
+        };
+        self.database
+            .create_word_session(&session, &opening, &position.level, &words::keep(&talk))?;
         Ok(session)
     }
 
@@ -712,6 +803,7 @@ impl AppService {
             started_at,
             completed_at: None,
             messages: vec![opening.clone()],
+            word: None,
         };
         self.database.create_session(
             &session,
@@ -791,6 +883,7 @@ impl AppService {
             started_at,
             completed_at: None,
             messages: vec![opening.clone()],
+            word: None,
         };
         let waiting = self.lesson_waiting(&position)?;
         self.database.create_chore_session(
@@ -841,8 +934,11 @@ impl AppService {
         }))
     }
 
+    /// A talk, messages and all; a word talk with its word, for its card.
     pub fn get_session(&self, id: &str) -> EllaResult<Session> {
-        self.database.session(id)
+        let mut session = self.database.session(id)?;
+        session.word = self.word_talk_of(id)?.map(|talk| talk.shown());
+        Ok(session)
     }
 
     pub fn send_text_turn(&self, session_id: &str, text: &str) -> EllaResult<TurnResult> {
@@ -1298,6 +1394,11 @@ impl AppService {
             Some(level) => level,
             None => self.placement()?.0.level,
         };
+        // Word of the day is the app's own talk, with its own way through.
+        if curriculum_meta.kind.as_deref() == Some(WORD_KIND) {
+            let kept = curriculum_meta.word_talk.as_deref();
+            return self.run_word_turn(&session, &learner, turn, &level, kept, clean, trace);
+        }
         // A chore session carries a character, a setting and a hidden brief; a
         // free-topic session carries none of that and behaves exactly as before.
         let chore_context = self.chore_context_for(session_id, &level)?;
@@ -1584,6 +1685,205 @@ impl AppService {
         })
     }
 
+    /// One answer in a Word of the day talk (Ella Mobile's `wordTurn`). The
+    /// talk moves on here, never in the model: an example to follow for a
+    /// learner who does not know, the question again when Ella could not make
+    /// out the answer, else her words on the answer and her own question
+    /// about it, or the word's next question. Once the last is answered, the
+    /// talk closes, as a free talk does on its last turn.
+    ///
+    /// Her words, and her judgement of whether they knew the word, are the
+    /// cloud's model's (`TutorEngine::cloud_json`), and without it her own
+    /// fixed lines (`crate::words`). Nothing is asked of the laptop's model.
+    /// A flagged answer, or a concern the model heard, leaves the talk where
+    /// it was.
+    #[allow(clippy::too_many_arguments)]
+    fn run_word_turn(
+        &self,
+        session: &Session,
+        learner: &Learner,
+        turn: u32,
+        level: &str,
+        kept: Option<&str>,
+        clean: &str,
+        trace: &mut LatencyTrace,
+    ) -> EllaResult<TurnResult> {
+        trace.record_talk(&session.id, WORD_KIND, words::WORD_TOPIC_ID, level, turn);
+        let talk = kept
+            .and_then(words::read_word_talk)
+            .unwrap_or_else(|| words::plan_word(level, &[]));
+        let entry = talk.entry();
+        let name = first_name(&learner.name);
+        let said_before: Vec<&str> = session
+            .messages
+            .iter()
+            .filter(|message| message.speaker == Speaker::Ella)
+            .map(|message| message.content.as_str())
+            .collect();
+        let concern = || {
+            trace_note_concern();
+            safety::concern_line(&said_before, learner.age)
+        };
+        let mut timed = None;
+        let mut ask_cloud = |messages: Vec<serde_json::Value>, why: &'static str| {
+            let answer = self.engine.cloud_json(&messages, why)?;
+            timed = Some((answer.ttft_ms, answer.ms));
+            Some(answer.value)
+        };
+        trace.record_llm_start();
+        let (after, reply) = if safety::flagged(clean) {
+            // As in any talk: the model never hears it, and the question it
+            // dodged comes again.
+            trace.stage("llm:skipped", "learner turn flagged by the content filter");
+            trace.note("flagged");
+            (talk.clone(), safety::redirect_reply(Some(talk.current_ask())))
+        } else if talk.meaning != Meaning::Told {
+            // Whether they know the word comes first: her next line tells them
+            // what it means and asks her first question, or after a bare yes
+            // asks them to say what it means. One who says they do not know
+            // needs no model to judge it.
+            let scripted = words::scripted_knowing(clean);
+            let judged = (scripted != Knew::No)
+                .then(|| {
+                    let explaining = talk.meaning == Meaning::Explain;
+                    ask_cloud(word_prompt::knowing_messages(entry, explaining, clean), "word_knowing")
+                })
+                .flatten()
+                .and_then(|value| word_prompt::read_knowing(&value));
+            match judged {
+                Some(Knowing::Concern) => (talk.clone(), concern()),
+                Some(Knowing::Knew(knew)) => words::after_knowing(&talk, knew),
+                None => words::after_knowing(&talk, scripted),
+            }
+        } else {
+            // Ella's words come first, but for a learner who said they do not
+            // know: whether she could make out the answer decides where the
+            // talk goes.
+            let step = talk.step();
+            let stuck = words::stuck_on(clean);
+            let reaction = (!stuck)
+                .then(|| {
+                    let messages = word_prompt::word_messages(
+                        entry,
+                        step,
+                        level,
+                        talk.next_question(),
+                        &session.messages,
+                        clean,
+                    );
+                    ask_cloud(messages, "word")
+                })
+                .flatten()
+                .and_then(|value| word_prompt::read_word_reaction(&value, step))
+                // A line she must not say is her own fixed one instead.
+                .filter(|reaction| match reaction {
+                    Reaction::Said { text, ask, .. } => {
+                        !safety::flagged(text) && !ask.as_deref().is_some_and(safety::flagged)
+                    }
+                    Reaction::Unclear | Reaction::Concern => true,
+                });
+            let scripted = || words::scripted_reaction(entry, clean, step);
+            let (answer, reaction) = match reaction {
+                Some(Reaction::Concern) => return self.finish_word_turn(session, turn, clean, talk, concern(), trace, timed),
+                // Unclear needs no words of hers: the question comes again.
+                // Should the answer hold the word after all, her fixed ones do.
+                Some(Reaction::Unclear) => (
+                    WordAnswer { said: clean.into(), unclear: true, ..WordAnswer::default() },
+                    scripted(),
+                ),
+                Some(Reaction::Said { text, used, ask }) => (
+                    WordAnswer { said: clean.into(), unclear: false, used, ask },
+                    text,
+                ),
+                None => (
+                    WordAnswer { said: clean.into(), ..WordAnswer::default() },
+                    if stuck { String::new() } else { scripted() },
+                ),
+            };
+            let (next, step) = words::after_answer(&talk, &answer);
+            let line = words::move_line(&step, &reaction, entry, name);
+            (next, line)
+        };
+        self.finish_word_turn(session, turn, clean, after, reply, trace, timed)
+    }
+
+    /// The rest of a word talk's turn, once Ella's line is settled: the turn
+    /// and where the talk is after it are kept together, she says it, and on
+    /// the last question's answer the talk closes.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_word_turn(
+        &self,
+        session: &Session,
+        turn: u32,
+        clean: &str,
+        after: WordTalk,
+        reply: String,
+        trace: &mut LatencyTrace,
+        timed: Option<(f64, f64)>,
+    ) -> EllaResult<TurnResult> {
+        let (ttft_ms, completion_ms) = timed.unwrap_or((0.0, 0.0));
+        if timed.is_none() {
+            trace.note("word_scripted");
+        }
+        trace.record_llm(ttft_ms, completion_ms);
+        trace.stage(
+            "llm:done",
+            &format!("ttft={ttft_ms:.1} ms completion={completion_ms:.1} ms | word talk reply=\"{reply}\""),
+        );
+        trace.record_words(clean, &reply);
+        let created_at = now();
+        let learner_message = Message {
+            id: Uuid::new_v4().to_string(),
+            speaker: Speaker::Learner,
+            content: safety::censor(clean),
+            turn,
+            created_at: created_at.clone(),
+        };
+        let ella_message = Message {
+            id: Uuid::new_v4().to_string(),
+            speaker: Speaker::Ella,
+            content: reply.clone(),
+            turn,
+            created_at,
+        };
+        self.database.persist_word_turn(
+            &session.id,
+            &learner_message,
+            &ella_message,
+            trace.spoken_ms(),
+            &words::keep(&after),
+        )?;
+        let speech = self.turn_speech(&session.id, turn, Some(&reply));
+        let sink = speech.clone().map(|speech| speech as Arc<dyn SpeechSink>);
+        let (audio, speech_words, speech_phonemes, streamed_segments) = self.speak_on_clock(&reply, sink, trace);
+        trace.record_tts_sentences(streamed_segments);
+        if streamed_segments > 0 {
+            if let Some(sent) = speech.as_ref().and_then(|speech| speech.first_sent()) {
+                trace.record_speech(sent);
+            }
+        }
+        trace.record_talk_over(after.done);
+        let session_summary = if after.done {
+            Some(self.complete_session(&session.id)?)
+        } else {
+            None
+        };
+        Ok(TurnResult {
+            learner_message,
+            ella_message,
+            correction: gentle_correction(clean),
+            suggested_complete: after.done,
+            session_summary,
+            audio,
+            timings: None,
+            ledger: None,
+            signal: None,
+            speech_words,
+            speech_phonemes,
+            streamed_segments,
+        })
+    }
+
     /// Say the reply with the learner waiting: through `speech` sentence by
     /// sentence where Piper stays resident, as one recording where it does not
     /// or there is no `speech` to send it to.
@@ -1656,6 +1956,7 @@ impl AppService {
             .remove(session_id);
         let answers = answers_in(&session);
         let turns = answers.len() as u32;
+        let word = self.word_talk_of(session_id)?;
         let headline = if turns >= 3 {
             "You kept that conversation going".into()
         } else {
@@ -1666,6 +1967,9 @@ impl AppService {
         // at them would read as though it had.
         let encouragement = if turns == 0 {
             "Say a few words next time and it counts. Come back and talk to Ella again.".into()
+        } else if word.is_some() {
+            // Not one of their conversations: it counts for the streak alone.
+            "Word of the day counts for your streak. Come back tomorrow for a new word.".into()
         } else {
             // The same figure the profile shows: the learner's finished talks
             // over their whole history, this one included.
@@ -1682,6 +1986,8 @@ impl AppService {
         let placement = self.database.session_curriculum(session_id)?.kind.as_deref() == Some(PLACEMENT_KIND);
         let went_well = if short || placement {
             Vec::new()
+        } else if let Some(talk) = &word {
+            words::went_well(talk, &answers)
         } else {
             notes::went_well(&answers, chore.as_ref())
         };
@@ -1694,6 +2000,7 @@ impl AppService {
             short,
             chore,
             went_well,
+            word: word.map(|talk| talk.shown()),
         })
     }
 
@@ -1916,14 +2223,22 @@ impl AppService {
         }
         let answers = answers_in(&session).len() as u32;
         let placement = meta.kind.as_deref() == Some(PLACEMENT_KIND);
+        let word = meta.kind.as_deref() == Some(WORD_KIND);
         let mut trace = AssessmentTrace::begin(
             session_id,
-            if placement { PLACEMENT_KIND } else { "talk" },
+            match (placement, word) {
+                (true, _) => PLACEMENT_KIND,
+                (_, true) => WORD_KIND,
+                _ => "talk",
+            },
             answers,
             since(session.completed_at.as_deref()),
         );
         let kept = if placement {
             self.assess_placement(&learner, &session)
+        } else if word {
+            let talk = meta.word_talk.as_deref().and_then(words::read_word_talk);
+            self.assess_word(&session, talk, scored, &mut trace)
         } else {
             let lesson = meta.kind.as_deref() == Some(LESSON_KIND);
             self.assess_talk(&session, meta.target_skill, lesson, answers > 0, scored, &mut trace)
@@ -2006,6 +2321,91 @@ impl AppService {
                 counted: false,
             })
         })
+    }
+
+    /// A Word of the day talk's assessment. It is never scored, so it moves
+    /// nobody on and is not counted towards Ella's lessons: as on the phone,
+    /// it counts for the streak alone. Its notes are a talk's, in two parts:
+    /// what went well, kept at once and handed to `scored`, then a fix, which
+    /// only the cloud's model looks for (`TutorEngine::correct_online`), so
+    /// the laptop's is left as ready for the next talk as it was. Never a fix
+    /// that only puts the word where the app heard another
+    /// (`words::misheard_word`).
+    fn assess_word(
+        &self,
+        session: &Session,
+        talk: Option<WordTalk>,
+        scored: &dyn Fn(&Assessment),
+        trace: &mut AssessmentTrace,
+    ) -> EllaResult<String> {
+        let answers = answers_in(session);
+        let notes = (!notes::too_short(&answers)).then(|| TalkNotes {
+            went_well: match &talk {
+                Some(talk) => words::went_well(talk, &answers),
+                None => notes::went_well(&answers, None),
+            },
+            fix: None,
+            more_fixes: Vec::new(),
+            checked: false,
+        });
+        let has_notes = notes.is_some();
+        let session_id = session.id.clone();
+        let committed = Cell::new(false);
+        let committed_here = &committed;
+        let kept = self.database.commit_assessment(&session.id, move |store| {
+            committed_here.set(true);
+            let placed = store.placed()?;
+            let position = store.position()?.and_then(known_position).unwrap_or_else(curriculum::start);
+            let known = progress::by_key(&store.skill_progress(&keys_of(&progress::step_skills(&position)))?);
+            let assessment = Assessment {
+                session_id,
+                kind: WORD_KIND.into(),
+                standing: standing_at(&position, placed, &known),
+                closing: None,
+                advanced: None,
+                skills: Vec::new(),
+                aim: None,
+                scored: false,
+                notes,
+            };
+            Ok(AssessmentWrite {
+                skills: Vec::new(),
+                position: None,
+                placed: false,
+                assessment: to_json(&assessment)?,
+                counted: false,
+            })
+        })?;
+        trace.scored();
+        if !committed.get() || !has_notes {
+            return Ok(kept);
+        }
+        let assessment = read_assessment(&kept)?;
+        scored(&assessment);
+
+        let checked = notes::answers_to_check(&answers);
+        trace.checked(checked.len());
+        let Some(corrected) = self.engine.correct_online(&checked) else {
+            return Ok(kept);
+        };
+        let entry = talk.as_ref().map(WordTalk::entry);
+        let mut fixes = notes::fixes_from(&checked, &corrected.lines, notes::MAX_FIXES)
+            .into_iter()
+            .filter(|fix| !entry.is_some_and(|entry| words::misheard_word(fix, entry)));
+        let (fix, more_fixes) = (fixes.next(), fixes.collect());
+        let notes = assessment
+            .notes
+            .clone()
+            .map(|notes| TalkNotes { fix, more_fixes, checked: true, ..notes });
+        let finished = to_json(&Assessment { notes, ..assessment })?;
+        match self.database.finish_assessment(&session.id, &kept, &finished) {
+            Ok(true) => Ok(finished),
+            Ok(false) => Ok(self.database.session_curriculum(&session.id)?.assessment.unwrap_or(kept)),
+            Err(error) => {
+                eprintln!("[recap] keeping the fix for {}: {error}", session.id);
+                Ok(kept)
+            }
+        }
     }
 
     /// A talk's assessment, kept in two parts. The scores, what went well and
@@ -2525,6 +2925,12 @@ fn find_topic(id: &str) -> EllaResult<Topic> {
         .ok_or_else(|| EllaError::Validation("Choose one of the available topics.".into()))
 }
 
+/// A concern the model heard in a word talk, for the turn's telemetry: the
+/// words are never kept, only that one was heard.
+fn trace_note_concern() {
+    crate::telemetry::note("concern");
+}
+
 fn gentle_correction(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
     if lower.contains("i goed") {
@@ -2985,6 +3391,7 @@ mod tests {
             "standing",
             "tomorrow_topic",
             "topics",
+            "word",
         ];
         let service = service();
         let fresh = serde_json::to_value(service.bootstrap().unwrap()).unwrap();
@@ -2993,6 +3400,7 @@ mod tests {
         assert_eq!(fresh["lesson"], serde_json::Value::Null);
         assert_eq!(fresh["saved_learner"], serde_json::Value::Null);
         assert_eq!(fresh["standing"], serde_json::Value::Null);
+        assert_eq!(fresh["word"], serde_json::Value::Null, "signed out: no word of the day");
         assert_eq!(
             fresh["progress"],
             serde_json::json!({
@@ -5369,5 +5777,448 @@ mod telemetry_tests {
         let last = last_turn();
         assert_eq!(last["turn"], FREE_TOPIC_TURNS);
         assert_eq!(last["talk_over"], true);
+    }
+}
+
+#[cfg(test)]
+mod word_talk_tests {
+    use super::*;
+    use crate::{
+        domain::{Corrections, EngineStatus},
+        infrastructure::{
+            database::Database,
+            engines::{CloudJson, DemoEngine, SynthesizedAudio},
+            stt::Transcription,
+        },
+    };
+    use serde_json::{json, Value};
+    use std::collections::VecDeque;
+
+    /// What the cloud's model was asked, in order, and why.
+    type Asked = Arc<Mutex<Vec<(&'static str, Vec<Value>)>>>;
+
+    /// The cloud's model as a word talk sees it: it answers each ask with
+    /// the next of `answers` (`None`, no answer in time), and keeps what it
+    /// was asked. Anything that would need the laptop's model fails the test.
+    struct Cloud {
+        answers: Mutex<VecDeque<Option<Value>>>,
+        asked: Asked,
+        corrected: Option<Vec<String>>,
+    }
+
+    impl TutorEngine for Cloud {
+        fn status(&self) -> EngineStatus {
+            DemoEngine.status()
+        }
+        fn opening(&self, topic: &Topic, learner_name: &str, _: &Pitch) -> EllaResult<String> {
+            Ok(format!("Hi {learner_name}, let us talk about {}.", topic.label))
+        }
+        fn reply(&self, _: &TutorRequest) -> EllaResult<GeneratedReply> {
+            panic!("a word talk never asks for a talk's reply");
+        }
+        fn correct(&self, _: &[&str], _: &dyn Fn(&[String]) -> bool) -> EllaResult<Option<Corrections>> {
+            panic!("a word talk never asks the laptop's model for its fix");
+        }
+        fn hold_for_assessment(&self) -> Option<crate::infrastructure::model_queue::Held> {
+            panic!("a word talk's recap never keeps the laptop's model");
+        }
+        fn correct_online(&self, answers: &[&str]) -> Option<Corrections> {
+            let lines = self.corrected.clone()?;
+            assert_eq!(lines.len(), answers.len(), "a line for each answer checked");
+            Some(Corrections { lines, cloud: true })
+        }
+        fn cloud_json(&self, messages: &[Value], why: &'static str) -> Option<CloudJson> {
+            self.asked.lock().unwrap().push((why, messages.to_vec()));
+            let value = self.answers.lock().unwrap().pop_front().expect("an answer for every ask")?;
+            Some(CloudJson { value, ttft_ms: 900.0, ms: 1_200.0 })
+        }
+        fn uses_native_stt(&self) -> bool {
+            false
+        }
+        fn transcribe(&self, _: &[i16], _: u32) -> EllaResult<Transcription> {
+            Err(EllaError::Engine("no microphone in tests".into()))
+        }
+        fn synthesize(&self, _: &str) -> EllaResult<SynthesizedAudio> {
+            DemoEngine.synthesize("")
+        }
+    }
+
+    fn cloud(answers: Vec<Option<Value>>, corrected: Option<Vec<&str>>) -> (AppService, Asked) {
+        let asked: Asked = Arc::default();
+        let engine = Cloud {
+            answers: Mutex::new(answers.into()),
+            asked: Arc::clone(&asked),
+            corrected: corrected.map(|lines| lines.into_iter().map(str::to_owned).collect()),
+        };
+        let service = AppService::new(Database::in_memory().unwrap(), Box::new(engine));
+        service.save_learner("Asha Rao", Some(14)).unwrap();
+        (service, asked)
+    }
+
+    fn demo() -> AppService {
+        let service = AppService::new(Database::in_memory().unwrap(), Box::new(DemoEngine));
+        service.save_learner("Asha Rao", Some(14)).unwrap();
+        service
+    }
+
+    fn reply(service: &AppService, session_id: &str, answer: &str) -> TurnResult {
+        service.send_text_turn(session_id, answer).unwrap()
+    }
+
+    fn said(result: &TurnResult) -> &str {
+        &result.ella_message.content
+    }
+
+    const BRAVE_MEANS: &str = "Brave means you do something hard or scary, even when you feel afraid.";
+
+    #[test]
+    fn the_talk_opens_at_once_on_todays_word_and_says_it_on_its_card() {
+        let (service, asked) = cloud(Vec::new(), None);
+        let session = service.start_word().unwrap();
+        assert_eq!(session.topic_id, "word-of-the-day");
+        assert_eq!(session.topic_label, "Word of the day");
+        assert_eq!(
+            session.messages[0].content,
+            "Hi Asha! Today's word is brave. Do you know what it means?",
+            "the learner's first name, and a new learner's level gets the middle list"
+        );
+        let word = session.word.clone().expect("a word talk carries its word");
+        assert_eq!((word.text.as_str(), word.meaning.as_str()), ("brave", BRAVE_MEANS));
+        assert!(word.forms.iter().any(|form| form == "bravely"));
+        assert_eq!(service.get_session(&session.id).unwrap().word, Some(word));
+        assert!(asked.lock().unwrap().is_empty(), "no model to open it");
+        assert!(service.speak_word(&session.id).is_ok());
+
+        let talk = service.start_session("street-food").unwrap();
+        assert_eq!(talk.word, None);
+        assert_eq!(service.get_session(&talk.id).unwrap().word, None);
+        assert!(service.speak_word(&talk.id).is_err(), "no word in a talk");
+        let window = serde_json::to_value(service.get_session(&talk.id).unwrap()).unwrap();
+        assert!(window.get("word").is_none(), "any other talk reads as it did");
+    }
+
+    #[test]
+    fn with_the_cloud_ella_judges_the_meaning_reacts_and_asks_one_question_of_her_own() {
+        let (service, asked) = cloud(
+            vec![
+                Some(json!({"concern": false, "knew": "close"})),
+                Some(json!({"understood": true, "used": true, "reaction": "The dentist! You were really brave.", "question": "Were you scared at first?"})),
+                Some(json!({"understood": true, "used": false, "reaction": "Being a little scared is normal."})),
+                Some(json!({"understood": true, "used": true, "reaction": "Your grandmother sounds strong."})),
+                Some(json!({"understood": true, "used": true, "reaction": "What a lovely sentence."})),
+            ],
+            Some(vec![
+                "It means not scared.",
+                "At the dentist I was brave.",
+                "Yes, a little.",
+                "My grandmother is brave.",
+                "My friend was brave on the stage.",
+            ]),
+        );
+        let session = service.start_word().unwrap();
+        let first = reply(&service, &session.id, "It means not scared");
+        assert_eq!(
+            said(&first),
+            format!("Close! {BRAVE_MEANS} For example: My little brother was brave when he got his injection. When were you brave?")
+        );
+        assert_eq!(said(&reply(&service, &session.id, "At the dentist I was brave")), "The dentist! You were really brave. Were you scared at first?");
+        assert_eq!(said(&reply(&service, &session.id, "Yes a little")), "Being a little scared is normal. Who is the bravest person you know?");
+        assert_eq!(said(&reply(&service, &session.id, "My grandmother is brave")), "Your grandmother sounds strong. Say a sentence with brave.");
+        let last = reply(&service, &session.id, "My friend was brave on stage");
+        assert_eq!(said(&last), "What a lovely sentence. Well done, Asha! Try to use brave today.");
+        assert!(last.suggested_complete);
+        let summary = last.session_summary.expect("the last answer closes the talk");
+        assert_eq!(summary.word.as_ref().map(|word| word.text.as_str()), Some("brave"));
+        assert_eq!(summary.encouragement, "Word of the day counts for your streak. Come back tomorrow for a new word.");
+        assert_eq!(summary.went_well[0], "Used brave in your own sentence");
+        assert!(service.send_text_turn(&session.id, "Bye").is_err(), "closed");
+
+        let asked = asked.lock().unwrap();
+        let whys: Vec<&str> = asked.iter().map(|(why, _)| *why).collect();
+        assert_eq!(whys, ["word_knowing", "word", "word", "word", "word"]);
+        let system = |index: usize| asked[index].1[0]["content"].as_str().unwrap().to_owned();
+        let user = |index: usize| asked[index].1[1]["content"].as_str().unwrap().to_owned();
+        assert!(system(0).contains("You asked: Do you know what it means?"));
+        assert_eq!(user(0), "Their answer: It means not scared");
+        assert!(system(1).contains("Never ask \"Who is the bravest person you know?\": you ask that next."));
+        assert!(system(1).contains("- question: your one question."), "her own question, after the first");
+        assert!(user(1).starts_with("The talk so far:\nElla: Hi Asha! Today's word is brave. Do you know what it means?\nLearner: It means not scared\nElla: Close!"));
+        assert!(user(1).ends_with("\n\nTheir answer: At the dentist I was brave"));
+        assert!(system(2).contains("your next question \"Who is the bravest person you know?\" comes after your words"));
+        assert!(!system(2).contains("- question: your one question."), "only one of her own");
+        assert!(system(4).contains("They have just said a sentence of their own with brave"));
+        assert!(
+            asked.iter().skip(1).all(|(_, messages)| messages[0]["content"].as_str().unwrap().contains("CEFR A2")),
+            "her words keep to the level the talk began at"
+        );
+        drop(asked);
+
+        let assessment = service.assess_session(&session.id).unwrap();
+        assert_eq!(assessment.kind, "word");
+        assert!(!assessment.scored);
+        assert!(assessment.skills.is_empty() && assessment.advanced.is_none() && assessment.aim.is_none());
+        let notes = assessment.notes.expect("long enough for notes");
+        assert_eq!(notes.went_well[0], "Used brave in your own sentence");
+        assert!(notes.checked, "the cloud looked for a fix");
+        assert_eq!(notes.fix, Some(Fix { said: "Brave on stage".into(), better: "Brave on the stage".into() }));
+    }
+
+    #[test]
+    fn without_the_cloud_every_line_is_one_of_ellas_own() {
+        let service = demo();
+        let session = service.start_word().unwrap();
+        assert_eq!(
+            said(&reply(&service, &session.id, "It means not afraid")),
+            format!("Thank you! {BRAVE_MEANS} For example: My little brother was brave when he got his injection. When were you brave?")
+        );
+        assert_eq!(said(&reply(&service, &session.id, "I was brave at the dentist")), "You used brave! Who is the bravest person you know?");
+        assert_eq!(said(&reply(&service, &session.id, "My mother")), "Thank you! Say a sentence with brave.");
+        let last = reply(&service, &session.id, "My friend is brave");
+        assert_eq!(said(&last), "You used brave! Well done, Asha! Try to use brave today.");
+        assert!(last.session_summary.is_some());
+        let assessment = service.assess_session(&session.id).unwrap();
+        let notes = assessment.notes.unwrap();
+        assert!(!notes.checked, "no model looked for a fix, so none is claimed to be missing");
+        assert_eq!(notes.fix, None);
+    }
+
+    #[test]
+    fn a_learner_who_does_not_know_hears_it_explained_gets_an_example_and_then_ella_moves_on() {
+        let service = demo();
+        let session = service.start_word().unwrap();
+        assert!(said(&reply(&service, &session.id, "I don't know")).starts_with("No problem! Brave means"));
+        assert_eq!(said(&reply(&service, &session.id, "I don't know")), "For example: I was brave at the dentist. Now you try!");
+        assert_eq!(said(&reply(&service, &session.id, "dunno")), "That's okay. Who is the bravest person you know?");
+    }
+
+    #[test]
+    fn a_bare_yes_is_asked_what_it_means_and_the_judge_hears_that_it_was() {
+        let (service, asked) = cloud(
+            vec![Some(json!({"knew": "yes"})), Some(json!({"knew": "right"}))],
+            None,
+        );
+        let session = service.start_word().unwrap();
+        assert_eq!(said(&reply(&service, &session.id, "Yes")), "Great! Tell me what it means.");
+        assert_eq!(
+            said(&reply(&service, &session.id, "Not scared of hard things")),
+            format!("Yes, exactly! {BRAVE_MEANS} When were you brave?")
+        );
+        let asked = asked.lock().unwrap();
+        assert!(asked[1].1[0]["content"].as_str().unwrap().contains("They said yes, and you asked: Tell me what it means."));
+    }
+
+    #[test]
+    fn a_concern_gets_ellas_fixed_line_on_help_and_the_talk_waits_where_it_was() {
+        let (service, _) = cloud(
+            vec![
+                Some(json!({"concern": true, "knew": "unclear"})),
+                Some(json!({"knew": "wrong"})),
+                Some(json!({"concern": true})),
+            ],
+            None,
+        );
+        let session = service.start_word().unwrap();
+        assert_eq!(said(&reply(&service, &session.id, "I want to hurt myself")), safety::CONCERN_LINE);
+        assert!(said(&reply(&service, &session.id, "It means happy")).starts_with("Not quite! Brave means"));
+        let again = reply(&service, &session.id, "Nobody listens to me");
+        assert!(said(&again).starts_with("Thank you for telling me more."), "help once, then she listens");
+        assert!(again.session_summary.is_none());
+    }
+
+    #[test]
+    fn a_flagged_answer_never_reaches_the_model_and_the_question_comes_again() {
+        let (service, asked) = cloud(Vec::new(), None);
+        let session = service.start_word().unwrap();
+        let flagged = reply(&service, &session.id, "f u c k you");
+        assert_eq!(said(&flagged), "That's not something I talk about. Do you know what it means?");
+        assert_ne!(flagged.learner_message.content, "f u c k you", "kept censored");
+        assert!(asked.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_answer_the_model_could_not_make_out_is_asked_again_and_its_line_is_never_one_she_must_not_say() {
+        let (service, _) = cloud(
+            vec![
+                Some(json!({"knew": "right"})),
+                Some(json!({"understood": false, "reaction": ""})),
+                Some(json!({"understood": true, "reaction": "That is shit."})),
+                None,
+            ],
+            None,
+        );
+        let session = service.start_word().unwrap();
+        reply(&service, &session.id, "Not afraid");
+        assert_eq!(said(&reply(&service, &session.id, "fish table go")), "Sorry, I didn't catch that. When were you brave?");
+        assert_eq!(said(&reply(&service, &session.id, "At school")), "Thank you! Who is the bravest person you know?");
+        assert_eq!(
+            said(&reply(&service, &session.id, "My grandmother is brave")),
+            "You used brave! Say a sentence with brave.",
+            "no answer from the cloud in time: her own line"
+        );
+    }
+
+    #[test]
+    fn home_offers_todays_word_until_it_is_played_and_a_new_one_the_next_day() {
+        let service = demo();
+        let word = |service: &AppService| service.bootstrap().unwrap().word.map(|word| word.text);
+        assert_eq!(word(&service).as_deref(), Some("brave"));
+        // Opened and left without a word: not played.
+        let unanswered = service.start_word().unwrap();
+        assert_eq!(word(&service).as_deref(), Some("brave"));
+        let played = service.start_word().unwrap();
+        reply(&service, &played.id, "Not afraid");
+        assert_eq!(word(&service), None, "the card leaves Home once it is played");
+        let again = service.start_word().unwrap();
+        assert_eq!(again.word.unwrap().text, "brave", "the same word all day");
+
+        for session in [&unanswered.id, &played.id, &again.id] {
+            service.database.backdate(session, 1).unwrap();
+        }
+        assert_eq!(word(&service).as_deref(), Some("patient"), "the next day, the next word");
+        assert_eq!(service.start_word().unwrap().word.unwrap().text, "patient");
+    }
+
+    #[test]
+    fn a_word_talk_counts_for_the_streak_and_changes_nothing_else() {
+        let service = demo();
+        let before = service.bootstrap().unwrap();
+        let cadence = service.database.lesson_cadence().unwrap();
+        let session = service.start_word().unwrap();
+        for answer in ["It means not afraid", "I was brave at the dentist", "My mother", "My friend is brave"] {
+            reply(&service, &session.id, answer);
+        }
+        let assessment = service.assess_session(&session.id).unwrap();
+        assert_eq!(assessment.kind, "word");
+        assert!(!assessment.scored);
+        assert_eq!(assessment.standing, before.standing.clone().unwrap(), "nobody moved on");
+
+        let after = service.bootstrap().unwrap();
+        let today = &after.progress.days[0];
+        assert_eq!((today.answers, today.talks), (4, 0), "the streak counts it; it is no talk");
+        assert_eq!(after.progress.talks_finished, 0, "no talk's badge for it");
+        assert!(after.progress.talks.is_empty() && after.progress.finished_topics.is_empty());
+        assert_eq!(after.topics, before.topics, "Home offers the same topics");
+        assert_eq!(after.tomorrow_topic, before.tomorrow_topic);
+        assert!(service.database.recent_topics(crate::topics::RECENT_TOPICS).unwrap().is_empty());
+        assert_eq!(service.database.lesson_cadence().unwrap(), cadence, "not counted towards a lesson");
+        assert!(service.database.recent_targets().unwrap().is_empty(), "it aimed at no skill");
+        assert_eq!(after.word, None);
+    }
+
+    /// Three word talks through the cloud's model, at three levels, printing
+    /// each line and how long its turn took, as a learner would have them:
+    ///
+    ///   ELLA_CLOUD=on ELLA_CLOUD_TOKEN_FILE=<scratch>/install-token \
+    ///   ELLA_LLM_BASE_URL=http://127.0.0.1:9/v1 \
+    ///     cargo test --lib live_cloud_teaches_word_of_the_day -- --ignored --nocapture
+    ///
+    /// The laptop's model is pointed nowhere: a word talk never asks it.
+    #[test]
+    #[ignore]
+    fn live_cloud_teaches_word_of_the_day() {
+        use crate::infrastructure::engines::{EnginePaths, LocalEngine};
+        std::env::set_var("ELLA_PIPER_DAEMON", "0");
+        let talks: [(&str, &[&str]); 3] = [
+            (
+                "A1",
+                &[
+                    "Happy is when you smile",
+                    "My friends make me happy",
+                    "Yes when we play cricket",
+                    "I am happy on Sunday",
+                    "My mother is happy today",
+                ],
+            ),
+            (
+                "A2",
+                &[
+                    "Brave means not afraid",
+                    "I was brave when I went to the hospital alone",
+                    "Yes, a little bit scared",
+                    "My grandmother is very brave",
+                    "My friend was brave on stage",
+                ],
+            ),
+            (
+                "B2",
+                &[
+                    "I don't know",
+                    "My grandfather is resilient, he rebuilt his shop after the flood",
+                    "He lost everything but he started again",
+                    "Hard times make people resilient",
+                    "I was resilient after I failed my exam last year",
+                ],
+            ),
+        ];
+        let mut waits = Vec::new();
+        for (level, answers) in talks {
+            let service = AppService::new(
+                Database::in_memory().unwrap(),
+                Box::new(LocalEngine::from_environment(EnginePaths::default())),
+            );
+            service.save_learner("Aarav", Some(15)).unwrap();
+            let placement = service.start_placement().unwrap();
+            service.complete_session(&placement.id).unwrap();
+            service
+                .database
+                .commit_assessment(&placement.id, |_| {
+                    Ok(crate::infrastructure::database::AssessmentWrite {
+                        skills: Vec::new(),
+                        position: Some(Position::new(level, 1)),
+                        placed: true,
+                        assessment: "null".into(),
+                        counted: false,
+                    })
+                })
+                .unwrap();
+            let session = service.start_word().unwrap();
+            println!("\n=== {level}: {} ===\nElla: {}", session.word.unwrap().text, session.messages[0].content);
+            for answer in answers.iter() {
+                let turn = service.send_text_turn(&session.id, answer).unwrap();
+                let timings = turn.timings.clone().unwrap();
+                let cloud = timings.llm_completion_ms.filter(|ms| *ms > 0);
+                waits.push(timings.total_ms);
+                println!(
+                    "Learner: {answer}\nElla ({} ms, cloud {}): {}",
+                    timings.total_ms,
+                    cloud.map_or("not asked".to_owned(), |ms| format!("{ms:.0} ms")),
+                    turn.ella_message.content
+                );
+                if turn.session_summary.is_some() {
+                    break;
+                }
+            }
+            match service.assess_session(&session.id) {
+                Ok(assessment) => println!("Recap: {:?}", assessment.notes),
+                Err(error) => println!("Recap: still open ({error})"),
+            }
+        }
+        waits.sort_unstable();
+        println!(
+            "\nturns {}: median {} ms, slowest {} ms (no speech: the cloud and the app's lines alone)",
+            waits.len(),
+            waits[waits.len() / 2],
+            waits[waits.len() - 1]
+        );
+    }
+
+    #[test]
+    fn the_word_misheard_is_never_the_recaps_fix() {
+        let (service, _) = cloud(
+            vec![
+                Some(json!({"knew": "right"})),
+                Some(json!({"understood": true, "used": true, "reaction": "School can be hard."})),
+                Some(json!({"understood": true, "used": false, "reaction": "Your grandmother sounds strong."})),
+                Some(json!({"understood": true, "used": true, "reaction": "Nice one."})),
+            ],
+            Some(vec!["I was brave at school today.", "My grandmother is brave.", "My friend was brave on stage."]),
+        );
+        let session = service.start_word().unwrap();
+        for answer in ["Not afraid", "I was brief at school today", "My grandmother is brave", "My friend was brave on stage"] {
+            reply(&service, &session.id, answer);
+        }
+        let notes = service.assess_session(&session.id).unwrap().notes.unwrap();
+        assert!(notes.checked);
+        assert_eq!(notes.fix, None, "brief for brave is the app mishearing, not the learner's mistake");
     }
 }

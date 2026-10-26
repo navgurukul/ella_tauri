@@ -58,9 +58,59 @@ pub fn redirect_reply(question: Option<&str>) -> String {
     }
 }
 
+/// For a concern the cloud's model heard in a Word of the day answer, as Ella
+/// Mobile answers one ([`concern_line`]): which kind it was is not known, so
+/// both ways to help are given.
+pub const CONCERN_LINE: &str = "I'm really sorry, and I'm glad you told me. Please talk to a \
+    trusted adult right now. You can also call Tele-MANAS on 14416, or Childline on 1098, \
+    free, any time.";
+
+/// The same for an adult learner: Childline is for children.
+pub const ADULT_CONCERN_LINE: &str = "I'm really sorry, and I'm glad you told me. Please talk \
+    to someone you trust right now. You can also call Tele-MANAS on 14416, free, any time.";
+
+/// Once Ella has pointed the learner to help, she does not say it again:
+/// these listen instead, and let the learner choose where the talk goes.
+const FOLLOW_UP_LINES: [&str; 2] = [
+    "Thank you for telling me more. I'm here and I'm listening. Would you like to keep \
+     talking about this, or talk about something else?",
+    "That's okay, take your time. The number is there whenever you need it. Shall we keep \
+     talking, or talk about something lighter?",
+];
+
+/// From this age the adult line is said; younger, or not known, the child's.
+const ADULT_AGE: u8 = 18;
+
+/// Ella's fixed line for a concern the model heard, given what she has said
+/// in the talk so far, `said`: help the first time, for the learner's `age`,
+/// and after that a line that listens rather than the same help again.
+pub fn concern_line(said: &[&str], age: Option<u8>) -> String {
+    let helped = said.iter().any(|line| *line == CONCERN_LINE || *line == ADULT_CONCERN_LINE);
+    if helped {
+        let listened = said.iter().filter(|line| FOLLOW_UP_LINES.contains(line)).count();
+        return FOLLOW_UP_LINES[listened % FOLLOW_UP_LINES.len()].to_owned();
+    }
+    if age.is_some_and(|age| age >= ADULT_AGE) {
+        ADULT_CONCERN_LINE.to_owned()
+    } else {
+        CONCERN_LINE.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_concern_points_to_help_for_the_learners_age_once_and_then_listens() {
+        assert_eq!(concern_line(&[], Some(14)), CONCERN_LINE);
+        assert_eq!(concern_line(&[], None), CONCERN_LINE);
+        assert_eq!(concern_line(&[], Some(24)), ADULT_CONCERN_LINE);
+        assert!(CONCERN_LINE.contains("Childline on 1098") && !ADULT_CONCERN_LINE.contains("Childline"));
+        let first = concern_line(&["Hi!", CONCERN_LINE], Some(14));
+        assert_eq!(first, FOLLOW_UP_LINES[0]);
+        assert_eq!(concern_line(&[CONCERN_LINE, &first], Some(14)), FOLLOW_UP_LINES[1]);
+    }
 
     #[test]
     fn catches_the_explicit_requests_from_the_real_session() {

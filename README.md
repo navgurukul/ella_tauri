@@ -416,6 +416,55 @@ the laptop alone the app says the laptop's own opening at once
 where nothing grew) each opened in 1.3-1.7 s and replied in 0.9-2.0 s, and
 each closed on its goodbye at the seventh or eighth answer.
 
+## Word of the day
+
+Home's daily card, under Today's talk, as on Ella Mobile ("TODAY'S WORD ·
+2 MIN" over the word): a short, warm talk on one new word, Ella Mobile's
+`words.ts` rule for rule in [`words.rs`](src-tauri/src/words.rs), with its 45
+words in [`shared/words.json`](shared/words.json), fifteen for each pair of
+levels (A0–A1, A2–B1, B2–C1).
+
+- **The talk.** Ella says hello and today's word, and asks whether the learner
+  knows what it means. Her next line says what it means, with an example
+  unless they knew it, and asks the first of the word's three questions; after
+  its answer she asks one short question of her own, then the other two, the
+  last for a sentence of their own, and ends on "Well done, Aarav! Try to use
+  brave today." About five answers. A learner who does not know gets an example
+  to follow, an answer she could not make out is asked again, and either a
+  second time she moves on. The last answer closes the talk, as a free talk's
+  last turn does, and the recap shows the word and what it means.
+- **The word.** Each learner goes through their list in order, a new word on
+  each day they play it: the same word all day, a word they never answered
+  waits for them, and after the last they start again with the one they had
+  longest ago. The card leaves Home once today's has been played.
+- **Only the cloud's model, never the laptop's.** Which word, which question
+  and every line around Ella's words are the app's. Online, the cloud's model
+  judges whether they knew the word and writes her few words on each answer, in
+  JSON, with the phone's own prompts word for word
+  ([`word_prompt.rs`](src-tauri/src/infrastructure/word_prompt.rs)), but that
+  the app, not a phone, writes down what they say. Offline, or when the cloud
+  gives no answer in time, she says the phone's fixed lines instead ("You used
+  brave!", or "Thank you!"), at once. The laptop's model is never asked, not
+  even for the recap's fix, which only the cloud looks for: a word talk leaves
+  its slots, warm-ups and errands exactly as they were, so the talk after it is
+  as quick as it would have been. A concern the model hears gets the phone's
+  fixed line on where to find help, and the content filter works as in any
+  talk.
+- **It counts for the streak alone**, as on the phone: never scored, it moves
+  nobody on, is no talk for the badges or This week's talks (its answers and
+  time spoken still count), does not count towards
+  Ella's lessons, never makes one overdue (and her "let's have a chat first"
+  does not stop it), and never changes the topics Home offers.
+
+Measured through the cloud on 2026-10-26 (`live_cloud_teaches_word_of_the_day`,
+three talks at A1, A2 and B2), the model's part of a turn took 1.37 s at the
+median and 2.54 s at most, over 15 turns; a turn on fixed lines takes
+milliseconds. Its reply is read whole before Piper starts on it, a sentence at
+a time. Word of the day's turns are kept in `latency.jsonl` with `talk: "word"`
+and its recaps with `kind: "word"`, and both reports keep them apart from the
+talks' latency (`telemetry:report` shows them as their own `word` rows, and the
+weekly report counts them outside its KPIs).
+
 ## Run the complete local voice POC
 
 macOS development host:
@@ -1048,6 +1097,9 @@ reply, placement check, judges ──► cloud up? ──yes──► Ella Deskt
   waits up to 1.5 s for the answer (`REPLY_LOOK`), so it goes to the cloud if
   the cloud is back, rather than to the laptop while the look comes back.
   Each change is an `ella_cloud` line in the telemetry.
+- **Word of the day** asks only the cloud: with no answer in time, Ella says her
+  own fixed line rather than ask the laptop's model ([Word of the
+  day](#word-of-the-day)).
 - **A reply** goes to the cloud while it is up, and its sentences go to Piper as
   they arrive, as the local model's do. With no first word in 5 s, or a refusal,
   the same turn goes to the laptop's model, and the time lost is counted in the
@@ -1167,7 +1219,7 @@ and one table, so v0.1.6 can still open it afterwards. The learner gains the
 avatar colour, whether they are signed out, their level and step, and whether a
 placement has read a level for them. Each session gains whether it was the
 placement chat, the skill it aimed at, the level it was pitched at and its kept
-assessment. Each answer gains how long it lasted when it was spoken
+assessment, and a Word of the day talk where it is (`word_talk`). Each answer gains how long it lasted when it was spoken
 (`spoken_ms`), empty for a typed one. The new table is `skill_mastery`, one row
 per skill a talk has been scored on. It is a new name on purpose, because the first releases' garden
 left a `skill_progress` table of its own on some laptops. `level_name` keeps

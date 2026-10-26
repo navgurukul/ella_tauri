@@ -1774,3 +1774,103 @@ describe("Ella's lessons", () => {
     }
   });
 });
+
+describe("Word of the day", () => {
+  beforeEach(() => window.localStorage.clear());
+
+  const BRAVE = {
+    text: "brave",
+    meaning: "Brave means you do something hard or scary, even when you feel afraid.",
+    forms: ["brave", "braves", "bravely", "bravery"],
+  };
+
+  /** Home as the backend draws it while today's word waits to be played, with
+   * Ella's lesson gone past when `overdue`. */
+  function withWord(overdue = false) {
+    const read = bridge.bootstrap.bind(bridge);
+    return vi.spyOn(bridge, "bootstrap").mockImplementation(async () => {
+      const snapshot = await read();
+      if (!snapshot.learner) return snapshot;
+      return {
+        ...snapshot,
+        word: BRAVE,
+        lesson: overdue
+          ? { title: "Past time words", detail: "Let's practise it together.", topic: snapshot.topics[0], overdue }
+          : null,
+      };
+    });
+  }
+
+  /** The talk the backend opens on it. */
+  function wordTalk() {
+    return vi.spyOn(bridge, "startWord").mockImplementation(async () => ({
+      id: "word-1",
+      topic_id: "word-of-the-day",
+      topic_label: "Word of the day",
+      status: "active",
+      started_at: new Date().toISOString(),
+      messages: [
+        {
+          id: "opening",
+          speaker: "ella",
+          content: "Hi Asha! Today's word is brave. Do you know what it means?",
+          turn: 0,
+          created_at: new Date().toISOString(),
+        },
+      ],
+      word: BRAVE,
+    }));
+  }
+
+  it("waits under Today's talk with the word, and opens its talk with the word on its card", async () => {
+    await bridge.saveLearner("Asha", 14);
+    const home = withWord();
+    const start = wordTalk();
+    try {
+      render(<App />);
+      await screen.findByText("Namaste, Asha!");
+      const card = screen.getByRole("button", { name: "Today’s word: brave, 2 min" });
+      expect(card).toHaveTextContent("brave");
+      expect(screen.queryByText(/Brave means/)).not.toBeInTheDocument();
+      expect(document.querySelector(".today")?.nextElementSibling).toBe(card);
+
+      fireEvent.click(card);
+      await screen.findByText("End talk");
+      expect(start).toHaveBeenCalledTimes(1);
+      expect(screen.getByText("Word of the day")).toBeInTheDocument();
+      const onCard = screen.getByRole("region", { name: "Today’s word: brave" });
+      expect(within(onCard).getByRole("button", { name: "Hear “brave”" })).toBeInTheDocument();
+      expect(screen.queryByText(/Brave means/)).not.toBeInTheDocument();
+      // Her line keeps the word bold.
+      const bold = [...document.querySelectorAll(".talk-word.is-todays-word")].map((word) => word.textContent);
+      expect(bold).toEqual(["brave."]);
+    } finally {
+      home.mockRestore();
+      start.mockRestore();
+    }
+  });
+
+  it("opens straight away even when Ella's lesson was gone past: it is practice of another kind", async () => {
+    await bridge.saveLearner("Asha", 14);
+    const home = withWord(true);
+    const start = wordTalk();
+    try {
+      render(<App />);
+      await screen.findByText("Namaste, Asha!");
+      fireEvent.click(screen.getByRole("button", { name: "Today’s word: brave, 2 min" }));
+      await screen.findByText("End talk");
+      expect(start).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText(/chat first/i)).not.toBeInTheDocument();
+    } finally {
+      home.mockRestore();
+      start.mockRestore();
+    }
+  });
+
+  it("leaves Home once today's word has been played", async () => {
+    await bridge.saveLearner("Asha", 14);
+    render(<App />);
+    await screen.findByText("Namaste, Asha!");
+    expect(screen.queryByRole("button", { name: /today’s word/i })).not.toBeInTheDocument();
+  });
+});

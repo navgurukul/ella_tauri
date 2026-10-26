@@ -161,6 +161,23 @@ pub struct Session {
     pub started_at: String,
     pub completed_at: Option<String>,
     pub messages: Vec<Message>,
+    /// On a Word of the day talk, the word its card shows; left out of every
+    /// other talk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub word: Option<WordShown>,
+}
+
+/// Today's word, as Home's daily card, the word talk's card and its recap
+/// show it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WordShown {
+    pub text: String,
+    /// What Ella says it means: only the recap shows it, since the talk opens
+    /// by asking whether the learner knows.
+    pub meaning: String,
+    /// The word as it is heard in a line, lower case: "brave", "bravely",
+    /// "bravery"; the talk shows each in bold where Ella says it.
+    pub forms: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -212,6 +229,9 @@ pub struct AppSnapshot {
     /// that lesson, and the mentor card on Talk partners offers it. `None`
     /// when she has none, and when signed out.
     pub lesson: Option<MentorLesson>,
+    /// Today's Word of the day, for Home's daily card under Today's talk.
+    /// `None` once the learner has played it today, and when signed out.
+    pub word: Option<WordShown>,
     pub engine_status: EngineStatus,
 }
 
@@ -638,6 +658,10 @@ pub struct SessionSummary {
     /// short for notes, and for the placement chat, which has none.
     #[serde(default)]
     pub went_well: Vec<String>,
+    /// On a Word of the day talk, its word, for the recap's card; left out of
+    /// every other talk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub word: Option<WordShown>,
 }
 
 /// How a ledger chore ended, for the recap's role-play band.

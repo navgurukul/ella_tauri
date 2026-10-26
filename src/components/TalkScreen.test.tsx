@@ -278,3 +278,41 @@ describe("pressing the mic once it has opened by itself", () => {
     await waitFor(() => expect(mic.stop).toHaveBeenCalledOnce());
   });
 });
+
+describe("Word of the day's card", () => {
+  const BRAVE = { text: "brave", meaning: "Brave means not afraid.", forms: ["brave", "bravely"] };
+
+  it("has Ella say the word, with her wave on its disc while she does", async () => {
+    const said = linesSaid();
+    const opened = await bridge.startSession("street-food");
+    const session = {
+      ...opened,
+      topic_id: "word-of-the-day",
+      topic_label: "Word of the day",
+      word: BRAVE,
+      messages: [{ ...opened.messages[0], content: "Hi Meera! Today's word is brave. Do you know what it means?" }],
+    };
+    const speakWord = vi.fn().mockResolvedValue({ audio: null, speech_words: [], streamed_segments: 0 });
+    (bridge as { speakWord?: unknown }).speakWord = speakWord;
+    try {
+      render(<TalkScreen session={session} onSessionChange={vi.fn()} onComplete={vi.fn()} />);
+      await finish(said[0]);
+      const disc = screen.getByRole("button", { name: "Hear “brave”" });
+      fireEvent.click(disc);
+      await waitFor(() => expect(said).toHaveLength(2));
+      expect(speakWord).toHaveBeenCalledWith(session.id);
+      expect(said[1].text).toBe("brave");
+      expect(disc).toHaveClass("is-saying");
+      await finish(said[1]);
+      expect(disc).not.toHaveClass("is-saying");
+    } finally {
+      delete (bridge as { speakWord?: unknown }).speakWord;
+    }
+  });
+
+  it("is not on any other talk", async () => {
+    await openTalk();
+    expect(screen.queryByRole("region", { name: /today’s word/i })).not.toBeInTheDocument();
+    expect(document.querySelector(".is-todays-word")).toBeNull();
+  });
+});

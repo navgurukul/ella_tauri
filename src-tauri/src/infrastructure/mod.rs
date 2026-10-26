@@ -10,3 +10,4 @@ pub mod safety;
 pub mod speech_timing;
 pub mod stt;
 pub mod windows_stt;
+pub mod word_prompt;
