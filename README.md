@@ -704,24 +704,26 @@ to this public one, and the scripts that make the report live here.
 
 1. **Upload.** Each tester names their laptop once (`lab-win-hp-02`,
    `akshat-m1pro`: never a learner's name) and, every week before Monday
-   11:00 IST, uploads the whole `latency.jsonl`, renamed `<label>.jsonl`, to
-   that repository's `inbox/` on GitHub (Add file → Upload files). The file
-   only grows, and the whole of it goes every time: nothing is counted twice.
-   The `stt-failures` recordings and `ella.sqlite3` never go.
-2. **Ingest**, on each upload, runs
-   `npm run telemetry:sanitize -- inbox/*.jsonl --data data/`. It keeps only
-   the fields [`scripts/telemetry-fields.json`](scripts/telemetry-fields.json)
-   allows, so a field the app starts writing stays behind until someone names
-   it there, and says what it left behind. Errors become their code
-   (`NO_SPEECH_DETECTED`, else `other`), and why the cloud went down one of a
-   fixed list (`could_not_connect`, `http_503`, `proxy_cap`, else `other`),
-   since a proxy's refusal carries its own words; the launch and talk IDs are hashed;
-   `topic`, `level` and `interaction_id` are dropped. Each event gets an
-   `event_id`, from its launch, time and kind, and only events not already
-   under `data/` are written, to a new `data/<week>/<ingest>.jsonl`. The raw
-   upload is kept as a 90-day Actions artifact and removed from `inbox/`.
-   It stays in that repository's history: a known compromise until the app
-   can export a sanitized file itself.
+   11:00 IST, makes a batch of their whole `latency.jsonl`, renamed
+   `<label>.jsonl`, and uploads it to that repository's `inbox/` on GitHub
+   (Add file → Upload files):
+
+   ```bash
+   npm run telemetry:sanitize -- akshat-m1pro.jsonl --batch-out out/
+   ```
+
+   The policy is applied on the laptop, so nothing it does not allow leaves
+   (see [The telemetry policy and batches](#the-telemetry-policy-and-batches)).
+   The file only grows, and the whole of it goes every time: nothing is
+   counted twice. The `stt-failures` recordings and `ella.sqlite3` never go.
+   A tester who cannot run the script uploads the raw file, as at first; it
+   stays in that repository's history, until the app makes its own batches.
+2. **Ingest**, on each upload, checks each batch as strictly as the policy
+   says (`npm run telemetry:sanitize -- --validate inbox/*.jsonl`), refusing
+   rather than fixing one that breaks it, and writes the events not already
+   under `data/` to a new `data/<week>/<ingest>.jsonl`; a raw file is
+   sanitized there instead, with `--data data/`. The upload is kept as a
+   90-day Actions artifact and removed from `inbox/`.
 3. **Report**, Mondays at 12:00 IST, runs
    `npm run telemetry:weekly -- data/ --out reports/` for the last whole week,
    Monday to Sunday in IST, commits `reports/<week>.md` and `.json`, and opens
@@ -752,7 +754,53 @@ Either script also reads a laptop's own file, to see a week locally:
 npm run telemetry:weekly -- "$HOME/Library/Application Support/org.navgurukul.ella.desktop/telemetry/latency.jsonl" --week 2026-W42
 ```
 
-`npm run test:telemetry` tests both.
+`npm run test:telemetry` tests both, and the policy.
+
+#### The telemetry policy and batches
+
+[`scripts/telemetry-fields.json`](scripts/telemetry-fields.json) is the
+policy (version 2): every field that may leave a laptop has a rule, and a
+field without one stays behind. Timings and counts must be numbers; the
+words the app picks itself (`status`, `failed_at`, `notes`) must be short
+lowercase tokens; engine and model names, versions and llama.cpp builds keep
+their own forms; `cpu` and `os` must be printable and at most 100
+characters; `power_mode` is one of Windows' four or `other`. A value that
+breaks its rule leaves as `other`, a number not at all, and each is counted.
+
+No free text leaves. An error leaves as its code: `NO_SPEECH_DETECTED`; the
+kind of failure the app names before its own words (`engine`, `database`,
+`io`, `engine_request`, `engine_response`); else `other`. Why the cloud went
+down leaves as `could_not_connect`, `http_503`, `proxy_cap` and the like,
+since a proxy's refusal carries its own words. The proxy's host leaves as
+`default` or `custom`, never the host. The launch and talk IDs are hashed;
+`topic`, `level` and `interaction_id` stay behind.
+
+What leaves, leaves as a **batch**: one JSONL file whose first line, the
+envelope (`ella_batch`), says what is in it, and whose other lines are the
+events, oldest first. Its `batch_id` is a hash of the envelope's body and
+of the events' bytes, so a batch sent again is the same batch, and one
+changed on the way is refused. The body counts the events and talks, the
+values replaced and fields with no rule, and, from the app, what the queue
+lost: events dropped and why (`queue_full`, `unreadable_line`,
+`write_failed`), and logs found reset. When a batch was sent, how many tries
+it took and how old its oldest event was are filled in each time it is sent.
+
+- **`install_id`** is 16 hex from the operating system's random generator, made
+  once and kept in `telemetry/upload/state.json` in the same write as the
+  upload cursor and `batch_seq`, so the three are lost, or kept, together;
+  never from a host name, a user name, a path or the cloud's install token.
+  A state file lost or unreadable starts a new install. A manual batch's is
+  a hash of its laptop's label.
+- **`batch_seq`** counts an install's batches from 1, given when a batch is
+  made (the last acknowledged + 1). A retry, or a restart, sends the same
+  batch with the same number; it moves on only once a batch is
+  acknowledged. So the same `batch_id` twice is a duplicate, two for one
+  number a fault, and a gap a batch that never came. A manual batch, made
+  with `--batch-out`, is 0, and is not counted in sequence.
+
+[`scripts/telemetry-vectors.json`](scripts/telemetry-vectors.json) holds what
+any implementation of the policy must do, event by event: the scripts' now,
+the app's when it makes batches itself.
 
 ## Latency on laptops
 

@@ -22,7 +22,6 @@ def load(name, module):
 
 sanitize = load("latency-sanitize.py", "latency_sanitize")
 weekly = load("latency-weekly.py", "latency_weekly")
-FIELDS = json.loads((HERE / "telemetry-fields.json").read_text(encoding="utf-8"))
 
 LAUNCH = "d0ec3333-119c-4ae0-ac10-b69071ab640a"
 
@@ -71,7 +70,7 @@ def week_of_turns(day, count, total, **extra):
 
 class Sanitizing(unittest.TestCase):
     def setUp(self):
-        self.sanitizer = sanitize.Sanitizer(FIELDS)
+        self.sanitizer = sanitize.Sanitizer()
 
     def test_keeps_only_the_allowlist_and_hashes_ids(self):
         raw = turn("2026-10-20T06:00:00+00:00", unknown_new_field="secret", machine={"on_ac": True, "hostname": "x"})
@@ -83,8 +82,8 @@ class Sanitizing(unittest.TestCase):
         self.assertEqual(clean["talk_id"], sanitize.short_hash("talk-1"))
         self.assertEqual(clean["source"], "lab-01")
         self.assertEqual(clean["total_ms"], 1000)
-        self.assertEqual(self.sanitizer.dropped["ella_turn_latency.unknown_new_field"], 1)
-        self.assertEqual(self.sanitizer.dropped["ella_turn_latency.machine.hostname"], 1)
+        self.assertEqual(self.sanitizer.unknown["ella_turn_latency.unknown_new_field"], 1)
+        self.assertEqual(self.sanitizer.unknown["ella_turn_latency.machine.hostname"], 1)
 
     def test_free_text_errors_become_codes(self):
         self.assertEqual(sanitize.error_code("NO_SPEECH_DETECTED: I couldn't hear any words"), "NO_SPEECH_DETECTED")
@@ -100,7 +99,6 @@ class Sanitizing(unittest.TestCase):
         self.assertEqual(clean["judges"], [{"judge": "score", "status": "error", "error_code": "other"}])
 
     def test_the_clouds_reasons_become_codes_and_never_its_words(self):
-        reasons = FIELDS["cloud_reasons"]
         cases = {
             "could not connect": "could_not_connect",
             "timed out": "timed_out",
@@ -117,7 +115,7 @@ class Sanitizing(unittest.TestCase):
         }
         for text, expected in cases.items():
             with self.subTest(text):
-                self.assertEqual(sanitize.reason_code(text, reasons), expected)
+                self.assertEqual(sanitize.reason_code(text), expected)
         down = {
             "event": "ella_cloud", "timestamp": "2026-10-20T06:00:00Z", "launch_id": LAUNCH, "up": False,
             "reason": "upstream_config: DeepSeek refused the request (400): messages[3] said 'hello'",
@@ -251,12 +249,32 @@ class Reporting(unittest.TestCase):
         events = week_of_turns("2026-10-20", 5, 900) + [
             turn("2026-10-20T07:00:00Z", status="error", error="NO_SPEECH_DETECTED: x")
         ]
-        sanitizer = sanitize.Sanitizer(FIELDS)
+        sanitizer = sanitize.Sanitizer()
         clean = [sanitizer.event(e, "lab-01") for e in events]
         raw_report, clean_report = self.report(events)["this"], self.report(clean)["this"]
         raw_report["volume"].pop("laptops")
         clean_report["volume"].pop("laptops")
         self.assertEqual(raw_report, clean_report)
+
+    def test_a_batch_is_read_as_its_events_from_its_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            events = [sanitize.Sanitizer().event(e) for e in week_of_turns("2026-10-20", 3, 1000)]
+            counts = {"policy_excluded_count": 0, "values_replaced": 0, "unknown_fields_dropped": 0}
+            path = Path(tmp) / "batch.jsonl"
+            path.write_bytes(sanitize.manual_batch(events, "lab-01", counts))
+            read = weekly.read_all([path])
+            self.assertEqual(len(read), 3)
+            self.assertEqual({e["install_id"] for e in read}, {sanitize.short_hash("manual:lab-01")})
+            volume = self.report(read)["this"]["volume"]
+            self.assertEqual((volume["turns"], volume["laptops"], volume["events"]), (3, 1, 3))
+
+    def test_a_launchs_installer_is_not_taken_for_a_laptop(self):
+        launch = {
+            "event": "ella_launch", "timestamp": "2026-10-20T05:00:00Z", "launch_id": LAUNCH,
+            "install": {"bundle": "app", "place": "applications", "also_at": []},
+        }
+        volume = self.report([launch] + week_of_turns("2026-10-20", 2, 1000))["this"]["volume"]
+        self.assertEqual((volume["laptops"], volume["launches"]), (0, 1))
 
     def test_the_markdown_and_json_are_written(self):
         with tempfile.TemporaryDirectory() as tmp:
