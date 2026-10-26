@@ -357,3 +357,44 @@ describe("the recap", () => {
     expect(document.querySelector(".recap-next")).not.toHaveTextContent("Day");
   });
 });
+
+describe("Word of the day's recap", () => {
+  const BRAVE = {
+    text: "brave",
+    meaning: "Brave means you do something hard or scary, even when you feel afraid.",
+    forms: ["brave"],
+  };
+
+  it("leads with the word and what it means, and holds no place for skills", () => {
+    const summary = summaryOf({ topic_label: "Word of the day", went_well: ["Used brave in your own sentence"], word: BRAVE });
+    const { rerender, onDone, onTryAgain, onRetry, onCelebrated, onLevels } = renderRecap({ summary });
+    const word = screen.getByRole("region", { name: "Today’s word" });
+    expect(word).toHaveTextContent("brave");
+    expect(word).toHaveTextContent(BRAVE.meaning);
+    expect(screen.queryByRole("region", { name: "Skills grew" })).not.toBeInTheDocument();
+
+    rerender(
+      <SummaryScreen
+        summary={summary}
+        assessment={assessed({
+          kind: "word",
+          skills: [],
+          scored: false,
+          aim: null,
+          notes: { went_well: ["Used brave in your own sentence", "Answered each question"], fix: null, checked: true },
+        })}
+        assessError={null}
+        before={nothingYet}
+        learnerName="Aarav Sharma"
+        standing={standing}
+        nextTopic="Sunday vegetable run"
+        {...{ onDone, onTryAgain, onRetry, onCelebrated, onLevels }}
+      />,
+    );
+    expect(screen.getByRole("region", { name: "Went well" })).toHaveTextContent("Used brave in your own sentence");
+    expect(screen.queryByRole("region", { name: "Skills grew" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Try next time" })).not.toBeInTheDocument();
+    // The word, what went well, and the streak.
+    expect(document.querySelector(".recap__tiles")?.getAttribute("style")).toContain("--columns: 3");
+  });
+});

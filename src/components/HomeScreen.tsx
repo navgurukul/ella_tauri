@@ -2,6 +2,7 @@ import type { CSSProperties } from "react";
 import { EllaMascot } from "./EllaMascot";
 import { LevelCard } from "./LevelCard";
 import { FlameGlyph } from "./Sidebar";
+import { DailyWordCard } from "./WordOfTheDay";
 import {
   recommendedTopicId,
   spokenAmount,
@@ -27,6 +28,7 @@ export function HomeScreen({
   mood = "eager",
   onStart,
   onLesson,
+  onWord,
   onResume,
   onLevels,
   onAllTopics,
@@ -39,6 +41,8 @@ export function HomeScreen({
   onStart: (topic: Topic) => void;
   /** Today's talk once Ella has a lesson ready: her lesson, in today's topic. */
   onLesson: (lesson: MentorLesson) => void;
+  /** Word of the day, from its card under Today's talk. */
+  onWord: () => void;
   onResume: (sessionId: string) => void;
   onLevels: () => void;
   /** "View all": every topic at the learner's level, on a page of its own. */
@@ -96,6 +100,10 @@ export function HomeScreen({
               </div>
             </section>
           )}
+
+          {/* Today's word, under Today's talk as on Ella Mobile, until it has
+              been played today. */}
+          {snapshot.word && <DailyWordCard word={snapshot.word} disabled={busy} onStart={onWord} />}
 
           <div className="section-head">
             <h3>More topics</h3>

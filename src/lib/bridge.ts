@@ -161,6 +161,7 @@ class TauriBridge implements EllaBridge {
     invoke<Learner>("save_learner", { name, age: age ?? null });
   startSession = (topicId: string) => invoke<Session>("start_session", { topicId });
   startLesson = () => invoke<Session>("start_lesson");
+  startWord = () => invoke<Session>("start_word");
   startPlacement = () => invoke<Session>("start_placement");
   /** The scores come back early on a channel of this call's own. */
   assessSession = (sessionId: string, onScored?: (scored: Assessment) => void) =>
@@ -175,6 +176,7 @@ class TauriBridge implements EllaBridge {
   speakRetryPrompt = (sessionId: string) =>
     invoke<SpokenLine>("speak_retry_prompt", { sessionId });
   speakFix = (sessionId: string, index = 0) => invoke<SpokenLine>("speak_fix", { sessionId, index });
+  speakWord = (sessionId: string) => invoke<SpokenLine>("speak_word", { sessionId });
   sendTextTurn = (sessionId: string, text: string) =>
     invoke<TurnResult>("send_text_turn", { sessionId, text });
   sendVoiceTurn = ({ sessionId, samples, sampleRate, browserTranscript }: VoiceTurnInput) =>
@@ -398,6 +400,9 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
       // and no skill is ever stuck: as the backend's demo mode, Ella never
       // has one ready.
       lesson: null,
+      // Word of the day's words and its talk are the backend's alone
+      // (`words.rs`), so the preview offers none.
+      word: null,
       engine_status: {
         mode: "demo",
         label: "Browser demo",
@@ -594,6 +599,10 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
       const today = snapshot(state).topics[0];
       if (!today) throw new Error("Ella has no talk to give her lesson in just now.");
       return openSession(state, today.id, today.label, openingFor(today.id, learner.name));
+    },
+    /** The preview has no word talk: Home never offers it one. */
+    async startWord() {
+      throw new Error("Word of the day needs the Ella app.");
     },
     async startChore(choreId) {
       const state = read();

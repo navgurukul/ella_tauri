@@ -39,6 +39,8 @@ pub struct SessionCurriculum {
     pub level_code: Option<String>,
     /// On Ella's lesson, what `LessonMark::strengths` kept as it started.
     pub lesson_strengths: Option<Vec<String>>,
+    /// On a Word of the day talk, where it is (`words::WordTalk`), as JSON.
+    pub word_talk: Option<String>,
 }
 
 /// The learner's curriculum as an assessment's transaction sees it.
@@ -102,6 +104,26 @@ impl Database {
         };
         database.migrate()?;
         Ok(database)
+    }
+
+    /// Moves a talk, and everything said in it, `days` back, for tests of
+    /// what another day brings.
+    #[cfg(test)]
+    pub fn backdate(&self, session_id: &str, days: i64) -> EllaResult<()> {
+        let connection = self.connection()?;
+        let shift = format!("-{days} days");
+        connection.execute(
+            "UPDATE sessions SET started_at = strftime('%Y-%m-%dT%H:%M:%fZ', started_at, ?2),
+               completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', completed_at, ?2)
+             WHERE id = ?1",
+            params![session_id, shift],
+        )?;
+        connection.execute(
+            "UPDATE messages SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', created_at, ?2)
+             WHERE session_id = ?1",
+            params![session_id, shift],
+        )?;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -178,6 +200,7 @@ impl Database {
         add_curriculum(&connection)?;
         add_spoken_time(&connection)?;
         add_lessons(&connection)?;
+        add_words(&connection)?;
         Ok(())
     }
 
@@ -378,7 +401,7 @@ impl Database {
     pub fn session_curriculum(&self, session_id: &str) -> EllaResult<SessionCurriculum> {
         self.connection()?
             .query_row(
-                "SELECT kind, target_skill, assessment, level_code, lesson_strengths
+                "SELECT kind, target_skill, assessment, level_code, lesson_strengths, word_talk
                  FROM sessions WHERE id = ?1",
                 [session_id],
                 |row| {
@@ -389,6 +412,7 @@ impl Database {
                         assessment: row.get(2)?,
                         level_code: row.get(3)?,
                         lesson_strengths: strengths.as_deref().map(labels),
+                        word_talk: row.get(5)?,
                     })
                 },
             )
@@ -517,6 +541,7 @@ impl Database {
                         started_at: row.get(4)?,
                         completed_at: row.get(5)?,
                         messages: Vec::new(),
+                        word: None,
                     })
                 },
             )
@@ -567,12 +592,14 @@ impl Database {
     /// first, and at most `limit` of them: what Home moves to the back of its
     /// topics (`topics::offered`). A placement chat is not a topic, and a talk
     /// opened and left without an answer was not talked about. A chore's talk
-    /// keeps its chore's id here, which is no topic's.
+    /// keeps its chore's id here, which is no topic's. A Word of the day talk
+    /// is left out altogether, so playing it never changes the topics Home
+    /// offers.
     pub fn recent_topics(&self, limit: u32) -> EllaResult<Vec<String>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT topic_id FROM sessions s
-             WHERE topic_id != 'placement'
+             WHERE topic_id != 'placement' AND COALESCE(kind, '') <> 'word'
                AND EXISTS (
                  SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.speaker = 'learner'
                )
@@ -595,6 +622,10 @@ impl Database {
     /// timestamps are stored in UTC, and `'localtime'` moves each one onto the
     /// local day the learner said it on. A talk is counted on the day of its
     /// first answer only, so one that runs past midnight is not two talks.
+    ///
+    /// A Word of the day talk counts for the streak and its answers, as on the
+    /// phone, and nothing else: it is no talk here, finished or not, so it
+    /// earns no talk's badge.
     pub fn progress(&self) -> EllaResult<LearnerProgress> {
         let connection = self.connection()?;
         let mut day_statement = connection.prepare(
@@ -609,7 +640,9 @@ impl Database {
              talk_days AS (
                SELECT day, COUNT(*) AS talks FROM (
                  SELECT date(MIN(julianday(created_at)), 'localtime') AS day
-                 FROM answers GROUP BY session_id
+                 FROM answers
+                 WHERE session_id NOT IN (SELECT id FROM sessions WHERE kind = 'word')
+                 GROUP BY session_id
                ) GROUP BY day
              )
              SELECT a.day, COALESCE(t.talks, 0), a.answers, a.spoken_ms
@@ -648,7 +681,7 @@ impl Database {
                         AS ended_at,
                       l.current, l.agreed
                FROM sessions s LEFT JOIN ledger_state l ON l.session_id = s.id
-               WHERE s.status = 'complete'
+               WHERE s.status = 'complete' AND COALESCE(s.kind, '') <> 'word'
                  AND EXISTS (
                    SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.speaker = 'learner'
                  )
@@ -735,6 +768,100 @@ impl Database {
         }
         transaction.commit()?;
         Ok(())
+    }
+
+    /// A Word of the day talk and its opening line: a session of kind `word`,
+    /// pitched at `level_code`, with where it is (`word_talk`). It aims at no
+    /// skill and goes past no lesson.
+    pub fn create_word_session(
+        &self,
+        session: &Session,
+        opening: &Message,
+        level_code: &str,
+        word_talk: &str,
+    ) -> EllaResult<()> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO sessions(id, topic_id, topic_label, status, started_at, kind, level_code, word_talk)
+             VALUES(?1, ?2, ?3, 'active', ?4, 'word', ?5, ?6)",
+            params![
+                session.id,
+                session.topic_id,
+                session.topic_label,
+                session.started_at,
+                level_code,
+                word_talk
+            ],
+        )?;
+        insert_message(&transaction, &session.id, opening)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// One exchange of a Word of the day talk, and where the talk is after it,
+    /// together: a turn saved without its state would ask the same question
+    /// again.
+    pub fn persist_word_turn(
+        &self,
+        session_id: &str,
+        learner: &Message,
+        ella: &Message,
+        spoken_ms: Option<u64>,
+        word_talk: &str,
+    ) -> EllaResult<()> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        insert_message(&transaction, session_id, learner)?;
+        insert_message(&transaction, session_id, ella)?;
+        if let Some(spoken_ms) = spoken_ms {
+            transaction.execute(
+                "UPDATE messages SET spoken_ms = ?2 WHERE id = ?1",
+                params![learner.id, spoken_ms as i64],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE sessions SET word_talk = ?2 WHERE id = ?1",
+            params![session_id, word_talk],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// What the learner's Word of the day talks from before `today` (the
+    /// laptop's own `YYYY-MM-DD`) kept, oldest first: those they spoke in,
+    /// for `words::plan_word`. A talk is dated by the day it began.
+    pub fn words_before(&self, today: &str) -> EllaResult<Vec<String>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT word_talk FROM sessions s
+             WHERE kind = 'word' AND word_talk IS NOT NULL
+               AND date(started_at, 'localtime') < ?1
+               AND EXISTS (
+                 SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.speaker = 'learner'
+               )
+             ORDER BY julianday(started_at), rowid",
+        )?;
+        let kept = statement
+            .query_map([today], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(kept)
+    }
+
+    /// Whether the learner has played Word of the day on `today`: a word talk
+    /// begun that day that they spoke in.
+    pub fn word_played_on(&self, today: &str) -> EllaResult<bool> {
+        Ok(self.connection()?.query_row(
+            "SELECT EXISTS (
+               SELECT 1 FROM sessions s
+               WHERE kind = 'word' AND date(started_at, 'localtime') = ?1
+                 AND EXISTS (
+                   SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.speaker = 'learner'
+                 )
+             )",
+            [today],
+            |row| row.get(0),
+        )?)
     }
 
     /// A chore session: the same row as a free conversation plus the chore and
@@ -1256,6 +1383,17 @@ fn add_curriculum(connection: &Connection) -> EllaResult<()> {
 fn add_spoken_time(connection: &Connection) -> EllaResult<()> {
     if !has_column(connection, "messages", "spoken_ms")? {
         connection.execute("ALTER TABLE messages ADD COLUMN spoken_ms INTEGER", [])?;
+    }
+    Ok(())
+}
+
+/// Where each Word of the day talk is (`words::WordTalk`, as JSON): its word,
+/// which of the word's questions Ella asked last, and what the learner's
+/// answers did. Added the way `age` was, so v0.1.6 can still open the
+/// database. Only a word talk (`kind = 'word'`) has one.
+fn add_words(connection: &Connection) -> EllaResult<()> {
+    if !has_column(connection, "sessions", "word_talk")? {
+        connection.execute("ALTER TABLE sessions ADD COLUMN word_talk TEXT", [])?;
     }
     Ok(())
 }
@@ -2296,6 +2434,7 @@ mod tests {
             started_at: at.to_rfc3339(),
             completed_at: None,
             messages: Vec::new(),
+            word: None,
         };
         database
             .create_session(&session, &message(Speaker::Ella, 0, at), None, None, None, &LessonMark::default())
@@ -3067,6 +3206,7 @@ mod tests {
             started_at: at.to_rfc3339(),
             completed_at: None,
             messages: Vec::new(),
+            word: None,
         };
         let praised = LessonMark {
             ready: true,

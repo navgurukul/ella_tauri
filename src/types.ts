@@ -93,6 +93,20 @@ export interface Session {
   started_at: string;
   completed_at?: string | null;
   messages: Message[];
+  /** On a Word of the day talk, the word its card shows; absent otherwise. */
+  word?: WordShown | null;
+}
+
+/** Today's word, as Home's daily card, the word talk's card and its recap
+ * show it. */
+export interface WordShown {
+  text: string;
+  /** What Ella says it means: only the recap shows it, since the talk opens
+   * by asking whether the learner knows. */
+  meaning: string;
+  /** The word as it is heard in a line, lower case ("brave", "bravely"):
+   * each is bold where Ella says it. */
+  forms: string[];
 }
 
 export interface SessionListItem {
@@ -140,6 +154,9 @@ export interface AppSnapshot {
    * lesson, and the mentor card on Talk partners offers it. Null when she has
    * none, and when signed out. */
   lesson?: MentorLesson | null;
+  /** Today's Word of the day, for Home's daily card under Today's talk. Null
+   * once the learner has played it today, and when signed out. */
+  word?: WordShown | null;
   engine_status: EngineStatus;
 }
 
@@ -198,7 +215,9 @@ export interface SkillAim {
  * and kept on the talk, so asking again answers the same. */
 export interface Assessment {
   session_id: string;
-  kind: "placement" | "talk";
+  /** `word` for Word of the day, which is never scored: it counts for the
+   * streak alone. */
+  kind: "placement" | "talk" | "word";
   /** Where the learner stands after this talk. */
   standing: Standing;
   /** A placement's closing line, for its result. */
@@ -403,6 +422,8 @@ export interface SessionSummary {
    * the recap shows it before the model has read the talk. Empty for a talk
    * too short for notes, and for the placement chat. */
   went_well?: string[];
+  /** On a Word of the day talk, its word, for the recap's card. */
+  word?: WordShown | null;
 }
 
 /** How a ledger chore ended, for the recap's role-play band. */
@@ -453,6 +474,9 @@ export interface EllaBridge {
   /** Ella's lesson, the one she has ready, in today's talk. With none ready
    * any more, today's talk as an ordinary talk. */
   startLesson(): Promise<Session>;
+  /** Word of the day: a short talk on today's word, from Home's daily card.
+   * Its last answer closes the session, as a conversation's last turn does. */
+  startWord(): Promise<Session>;
   /** The placement chat: a friendly first talk that ends once Ella has heard
    * enough to read a level, between five answers and twelve. Its last turn
    * closes the session, as a conversation's last turn does. */
@@ -480,6 +504,9 @@ export interface EllaBridge {
    * the talk (the first by default). Tauri bridge only; in the browser it
    * falls back to system speech. */
   speakFix?(sessionId: string, index?: number): Promise<SpokenLine>;
+  /** Today's word said by Ella, for the speaker on a word talk's card.
+   * Tauri bridge only; in the browser it falls back to system speech. */
+  speakWord?(sessionId: string): Promise<SpokenLine>;
   getSession(sessionId: string): Promise<Session>;
   sendTextTurn(sessionId: string, text: string): Promise<TurnResult>;
   sendVoiceTurn(input: VoiceTurnInput): Promise<TurnResult>;

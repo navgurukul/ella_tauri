@@ -131,6 +131,13 @@ pub async fn start_lesson(state: State<'_, AppState>) -> Result<Session, String>
     off_main_thread(move || service.start_lesson()).await
 }
 
+/// Word of the day: the talk on today's word, from Home's daily card.
+#[tauri::command]
+pub async fn start_word(state: State<'_, AppState>) -> Result<Session, String> {
+    let service = state.0.clone();
+    off_main_thread(move || service.start_word()).await
+}
+
 /// The placement chat: onboarding's first talk, or the one the level map
 /// offers a learner who never had it.
 #[tauri::command]
@@ -176,6 +183,16 @@ pub async fn speak_fix(
 ) -> Result<SpokenLine, String> {
     let service = state.0.clone();
     off_main_thread(move || service.speak_fix(&session_id, index.unwrap_or(0))).await
+}
+
+/// Today's word, said by Ella: the speaker on a word talk's card.
+#[tauri::command]
+pub async fn speak_word(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<SpokenLine, String> {
+    let service = state.0.clone();
+    off_main_thread(move || service.speak_word(&session_id)).await
 }
 
 #[tauri::command]

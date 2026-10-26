@@ -14,7 +14,10 @@ stopping to Ella starting to speak (`speech_ms`). A flag is a triage signal,
 a reason to look at the raw events, not a measured regression: a P50 or P95
 at least 15% and 200 ms slower than the week before, with 30 or more turns in
 each week; or a system error rate 2 points higher. "Didn't hear you"
-(NO_SPEECH_DETECTED) is counted apart, not as a system error.
+(NO_SPEECH_DETECTED) is counted apart, not as a system error. So is Word of
+the day: its turns are the app's own lines or a short answer from the cloud,
+and its recap never asks the laptop, so a week with more of them would only
+look faster.
 
 With --out, writes <week>.md and <week>.json there. Given the folder of past
 reports (--reports, by default --out), the report says how many of last
@@ -119,8 +122,15 @@ def ratio(part, whole):
     return round(part / whole, 4) if whole else None
 
 
+def is_word(event):
+    """A Word of the day turn or recap, which the KPIs leave out."""
+    if event.get("event") == "ella_assessment":
+        return event.get("kind") == "word"
+    return event.get("talk") == "word"
+
+
 def summarize(events):
-    turns = [e for e in events if e.get("event") == "ella_turn_latency"]
+    turns = [e for e in events if e.get("event") == "ella_turn_latency" and not is_word(e)]
     voice = [e for e in turns if e.get("kind", "voice") == "voice"]
     ok = [e for e in voice if e.get("status") == "ok"]
     errors = [e for e in turns if e.get("status") != "ok"]
@@ -128,7 +138,7 @@ def summarize(events):
     system = [e for e in errors if code(e) != NO_SPEECH]
     cloud = [e for e in ok if by_cloud(e)]
     local = [e for e in ok if not by_cloud(e)]
-    recaps = [e for e in events if e.get("event") == "ella_assessment"]
+    recaps = [e for e in events if e.get("event") == "ella_assessment" and not is_word(e)]
     engines = [e for e in events if e.get("event") == "ella_engine" and not e.get("error") and not e.get("error_code")]
 
     def wait(e):
@@ -183,6 +193,7 @@ def summarize(events):
         "recaps": len(recaps),
         "recap_errors": sum(1 for e in recaps if e.get("status") != "ok"),
         "failed_judges": sum(1 for e in recaps for j in e.get("judges") or [] if j.get("status") == "error"),
+        "word_turns": sum(1 for e in events if e.get("event") == "ella_turn_latency" and is_word(e)),
     }
     return {"volume": volume, "latency": latency}
 
@@ -351,6 +362,7 @@ def markdown(report):
         ("Recaps", v["recaps"], w["recaps"]),
         ("Recap errors", v["recap_errors"], w["recap_errors"]),
         ("Failed judges", v["failed_judges"], w["failed_judges"]),
+        ("Word of the day turns (not in the KPIs)", v["word_turns"], w["word_turns"]),
     ]
     lines += ["", "## Volume and errors", "", "| | this week | last week |", "|---|--:|--:|"]
     lines += [f"| {name} | {now} | {before} |" for name, now, before in rows]

@@ -86,6 +86,15 @@ impl GeneratedReply {
     }
 }
 
+/// A JSON answer from the cloud's model (`TutorEngine::cloud_json`), and how
+/// long it took: to its first word, and in all.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CloudJson {
+    pub value: Value,
+    pub ttft_ms: f64,
+    pub ms: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct SynthesizedAudio {
     pub audio: Option<AudioPayload>,
@@ -1829,6 +1838,17 @@ const CORRECTION_PROMPT: &str = "You correct the grammar of a learner's spoken E
      one entry per answer, in order.";
 
 /// The answers as the corrector reads them: numbered, one per line.
+/// What the correction is asked, and how long its answer may run: the answer
+/// is the answers again, so its budget grows with them.
+fn correction_request(answers: &[&str]) -> (Vec<Value>, u32) {
+    let request = vec![
+        json!({"role": "system", "content": CORRECTION_PROMPT}),
+        json!({"role": "user", "content": format!("The learner's answers, in order:\n{}", numbered(answers))}),
+    ];
+    let words: usize = answers.iter().map(|answer| answer.split_whitespace().count()).sum();
+    (request, (words * 2 + 12 * answers.len() + 24) as u32)
+}
+
 fn numbered(answers: &[&str]) -> String {
     answers
         .iter()
@@ -2963,6 +2983,24 @@ pub trait TutorEngine: Send + Sync {
         Ok(None)
     }
 
+    /// `correct`, by the cloud's model alone, for a Word of the day talk's
+    /// recap: `None` without it. The laptop's model is never asked about a
+    /// word talk, so it is always as ready for the next talk as it was before.
+    fn correct_online(&self, _answers: &[&str]) -> Option<Corrections> {
+        None
+    }
+
+    /// One JSON answer from the cloud's model to `messages`, for a learner
+    /// who is waiting on it: Ella's words on a Word of the day answer, or her
+    /// judgement of it (`infrastructure::word_prompt`). `why` names it in the
+    /// turn's telemetry. `None` when the cloud is off or down, or gives no
+    /// usable answer in time; the talk then says its fixed line. Never the
+    /// laptop's model: a word talk leaves its prompt cache, its warm-ups and
+    /// its errands alone.
+    fn cloud_json(&self, _messages: &[Value], _why: &'static str) -> Option<CloudJson> {
+        None
+    }
+
     /// Generate one reply.
     ///
     /// Its sentences are synthesized while the rest is still being written, so
@@ -3776,6 +3814,11 @@ type Settle<'a, T> = Option<&'a dyn Fn(&str) -> Option<T>>;
 /// third of a second. One that still runs out is cut back to its last whole
 /// sentence (`whole_sentences`).
 const CLOUD_REPLY_TOKENS: u32 = 80;
+
+/// What a Word of the day answer may run to on the cloud: a few words of
+/// Ella's, a short question and two judgements, in JSON, about 40 tokens.
+/// One that would need more is not her line, and her fixed one is said.
+const CLOUD_WORD_TOKENS: u32 = 200;
 
 /// `text` up to the end of its last whole sentence, or `None` when it has no
 /// sentence end at all.
@@ -4817,10 +4860,7 @@ impl TutorEngine for LocalEngine {
         if answers.is_empty() {
             return Ok(Some(Corrections { lines: Vec::new(), cloud: false }));
         }
-        let request = vec![
-            json!({"role": "system", "content": CORRECTION_PROMPT}),
-            json!({"role": "user", "content": format!("The learner's answers, in order:\n{}", numbered(answers))}),
-        ];
+        let (request, budget) = correction_request(answers);
         let schema = json!({
             "type": "object",
             "properties": {
@@ -4833,9 +4873,6 @@ impl TutorEngine for LocalEngine {
             },
             "required": ["lines"],
         });
-        // The answer is the answers again, so its budget grows with them.
-        let words: usize = answers.iter().map(|answer| answer.split_whitespace().count()).sum();
-        let budget = (words * 2 + 12 * answers.len() + 24) as u32;
         // On a laptop's CPU each corrected answer is seconds of the recap's
         // wait, so `settled` is asked as each one comes in. The lines it has
         // already said no to are not put to it again, even when the answer
@@ -4861,6 +4898,93 @@ impl TutorEngine for LocalEngine {
             Some(&settle),
         )
         .map(|(lines, cloud)| Some(Corrections { lines, cloud }))
+    }
+
+    fn correct_online(&self, answers: &[&str]) -> Option<Corrections> {
+        if answers.is_empty() {
+            return Some(Corrections { lines: Vec::new(), cloud: true });
+        }
+        let cloud = self.cloud.as_ref().filter(|cloud| cloud.usable_for_judge())?;
+        let (request, budget) = correction_request(answers);
+        let asked = Instant::now();
+        let judged = self.judge_cloud(cloud, "correct the answers", &request, budget, &|value| {
+            read_corrections(value, answers.len())
+        });
+        let (status, run, error) = match &judged {
+            Ok((_, run)) => ("ok", run.clone(), None),
+            Err(why) => ("error", CloudJudgeRun::default(), Some(in_brief(why))),
+        };
+        record_judge(JudgeTiming {
+            judge: "correct",
+            backend: "cloud",
+            status,
+            error,
+            waited_ms: run.first_word_ms,
+            ms: (asked.elapsed().as_secs_f64() * 1_000.0).round() as u64,
+            attempts: run.attempts,
+            read_tokens: run.read_tokens,
+            written_tokens: run.written_tokens,
+            ..JudgeTiming::default()
+        });
+        judged.ok().map(|(lines, _)| Corrections { lines, cloud: true })
+    }
+
+    fn cloud_json(&self, messages: &[Value], why: &'static str) -> Option<CloudJson> {
+        let cloud = self
+            .cloud
+            .as_ref()
+            .filter(|cloud| cloud.usable_for_reply(cloud_llm::REPLY_LOOK))?;
+        if env::var("ELLA_DEBUG_PROMPT").is_ok() {
+            print_prompt(messages);
+        }
+        let asked = cloud.ask(
+            messages,
+            Ask {
+                max_tokens: CLOUD_WORD_TOKENS,
+                temperature: 0.7,
+                json: true,
+                first_word: self.reply_first_word,
+            },
+            |_, _| true,
+        );
+        let (answer, failed, ms) = match asked {
+            Asked::Answered(answer) => {
+                let ms = answer.ms;
+                (Some(answer), "", ms)
+            }
+            Asked::Unanswered { ms, .. } | Asked::Empty { ms } => (None, "unanswered", ms),
+            Asked::Cut { ms, .. } => (None, "cut", ms),
+        };
+        let usage = answer.as_ref().map(|answer| answer.usage).unwrap_or_default();
+        telemetry::record_llm_run(LlmRun {
+            why,
+            backend: "cloud",
+            failed,
+            wait_ms: 0,
+            errand: None,
+            ttft_ms: answer.as_ref().map_or(ms, |answer| answer.ttft_ms).round() as u64,
+            ms: ms.round() as u64,
+            prompt_tokens: (usage.prompt > 0).then_some(usage.prompt),
+            prompt_evaluated: (usage.prompt > 0).then_some(usage.miss),
+            prompt_ms: None,
+            gen_tokens: (usage.completion > 0).then_some(usage.completion),
+            gen_ms: None,
+        });
+        let Some(answer) = answer.filter(|answer| !answer.cut_short) else {
+            eprintln!("[LATENCY]     word> {why}: no answer from the cloud after {ms:.0}ms; Ella says her own line");
+            return None;
+        };
+        eprintln!(
+            "[LATENCY]     word> {why}: cloud first word +{:.1}ms, done +{:.1}ms: {}",
+            answer.ttft_ms,
+            answer.ms,
+            answer.text.trim()
+        );
+        Some(CloudJson {
+            value: json_object_in(&answer.text)?,
+            ttft_ms: answer.ttft_ms,
+            ms: answer.ms,
+        })
     }
 
     fn opening_in_chore(&self, context: &ChoreContext, learner_name: &str) -> EllaResult<String> {

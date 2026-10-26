@@ -100,11 +100,22 @@ def local(event):
 def group_of(event):
     """The day, and the build where the event names it; `cloud` after it for a
     turn the cloud answered, or a recap the cloud judged, so neither is
-    counted in with what the laptop did itself."""
+    counted in with what the laptop did itself; and `word` for Word of the
+    day, whose turns are the app's own lines or a short answer from the cloud,
+    so they are never counted in with the talks."""
     day = event.get("timestamp", "?")[:10]
     version = event.get("app_version")
     group = f"{day} {version}" if version else day
+    if is_word(event):
+        return f"{group} word"
     return f"{group} cloud" if by_cloud(event) else group
+
+
+def is_word(event):
+    """A Word of the day turn or recap."""
+    if event.get("event") == "ella_assessment":
+        return event.get("kind") == "word"
+    return event.get("talk") == "word"
 
 
 def runs(event):

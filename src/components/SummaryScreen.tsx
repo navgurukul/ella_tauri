@@ -25,6 +25,7 @@ import type {
   SkillAim,
   SkillGrowth,
   Standing,
+  WordShown,
 } from "../types";
 
 /**
@@ -132,6 +133,8 @@ export function SummaryScreen({
                 <Fixes fixes={fixes} ready={fixReady} sessionId={summary.session_id} />
               ) : tile === "skills" ? (
                 aim ? <TryNext aim={aim} /> : <SkillsGrew skills={assessment?.skills ?? null} />
+              ) : tile === "word" && summary.word ? (
+                <WordTile word={summary.word} />
               ) : tile === "failed" ? (
                 <Failed message={assessError ?? ""} onRetry={onRetry} />
               ) : (
@@ -336,7 +339,7 @@ function MovedOn({ assessment, onLevels }: { assessment: Assessment | null; onLe
 
 /* ------------------------------------------------------------ the tiles --- */
 
-type TileKey = "well" | "fix" | "skills" | "notice" | "failed";
+type TileKey = "word" | "well" | "fix" | "skills" | "notice" | "failed";
 
 function isNotice(tile: TileKey | "streak") {
   return tile === "notice" || tile === "failed";
@@ -346,21 +349,23 @@ function isNotice(tile: TileKey | "streak") {
  * place for every note; once it lands, only what the talk has fills one, and
  * the fix keeps its place while it is still being looked for. A talk with
  * notes that counted no skill keeps the skills' place for the one it aimed
- * at, to try next time. */
+ * at, to try next time. Word of the day leads with its word, and holds no
+ * place for skills: it is never scored. */
 function tilesFor(
   summary: SessionSummary,
   assessment: Assessment | null,
   error: string | null,
   fixPending: boolean,
 ): TileKey[] {
+  const word: TileKey[] = summary.word ? ["word"] : [];
   const grew: TileKey[] = assessment && assessment.skills.length > 0 ? ["skills"] : [];
-  if (summary.short) return ["notice", ...grew];
-  if (error) return ["failed"];
-  if (!assessment) return ["well", "fix", "skills"];
+  if (summary.short) return [...word, "notice", ...grew];
+  if (error) return [...word, "failed"];
+  if (!assessment) return summary.word ? ["word", "well", "fix"] : ["well", "fix", "skills"];
   const notes = assessment.notes;
-  if (!notes) return [...grew, "notice"];
+  if (!notes) return [...word, ...grew, "notice"];
   const skills: TileKey[] = grew.length > 0 || aimToTry(assessment) ? ["skills"] : [];
-  return ["well", ...(notes.fix || fixPending ? (["fix"] as TileKey[]) : []), ...skills];
+  return [...word, "well", ...(notes.fix || fixPending ? (["fix"] as TileKey[]) : []), ...skills];
 }
 
 /** The skill to try next time: the one the talk aimed at, when it was scored
@@ -370,6 +375,7 @@ function aimToTry(assessment: Assessment | null): SkillAim | null {
 }
 
 const TILE_LABEL: Record<TileKey, string> = {
+  word: "Today’s word",
   well: "Went well",
   fix: "One fix",
   skills: "Skills grew",
@@ -640,6 +646,18 @@ function TryNext({ aim }: { aim: SkillAim }) {
       <h2 className="display recap-tile__title">{TRY_NEXT}</h2>
       <p className="display recap-aim__label">{aim.label}</p>
       <p className="recap-aim__text">{aim.text}</p>
+    </>
+  );
+}
+
+/** Word of the day's word, and now what it means, to use today. */
+function WordTile({ word }: { word: WordShown }) {
+  return (
+    <>
+      <p className="word-label">Today’s word</p>
+      <p className="display recap-word__text">{word.text}</p>
+      <p className="recap-word__meaning">{word.meaning}</p>
+      <p className="display recap-word__try">Try to use it today.</p>
     </>
   );
 }

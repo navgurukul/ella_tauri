@@ -287,6 +287,19 @@ export default function App() {
     });
   }
 
+  /** Word of the day, from Home's daily card. Ella's lesson does not ask
+   * first, as on Ella Mobile: it is practice of another kind, and does not
+   * count among the talks she keeps her lessons by. */
+  async function handleWord() {
+    await run(async () => {
+      const created = await bridge.startWord();
+      setSession(created);
+      setTopicPartner(null);
+      setFinished(null);
+      setScreen("talk");
+    });
+  }
+
   /**
    * Opens a talk the learner picked, unless they have gone past Ella's
    * lesson: then she asks for a chat first, as on Ella Mobile, and the talk
@@ -584,6 +597,7 @@ export default function App() {
             mood={finished && finished.topicId !== "placement" ? "happy" : "eager"}
             onStart={(topic) => throughEllaFirst(topic.label, () => void handleStart(topic))}
             onLesson={() => void handleLesson()}
+            onWord={() => void handleWord()}
             onResume={(sessionId) => void handleResume(sessionId)}
             onLevels={openLevels}
             onAllTopics={() => setScreen("topics")}

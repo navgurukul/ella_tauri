@@ -1,4 +1,10 @@
 {
+  "0.1.26": [
+    "New on Home: Word of the day. Every day there is a new word to learn in a short talk with Ella.",
+    "Ella asks if you know the word, tells you what it means, and asks you a few questions so you can use it.",
+    "Your recap shows the word and what it means, and Word of the day counts for your streak.",
+    "Word of the day works without the internet too."
+  ],
   "0.1.25": [
     "Ella gets ready a little faster when you open her."
   ],
