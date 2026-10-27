@@ -4,9 +4,11 @@
   "any implementation of it, the scripts' or the app's, must do. `events`:",
   "a raw event, what leaves (null: nothing), and the fields it counts as having",
   "no rule (`unknown`), breaking their rule (`replaced`) or whole events left",
-  "out (`excluded`). `error_codes`, `reason_codes`: text and its code (null:",
-  "none). `batch_id`: a batch's body and event lines, and the id they make.",
-  "Run by scripts/test_telemetry_policy.py."
+  "out (`excluded`); each `event_id` is made by the policy's `event_id` recipe.",
+  "`error_codes`, `reason_codes`: text and its code (null: none). `batch_id`:",
+  "a batch's body and event lines, oldest first, and the id they make; its",
+  "`talks` counts the distinct `talk_id`s in the lines. Run by",
+  "scripts/test_telemetry_policy.py."
  ],
  "events": [
   {

@@ -19,3 +19,12 @@ engines
 
 # local Claude Code settings
 .claude/
+
+# Telemetry: a laptop's latency.jsonl, a copy named for its laptop, and the
+# batches and data made from it belong in the team's private store, never in
+# this public repository
+latency.jsonl
+/*.jsonl
+/out/
+/data/
+/reports/

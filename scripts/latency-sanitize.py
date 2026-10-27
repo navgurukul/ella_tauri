@@ -10,6 +10,7 @@ an event to the laptop's own database are hashed. Every event gets an
 
   npm run telemetry:sanitize -- <label>.jsonl... --batch-out out/  # batches
   npm run telemetry:sanitize -- --validate out/*.jsonl              # check them
+  npm run telemetry:sanitize -- --validate in/*.jsonl --data data/ # take them in
   npm run telemetry:sanitize -- <label>.jsonl...                    # to stdout
 
 --batch-out writes each file as one batch, `out/<batch_id>.jsonl`: the
@@ -17,16 +18,21 @@ envelope the policy's `batch` defines, then the events. A laptop's label is
 its file's name (`lab-win-hp-02.jsonl`), never a person's, and the batch's
 `install_id` a hash of it. --validate checks batches as strictly as the team's
 store will: any field, value or count the policy does not allow is a problem,
-named without its value. --unsent accepts an app's batch not yet sent.
+named without its value, and a file that breaks any rule is refused whole.
+With --data, the events of the batches that pass, each with its batch's
+`install_id`, go into data/ as below. --unsent accepts an app's batch not
+yet sent.
 
 Before batches, the Stage-1 store took events stamped with their laptop
 (`source`): to stdout, or with --data, the events not already under data/,
-to data/<week>/<ingest-id>.jsonl. Weeks run Monday to Sunday in IST.
+to data/<week>/<ingest-id>.jsonl. Weeks run Monday to Sunday in IST. Either
+way a batch is refused as a laptop's log.
 """
 import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import re
 import sys
 from collections import Counter, defaultdict
@@ -44,7 +50,7 @@ SEND = POLICY["batch"]["send"]
 IST = timezone(timedelta(hours=5, minutes=30), "IST")
 
 # A laptop's label: what the uploaded file is named.
-LABEL = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+LABEL = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 
 # What a value that breaks its rule leaves as, when it is text.
 OTHER = "other"
@@ -56,7 +62,10 @@ CLOSED = {"host", "origin"}
 # Why the cloud went down: `HTTP 503`, or a proxy's `cap: <its message>`.
 HTTP = re.compile(r"^HTTP ([1-5][0-9]{2})(?::|$)")
 PROXY = re.compile(r"^([a-z_]+)(?::|$)")
-HTTP_CODE = re.compile(r"^http_[1-5][0-9]{2}$")
+HTTP_CODE = re.compile(r"http_[1-5][0-9]{2}")
+
+# A field name a problem shows as it is: one of the policy's own.
+PLAIN = re.compile(r"[a-z0-9_]{1,40}")
 
 # Taken from the event itself, never from its fields: a Stage-1 file's
 # `source` included.
@@ -81,6 +90,45 @@ when = report.when
 
 def short_hash(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def shown(name):
+    """A field name as a problem or a count may show it: as it is when it
+    is a plain one, else escaped and cut short, so a name that came in as
+    someone's words, or as control characters, is never printed whole."""
+    name = str(name)
+    if PLAIN.fullmatch(name):
+        return name
+    quoted = json.dumps(name)
+    return quoted if len(quoted) <= 18 else quoted[:16] + '…"'
+
+
+def safe_when(event):
+    """The event's time, or None when it has no time that can be read."""
+    return when(event) if isinstance(event.get("timestamp"), str) else None
+
+
+class DuplicateKey(ValueError):
+    pass
+
+
+def _one_of_each(pairs):
+    seen = {}
+    for key, value in pairs:
+        if key in seen:
+            raise DuplicateKey(key)
+        seen[key] = value
+    return seen
+
+
+def _no_constant(name):
+    raise ValueError(f"{name} is not a number JSON allows")
+
+
+def strict_json(data):
+    """JSON as a batch must be: no key twice, which two readers could take
+    differently, and no NaN or Infinity."""
+    return json.loads(data, object_pairs_hook=_one_of_each, parse_constant=_no_constant)
 
 
 def error_code(text):
@@ -128,7 +176,7 @@ def code_allowed(coder, code):
     return (
         code in spec["exact"].values()
         or code in spec["prefix"].values()
-        or bool(HTTP_CODE.match(code))
+        or bool(HTTP_CODE.fullmatch(code))
         or (code.startswith("proxy_") and code[len("proxy_"):] in spec["proxy"])
     )
 
@@ -162,7 +210,7 @@ def check(value, rule, path, problems):
 
     kind, _, arg = rule.partition(":")
     if kind == "num":
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
             broke()
     elif kind == "int":
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -172,7 +220,7 @@ def check(value, rule, path, problems):
             broke()
     elif kind in PATTERNS:
         if not isinstance(value, str) or not (
-            PATTERNS[kind].match(value) or (value == OTHER and kind not in EXACT)
+            PATTERNS[kind].fullmatch(value) or (value == OTHER and kind not in EXACT)
         ):
             broke()
     elif kind == "hardware":
@@ -206,20 +254,22 @@ def check_fields(value, schema, path, problems):
     allowed = {output_name(name, rule): output_rule(rule) for name, rule in schema.items()}
     for key, item in value.items():
         if key not in allowed:
-            problems.append(f"{path}.{key}: not in the policy")
+            problems.append(f"{path}.{shown(key)}: not in the policy")
         else:
             check(item, allowed[key], f"{path}.{key}", problems)
 
 
 def event_id(event):
-    """The same event, from whichever upload, gets the same id. An event of
-    a build too old to name its launch is known by all of itself."""
-    if event.get("event_id"):
-        return event["event_id"]
-    if event.get("launch_id"):
-        key = "|".join(
-            str(event.get(name, "")) for name in ("launch_id", "timestamp", "event", "interaction_id")
-        )
+    """The same event, from whichever upload, gets the same id: the recipe
+    is the policy's `event_id`. One it already has is kept only when it is
+    16 hex; an event of a build too old to name its launch is known by all
+    of itself."""
+    kept = event.get("event_id")
+    if isinstance(kept, str) and PATTERNS["hex16"].fullmatch(kept):
+        return kept
+    if isinstance(event.get("launch_id"), str) and event["launch_id"]:
+        parts = (event.get(name) for name in ("launch_id", "timestamp", "event", "interaction_id"))
+        key = "|".join(part if isinstance(part, str) else "" for part in parts)
     else:
         key = json.dumps(event, sort_keys=True, separators=(",", ":"))
     return short_hash(key)
@@ -227,7 +277,7 @@ def event_id(event):
 
 def week_of(event):
     """The event's week, Monday to Sunday in IST, as `2026-W43`."""
-    at = when(event)
+    at = safe_when(event)
     if at is None:
         return None
     year, week, _ = at.astimezone(IST).isocalendar()
@@ -258,7 +308,7 @@ class Sanitizer:
             self.excluded[str(kind)] += 1
             return None
         stamp = raw.get("timestamp")
-        if not isinstance(stamp, str) or not PATTERNS["timestamp"].match(stamp) or when(raw) is None:
+        if not isinstance(stamp, str) or not PATTERNS["timestamp"].fullmatch(stamp) or when(raw) is None:
             self.excluded[f"{kind} without a time"] += 1
             return None
         skip = IGNORED | set(spec.get("excluded", ()))
@@ -287,7 +337,7 @@ class Sanitizer:
             elif key in left:
                 name, result = key, self._value(item, left[key], f"{path}.{key}")
             else:
-                self.unknown[f"{path}.{key}"] += 1
+                self.unknown[f"{path}.{shown(key)}"] += 1
                 continue
             if result is not _DROP:
                 kept[name] = result
@@ -323,13 +373,14 @@ class Sanitizer:
 def validate_event(event, path="event"):
     problems = []
     kind = event.get("event")
-    if kind not in POLICY["events"]:
+    if not isinstance(kind, str) or kind not in POLICY["events"]:
         return [f"{path}: no such event in the policy"]
     path = f"{path}:{kind}"
-    if not isinstance(event.get("event_id"), str) or not PATTERNS["hex16"].match(event["event_id"]):
+    if not isinstance(event.get("event_id"), str) or not PATTERNS["hex16"].fullmatch(event["event_id"]):
         problems.append(f"{path}.event_id: missing or not `hex16`")
-    if not isinstance(event.get("timestamp"), str) or not PATTERNS["timestamp"].match(event["timestamp"]):
-        problems.append(f"{path}.timestamp: missing or not `timestamp`")
+    stamp = event.get("timestamp")
+    if not isinstance(stamp, str) or not PATTERNS["timestamp"].fullmatch(stamp) or safe_when(event) is None:
+        problems.append(f"{path}.timestamp: missing or not a time")
     rest = {key: value for key, value in event.items() if key != "event_id"}
     check_fields(rest, schema_of(kind), path, problems)
     return problems
@@ -359,18 +410,25 @@ def batch_bytes(body, lines, send):
 
 
 def talks_in(events):
-    return len({event["talk_id"] for event in events if event.get("talk_id")})
+    """The policy's `talks`: the distinct talk ids among the events."""
+    return len({event["talk_id"] for event in events if isinstance(event.get("talk_id"), str)})
 
 
 def span_of(events):
-    times = sorted((when(event), event["timestamp"]) for event in events)
+    times = sorted((at, event["timestamp"]) for event in events for at in [safe_when(event)] if at is not None)
     return (times[0][1], times[-1][1]) if times else (None, None)
+
+
+def oldest_first(events):
+    """The policy's order: by time, and as they were written where two share
+    one (a stable sort)."""
+    return sorted(events, key=safe_when)
 
 
 def manual_batch(events, label, counts, now=None):
     """A laptop's file as one batch: `origin` manual, sequence 0, and
     nothing the app measures, which a file does not know."""
-    events = sorted(events, key=when)
+    events = oldest_first(events)
     first, last = span_of(events)
     body = {name: None for name in BODY}
     body.update(
@@ -389,27 +447,32 @@ def manual_batch(events, label, counts, now=None):
     return batch_bytes(body, event_lines(events), send)
 
 
-def validate_batch(data, sent=True):
-    """Problems with one batch file's bytes, or none. `sent`: an app's batch
-    must say how its sending went."""
+def read_batch(data, sent=True):
+    """One batch file's bytes, checked: (problems, envelope, events). A batch
+    with any problem is refused whole. `sent`: an app's batch must say how
+    its sending went."""
     head, _, lines = data.partition(b"\n")
     try:
-        envelope = json.loads(head)
+        envelope = strict_json(head)
+    except DuplicateKey:
+        return ["envelope: a key twice"], None, []
     except ValueError:
-        return ["envelope: not JSON"]
+        return ["envelope: not JSON"], None, []
     if not isinstance(envelope, dict) or envelope.get("event") != "ella_batch":
-        return ["envelope: not an `ella_batch`"]
+        return ["envelope: not an `ella_batch`"], None, []
     problems = []
     for key in envelope:
         if key not in BODY and key not in SEND and key not in ("event", "batch_id"):
-            problems.append(f"envelope.{key}: not in the policy")
+            problems.append(f"envelope.{shown(key)}: not in the policy")
     for name, rule in {**BODY, **SEND, "batch_id": "hex32"}.items():
         if name not in envelope:
             problems.append(f"envelope.{name}: missing")
+        elif envelope[name] is None and name in POLICY["batch"]["required"]:
+            problems.append(f"envelope.{name}: null")
         else:
             check(envelope[name], rule, f"envelope.{name}", problems)
     if problems:
-        return problems
+        return problems, None, []
 
     body = {name: envelope[name] for name in BODY}
     if body["policy_version"] != POLICY["policy_version"]:
@@ -426,10 +489,9 @@ def validate_batch(data, sent=True):
         for name in POLICY["batch"]["filled_when_sent"]:
             if envelope[name] is None:
                 problems.append(f"envelope.{name}: missing from a sent batch")
-    if body["dropped_by_reason"] is not None and body["dropped_event_count"] is not None:
-        if sum(body["dropped_by_reason"].get(name) or 0 for name in POLICY["objects"]["dropped_by_reason"]) != body[
-            "dropped_event_count"
-        ]:
+    reasons = body["dropped_by_reason"]
+    if reasons is not None and body["dropped_event_count"] is not None:
+        if sum(reasons.get(name) or 0 for name in POLICY["objects"]["dropped_by_reason"]) != body["dropped_event_count"]:
             problems.append("envelope.dropped_event_count: not the sum of dropped_by_reason")
     for count, total in (("dropped_event_count", "dropped_total"), ("log_resets", "log_resets_total")):
         if body[count] is not None and body[total] is not None and body[total] < body[count]:
@@ -442,7 +504,10 @@ def validate_batch(data, sent=True):
         problems.append("events: the last line does not end")
     for number, line in enumerate(lines.split(b"\n")[:-1] if lines else [], start=2):
         try:
-            event = json.loads(line)
+            event = strict_json(line)
+        except DuplicateKey:
+            problems.append(f"line {number}: a key twice")
+            continue
         except ValueError:
             problems.append(f"line {number}: not JSON")
             continue
@@ -451,16 +516,25 @@ def validate_batch(data, sent=True):
             continue
         events.append(event)
         problems.extend(validate_event(event, f"line {number}"))
-    ids = [event.get("event_id") for event in events]
+    ids = [event["event_id"] for event in events if isinstance(event.get("event_id"), str)]
     if len(set(ids)) != len(ids):
         problems.append("events: an event_id twice")
     if len(events) != body["events"]:
         problems.append("envelope.events: not the number of events")
     if talks_in(events) != body["talks"]:
         problems.append("envelope.talks: not the number of talks")
-    if not problems and span_of(events) != (body["first_event_at"], body["last_event_at"]):
-        problems.append("envelope.first_event_at, last_event_at: not the events' first and last")
-    return problems
+    if not problems:
+        times = [safe_when(event) for event in events]
+        if any(later < earlier for earlier, later in zip(times, times[1:])):
+            problems.append("events: not oldest first")
+        elif span_of(events) != (body["first_event_at"], body["last_event_at"]):
+            problems.append("envelope.first_event_at, last_event_at: not the events' first and last")
+    return problems, (None if problems else envelope), (events if not problems else [])
+
+
+def validate_batch(data, sent=True):
+    """Problems with one batch file's bytes, or none."""
+    return read_batch(data, sent)[0]
 
 
 # The command.
@@ -468,12 +542,20 @@ def validate_batch(data, sent=True):
 
 def label_of(path, given):
     label = given or Path(path).stem
-    if not LABEL.match(label) or label == "latency":
+    if not LABEL.fullmatch(label) or label == "latency":
         raise SystemExit(
             f"{path}: name the file after its laptop, such as lab-win-hp-02.jsonl "
             "(lowercase letters, digits and dashes; never a person's name), or pass --source."
         )
     return label
+
+
+def raw_events(path):
+    """A laptop's own log; a batch is refused here, being made already."""
+    events = read_events(path)
+    if any(event.get("event") == "ella_batch" for event in events):
+        raise SystemExit(f"{path}: a batch, not a laptop's log: take it in with --validate --data")
+    return events
 
 
 def known_ids(data, weeks):
@@ -482,6 +564,32 @@ def known_ids(data, weeks):
         for path in sorted((data / week).glob("*.jsonl")):
             ids.update(event_id(event) for event in read_events(path))
     return ids
+
+
+def fresh_events(clean, data):
+    """The events not already under `data`, by week."""
+    by_week = defaultdict(list)
+    for event in clean.values():
+        by_week[week_of(event)].append(event)
+    already = known_ids(data, by_week) if data else set()
+    return {week: [e for e in events if e["event_id"] not in already] for week, events in by_week.items()}
+
+
+def store(fresh, data, ingest_id):
+    """Writes each week's new events to data/<week>/<ingest-id>.jsonl: one
+    new file per ingest, never a changed one."""
+    ingest = ingest_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    for week, events in sorted(fresh.items()):
+        if not events:
+            continue
+        target = data / week / f"{ingest}.jsonl"
+        if target.exists():
+            raise SystemExit(f"{target} exists: every ingest writes files of its own")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("w", encoding="utf-8") as out:
+            for event in oldest_first(events):
+                out.write(json.dumps(event, separators=(",", ":")) + "\n")
+        print(f"wrote {len(events)} events to {target}", file=sys.stderr)
 
 
 def report_left_behind(sanitizer):
@@ -496,19 +604,44 @@ def report_left_behind(sanitizer):
                 print(f"  {count:>6} x {name}", file=sys.stderr)
 
 
-def validate_files(paths, sent):
-    failed = 0
+def check_file(path, sent):
+    """(problems, envelope, events) for one batch file, a file that cannot
+    be read or checked being refused like any other."""
+    try:
+        data = path.read_bytes()
+    except OSError as error:
+        return [f"could not be read ({type(error).__name__})"], None, []
+    try:
+        return read_batch(data, sent)
+    except Exception as error:  # a batch that breaks the checker is refused, not a crash
+        return [f"could not be checked ({type(error).__name__})"], None, []
+
+
+def validate_files(paths, sent, data=None, ingest_id=None):
+    """Checks each batch; with `data`, takes the events of those that pass
+    into it, each with its batch's `install_id`. Refused batches are named
+    and leave nothing behind."""
+    refused, clean, batches = 0, {}, 0
     for path in paths:
-        problems = validate_batch(path.read_bytes(), sent=sent)
+        problems, envelope, events = check_file(path, sent)
         if problems:
-            failed += 1
-            print(f"{path}: {len(problems)} problem(s)")
+            refused += 1
+            print(f"{path}: refused, {len(problems)} problem(s)")
             for problem in problems[:50]:
                 print(f"  {problem}")
-        else:
-            print(f"{path}: ok")
-    print(f"{len(paths) - failed} of {len(paths)} batches valid", file=sys.stderr)
-    return 1 if failed else 0
+            continue
+        print(f"{path}: ok")
+        batches += 1
+        for event in events:
+            clean.setdefault(event["event_id"], {**event, "install_id": envelope["install_id"]})
+    if data:
+        fresh = fresh_events(clean, data)
+        store(fresh, data, ingest_id)
+        new = sum(len(events) for events in fresh.values())
+        print(f"{new} new events from {batches} batch(es) ({len(clean) - new} already had); {refused} refused", file=sys.stderr)
+    else:
+        print(f"{batches} of {len(paths)} batches valid", file=sys.stderr)
+    return 1 if refused else 0
 
 
 def write_batches(paths, given, out):
@@ -518,7 +651,7 @@ def write_batches(paths, given, out):
         label = label_of(path, given)
         sanitizer = Sanitizer()
         events = {}
-        for raw in read_events(path):
+        for raw in raw_events(path):
             event = sanitizer.event(raw)
             if event is not None:
                 events.setdefault(event["event_id"], event)
@@ -545,50 +678,35 @@ def main(argv=None):
     parser.add_argument("--batch-out", type=Path, help="write each file as one batch here")
     parser.add_argument("--validate", action="store_true", help="check batch files against the policy")
     parser.add_argument("--unsent", action="store_true", help="with --validate: an app's batch not yet sent")
-    parser.add_argument("--data", type=Path, help="Stage 1: ingest into this folder instead of printing")
-    parser.add_argument("--ingest-id", help="Stage 1: the new files' name (default: the time, UTC)")
+    parser.add_argument("--data", type=Path, help="take events into this folder (with --validate: batches')")
+    parser.add_argument("--ingest-id", help="with --data: the new files' name (default: the time, UTC)")
     args = parser.parse_args(argv)
     if args.source and len(args.files) > 1:
         parser.error("--source names one file's laptop; name several files after theirs")
     if args.validate:
-        return validate_files(args.files, sent=not args.unsent)
+        return validate_files(args.files, not args.unsent, args.data, args.ingest_id)
     if args.batch_out:
         return write_batches(args.files, args.source, args.batch_out)
 
+    # Stage 1: a laptop's log, sanitized here and stamped with its laptop.
     sanitizer = Sanitizer()
     clean = {}
     read = Counter()
     for path in args.files:
         source = label_of(path, args.source)
-        for raw in read_events(path):
+        for raw in raw_events(path):
             read[source] += 1
             event = sanitizer.event(raw, source)
             if event is not None:
                 clean.setdefault(event["event_id"], event)
 
-    by_week = defaultdict(list)
-    for event in clean.values():
-        by_week[week_of(event)].append(event)
-    already = known_ids(args.data, by_week) if args.data else set()
-    fresh = {week: [e for e in events if e["event_id"] not in already] for week, events in by_week.items()}
+    fresh = fresh_events(clean, args.data)
     new = sum(len(events) for events in fresh.values())
-
     if args.data:
-        ingest = args.ingest_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        for week, events in sorted(fresh.items()):
-            if not events:
-                continue
-            target = args.data / week / f"{ingest}.jsonl"
-            if target.exists():
-                raise SystemExit(f"{target} exists: every ingest writes files of its own")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with target.open("w", encoding="utf-8") as out:
-                for event in sorted(events, key=when):
-                    out.write(json.dumps(event, separators=(",", ":")) + "\n")
-            print(f"wrote {len(events)} events to {target}", file=sys.stderr)
+        store(fresh, args.data, args.ingest_id)
     else:
         for events in fresh.values():
-            for event in sorted(events, key=when):
+            for event in oldest_first(events):
                 print(json.dumps(event, separators=(",", ":")))
 
     for source, count in sorted(read.items()):

@@ -46,7 +46,7 @@ pct = sanitize.report.pct
 by_cloud = sanitize.report.by_cloud
 IST = sanitize.IST
 
-REPORT_VERSION = 1
+REPORT_VERSION = 2
 
 # What a week must hold, and how far it must move, to be flagged.
 MIN_N = 30

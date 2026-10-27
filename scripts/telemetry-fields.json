@@ -159,10 +159,28 @@
     },
     "dropped_by_reason": {"queue_full": "int", "unreadable_line": "int", "write_failed": "int"}
   },
+  "event_id": [
+    "Every event that leaves has an `event_id`, the same whichever upload it",
+    "came in, so an event is counted once however often its log is sent:",
+    "an `event_id` the event already has, kept only when it is exactly 16",
+    "lowercase hex; else the first 16 hex of the sha256 of the UTF-8 of",
+    "`launch_id|timestamp|event|interaction_id`, each its string as written",
+    "in the raw event, or empty when it is missing, null or not a string",
+    "(made before the event is sanitized, from the raw values). An event with",
+    "no `launch_id` (a string, not empty), from a build too old to write one,",
+    "is the first 16 hex of the sha256 of all of it, as Python's",
+    "json.dumps(event, sort_keys=True, separators=(\",\", \":\")) writes it:",
+    "keys sorted, no spaces, anything not ASCII as \\uXXXX."
+  ],
   "batch": {
     "_about": [
       "A batch is one JSONL file: its first line the envelope, `event`",
-      "`ella_batch`, then its events, oldest first. `batch_id` is the first 32",
+      "`ella_batch`, then its events, oldest first: by time, and in the order",
+      "they were written where two share one. `talks` is the number of",
+      "distinct `talk_id`s among its events; `first_event_at` and",
+      "`last_event_at` its first and last event's `timestamp`, as written.",
+      "No JSON key may appear twice in a line, nor NaN or Infinity in it.",
+      "`batch_id` is the first 32",
       "hex of sha256(canonical(body) + \"\\n\" + the event lines' bytes, each",
       "ending \"\\n\"), canonical being JSON with sorted keys and no spaces. The",
       "body is frozen when the batch is prepared; `send` is filled in at each",
@@ -197,6 +215,9 @@
       "first_attempt_at": "timestamp", "oldest_queued_event_age_ms": "int",
       "clock_suspect": "bool", "backlog_after_events": "int", "backlog_after_bytes": "int"
     },
+    "required": [
+      "policy_version", "install_id", "batch_seq", "origin", "events", "talks", "prepared_at"
+    ],
     "measured_by_app": [
       "app_version", "dropped_event_count", "dropped_by_reason", "log_resets", "dropped_total",
       "log_resets_total"

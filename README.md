@@ -719,11 +719,19 @@ to this public one, and the scripts that make the report live here.
    A tester who cannot run the script uploads the raw file, as at first; it
    stays in that repository's history, until the app makes its own batches.
 2. **Ingest**, on each upload, checks each batch as strictly as the policy
-   says (`npm run telemetry:sanitize -- --validate inbox/*.jsonl`), refusing
-   rather than fixing one that breaks it, and writes the events not already
-   under `data/` to a new `data/<week>/<ingest>.jsonl`; a raw file is
-   sanitized there instead, with `--data data/`. The upload is kept as a
-   90-day Actions artifact and removed from `inbox/`.
+   says and takes in the events of those that pass, each with its batch's
+   `install_id`, that are not already under `data/`, to a new
+   `data/<week>/<ingest>.jsonl`:
+
+   ```bash
+   npm run telemetry:sanitize -- --validate inbox/*.jsonl --data data/
+   ```
+
+   A batch that breaks the policy (a field, a value, a count, a key twice,
+   a hash that does not match) is refused whole, named with its problems,
+   and leaves nothing behind; the run then fails. A raw file is sanitized
+   there instead, with `--data data/` alone, which refuses a batch. The
+   upload is kept as a 90-day Actions artifact and removed from `inbox/`.
 3. **Report**, Mondays at 12:00 IST, runs
    `npm run telemetry:weekly -- data/ --out reports/` for the last whole week,
    Monday to Sunday in IST, commits `reports/<week>.md` and `.json`, and opens
@@ -746,7 +754,8 @@ more turns in both weeks, or a system error rate 2 points higher. The report
 also says when the mix moved (the cloud's share by more than 20 points, or
 the build most turns ran) and how many of last week's events came after last
 week's report. Claiming a change still takes the raw samples and a test. The
-JSON's keys stay put; a change to what they mean bumps `report_version`.
+JSON's keys stay put; a change to what they mean bumps `report_version`
+(2: laptops are counted by `install_id`, and batches are read).
 
 Either script also reads a laptop's own file, to see a week locally:
 
