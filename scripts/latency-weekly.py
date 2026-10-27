@@ -46,7 +46,7 @@ pct = sanitize.report.pct
 by_cloud = sanitize.report.by_cloud
 IST = sanitize.IST
 
-REPORT_VERSION = 1
+REPORT_VERSION = 2
 
 # What a week must hold, and how far it must move, to be flagged.
 MIN_N = 30
@@ -97,7 +97,15 @@ def read_all(paths):
         files.extend(sorted(path.rglob("*.jsonl")) if path.is_dir() else [path])
     events = {}
     for path in files:
+        install_id = None
         for event in sanitize.read_events(path):
+            # A batch's envelope is about the batch, not an event of the
+            # laptop's; its events are the install's it names.
+            if event.get("event") == "ella_batch":
+                install_id = event.get("install_id")
+                continue
+            if install_id and not event.get("install_id"):
+                event = {**event, "install_id": install_id}
             events.setdefault(sanitize.event_id(event), event)
     return list(events.values())
 
@@ -180,7 +188,7 @@ def summarize(events):
         "top_error_codes": dict(Counter(code(e) or "?" for e in errors).most_common(5)),
         "talks": len({talk(e) for e in turns if talk(e)}),
         "launches": len({launch(e) for e in events if launch(e)}),
-        "laptops": len({e.get("source") for e in events if e.get("source")}),
+        "laptops": len({e.get("install_id") or e.get("source") for e in events} - {None}),
         "app_versions": dict(Counter(e.get("app_version") or "?" for e in turns).most_common()),
         "cloud_turns": len(cloud),
         "cloud_share": ratio(len(cloud), len(ok)),

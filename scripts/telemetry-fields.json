@@ -1,93 +1,230 @@
 {
   "_about": [
-    "What of latency.jsonl may leave a laptop for the team's private telemetry",
-    "store: an allowlist, read by scripts/latency-sanitize.py. A field the app",
-    "starts writing is dropped until it is named here, and every sanitize run",
-    "counts what it dropped. Free-text errors become a code (`error_code`):",
-    "the word before a colon, such as NO_SPEECH_DETECTED, else `other`. IDs that",
-    "would tie events to a laptop's own database are hashed. `topic`, `level`",
-    "and `interaction_id` are left behind: the level is the learner's, and the",
-    "report needs neither. See README, Weekly latency report.",
+    "What of latency.jsonl may leave a laptop, and the batch it leaves in: the",
+    "telemetry policy, read by scripts/latency-sanitize.py (and, later, built",
+    "into the app). Every field that may leave has a rule; a field without one",
+    "stays behind, and a value that breaks its rule leaves as `other`, or not",
+    "at all for a number. Nothing is copied that the rules do not allow.",
     "",
-    "`ella_cloud.reason` becomes `reason_code`, one of `cloud_reasons` below:",
-    "the reason is free text. A refusal carries the proxy's own message, which",
-    "can quote DeepSeek's (`upstream_config`), from any server ELLA_CLOUD_URL",
-    "names; a stream that broke says what the OS said (cloud_llm.rs: refusal,",
-    "send, short, ask, probe, token). A reason not listed becomes `other`."
+    "Rules: `num`, `int` (whole, not negative), `bool`, a pattern from",
+    "`patterns` (`token`, `name`, `version`, `llama_build`, `hex16`, `hex32`,",
+    "`timestamp`), `hardware` (printable, at most `hardware_max` characters),",
+    "`enum:<name>` (one of `enums`), `hash:<out>` (sent as `<out>`, a hash),",
+    "`code:<coder>` (sent as the coder's `output`, one of its fixed codes),",
+    "`host` (`default` or `custom`, never the host), `object:<name>` (one of",
+    "`objects`), `list:<rule>`. Any field may be null.",
+    "",
+    "Free text never leaves: an error becomes a code (`coders.error`), and why",
+    "the cloud went down too (`coders.reason`): a proxy's refusal carries its",
+    "own words, and a stream that broke the OS's. `topic`, `level` and",
+    "`interaction_id` are left behind (`excluded`): the level is the learner's.",
+    "See README, Weekly latency report."
   ],
-  "every_event": ["event", "schema_version", "timestamp", "app_version", "launch_id"],
-  "hashed": {
-    "launch_id": "launch",
-    "session_id": "talk_id"
+  "policy_version": 2,
+  "patterns": {
+    "token": "^[a-z0-9_.:-]{1,40}$",
+    "name": "^[A-Za-z0-9 ._>(),-]{1,300}$",
+    "version": "^[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.-]{1,20})?$",
+    "llama_build": "^b[0-9]{3,6}(-[0-9a-f]{6,12})?$",
+    "hex16": "^[0-9a-f]{16}$",
+    "hex32": "^[0-9a-f]{32}$",
+    "timestamp": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.([0-9]{3}|[0-9]{6}|[0-9]{9}))?(Z|[+-][0-9]{2}:[0-9]{2})$"
   },
-  "coded": {
-    "error": "error_code",
-    "reason": "reason_code"
+  "hardware_max": 100,
+  "enums": {
+    "power_mode": ["best_efficiency", "balanced", "better_performance", "best_performance"],
+    "host": ["default", "custom"],
+    "origin": ["app", "manual"]
   },
-  "cloud_reasons": {
-    "exact": {
-      "timed out": "timed_out",
-      "could not connect": "could_not_connect",
-      "an answer that could not be read": "unreadable_answer",
-      "the request failed": "request_failed",
-      "the proxy has no model to ask": "no_model",
-      "the proxy gave no install token": "no_install_token",
-      "the answer broke off": "broke_off",
-      "the request stopped": "request_stopped"
+  "hosts": {
+    "default": ["xoeydvvslyvslvpaajmi.supabase.co"]
+  },
+  "coders": {
+    "error": {
+      "output": "error_code",
+      "_about": "The prefixes the app writes before its own words (error.rs, application.rs); anything else is `other`.",
+      "prefixes": {
+        "NO_SPEECH_DETECTED:": "NO_SPEECH_DETECTED",
+        "Local engine error:": "engine",
+        "Database error:": "database",
+        "File or process error:": "io",
+        "Local engine request failed:": "engine_request",
+        "Invalid local engine response:": "engine_response"
+      }
     },
-    "prefix": {
-      "no first word in ": "no_first_word",
-      "silent for ": "silent_partway"
-    },
-    "proxy": [
-      "bad_request", "unauthorized", "limit", "cap", "not_configured", "upstream_config",
-      "upstream_busy", "upstream", "upstream_rejected", "not_found", "internal"
-    ]
+    "reason": {
+      "output": "reason_code",
+      "_about": "Why the cloud went down (cloud_llm.rs: short, probe, token, ask, send, refusal). `HTTP <status>` is `http_<status>`; a proxy's `<code>` or `<code>: <message>` is `proxy_<code>`; anything else `other`.",
+      "exact": {
+        "timed out": "timed_out",
+        "could not connect": "could_not_connect",
+        "an answer that could not be read": "unreadable_answer",
+        "the request failed": "request_failed",
+        "the proxy has no model to ask": "no_model",
+        "the proxy gave no install token": "no_install_token",
+        "the answer broke off": "broke_off",
+        "the request stopped": "request_stopped"
+      },
+      "prefix": {
+        "no first word in ": "no_first_word",
+        "silent for ": "silent_partway"
+      },
+      "proxy": [
+        "bad_request", "unauthorized", "limit", "cap", "not_configured", "upstream_config",
+        "upstream_busy", "upstream", "upstream_rejected", "not_found", "internal"
+      ]
+    }
   },
-  "objects": {
-    "machine": [
-      "on_ac", "battery_pct", "battery_saver", "power_mode", "cpu_mhz", "cpu_mhz_max",
-      "cpu_mhz_limit", "cpu_busy_pct", "cpu_ella_pct", "ram_free_mb"
-    ],
-    "install": ["bundle", "place", "also_at"],
-    "warm_up": ["began_ms_before", "ms", "restored_tokens", "evaluated_tokens", "errand"],
-    "llm_runs": [
-      "why", "backend", "failed", "wait_ms", "errand", "ttft_ms", "ms", "prompt_tokens",
-      "prompt_evaluated", "prompt_ms", "gen_tokens", "gen_ms"
-    ],
-    "stt_pieces": [
-      "part", "audio_ms", "speech_ms", "engine", "words", "ms", "queued_ms", "attempts",
-      "done_ms", "cut"
-    ],
-    "judges": [
-      "judge", "backend", "status", "error", "waited_ms", "ms", "gave_way", "attempts",
-      "restored_tokens", "read_tokens", "written_tokens", "stopped_early"
-    ]
+  "every_event": {
+    "event": "token",
+    "schema_version": "num",
+    "timestamp": "timestamp",
+    "app_version": "version",
+    "launch_id": "hash:launch"
   },
   "events": {
-    "ella_turn_latency": [
-      "status", "error", "failed_at", "kind", "session_id", "talk", "turn", "talk_over",
-      "learner_words", "reply_words",
-      "audio_input_ms", "audio_after_vad_ms", "vad_ms",
-      "stt_ms", "stt_engine", "stt_backend", "stt_fallback_from", "stt_mel_ms",
-      "stt_encode_ms", "stt_decode_ms", "stt_pieces",
-      "llm_start_ms", "llm_ttft_ms", "llm_completion_ms", "llm_runs", "warm_up", "notes",
-      "tts_first_audio_ms", "tts_completion_ms", "tts_path", "tts_sentences",
-      "speech_ms", "total_ms", "machine"
+    "ella_turn_latency": {
+      "excluded": ["topic", "level", "interaction_id"],
+      "fields": {
+        "status": "token", "error": "code:error", "failed_at": "token", "kind": "token",
+        "session_id": "hash:talk_id", "talk": "token", "turn": "num", "talk_over": "bool",
+        "learner_words": "num", "reply_words": "num",
+        "audio_input_ms": "num", "audio_after_vad_ms": "num", "vad_ms": "num",
+        "stt_ms": "num", "stt_engine": "name", "stt_backend": "name", "stt_fallback_from": "name",
+        "stt_mel_ms": "num", "stt_encode_ms": "num", "stt_decode_ms": "num",
+        "stt_pieces": "list:object:stt_piece",
+        "llm_start_ms": "num", "llm_ttft_ms": "num", "llm_completion_ms": "num",
+        "llm_runs": "list:object:llm_run", "warm_up": "object:warm_up", "notes": "list:token",
+        "tts_first_audio_ms": "num", "tts_completion_ms": "num", "tts_path": "token",
+        "tts_sentences": "num", "speech_ms": "num", "total_ms": "num", "machine": "object:machine"
+      }
+    },
+    "ella_assessment": {
+      "fields": {
+        "status": "token", "error": "code:error", "session_id": "hash:talk_id", "kind": "token",
+        "answers": "num", "checked_answers": "num", "since_close_ms": "num", "scored_ms": "num",
+        "total_ms": "num", "judges": "list:object:judge", "machine": "object:machine"
+      }
+    },
+    "ella_launch": {
+      "fields": {
+        "os": "hardware", "arch": "token", "cpu": "hardware", "cores_physical": "num",
+        "cores_logical": "num", "ram_mb": "num", "machine": "object:machine",
+        "install": "object:install", "previous_version": "version"
+      }
+    },
+    "ella_engine": {
+      "fields": {
+        "since_launch_ms": "num", "llm_server": "token", "llama_threads": "num",
+        "llama_build": "llama_build", "llama_expected": "llama_build", "llm_ctx": "num",
+        "llm_model_mb": "num", "stt": "name", "stt_threads": "num", "piper": "token",
+        "cloud": "host", "error": "code:error"
+      }
+    },
+    "ella_cloud": {
+      "fields": {"up": "bool", "reason": "code:reason"}
+    },
+    "ella_update": {
+      "fields": {
+        "step": "token", "version": "version", "ms": "num", "bytes": "num", "via": "token",
+        "error": "code:error"
+      }
+    }
+  },
+  "objects": {
+    "machine": {
+      "on_ac": "bool", "battery_pct": "num", "battery_saver": "bool", "power_mode": "enum:power_mode",
+      "cpu_mhz": "num", "cpu_mhz_max": "num", "cpu_mhz_limit": "num", "cpu_busy_pct": "num",
+      "cpu_ella_pct": "num", "ram_free_mb": "num"
+    },
+    "install": {"bundle": "token", "place": "token", "also_at": "list:token"},
+    "warm_up": {
+      "began_ms_before": "num", "ms": "num", "restored_tokens": "num", "evaluated_tokens": "num",
+      "errand": "token"
+    },
+    "llm_run": {
+      "why": "token", "backend": "token", "failed": "token", "wait_ms": "num", "errand": "token",
+      "ttft_ms": "num", "ms": "num", "prompt_tokens": "num", "prompt_evaluated": "num",
+      "prompt_ms": "num", "gen_tokens": "num", "gen_ms": "num"
+    },
+    "stt_piece": {
+      "part": "token", "audio_ms": "num", "speech_ms": "num", "engine": "name", "words": "num",
+      "ms": "num", "queued_ms": "num", "attempts": "num", "done_ms": "num", "cut": "token"
+    },
+    "judge": {
+      "judge": "token", "backend": "token", "status": "token", "error": "code:error",
+      "waited_ms": "num", "ms": "num", "gave_way": "num", "attempts": "num",
+      "restored_tokens": "num", "read_tokens": "num", "written_tokens": "num",
+      "stopped_early": "bool"
+    },
+    "dropped_by_reason": {"queue_full": "int", "unreadable_line": "int", "write_failed": "int"}
+  },
+  "event_id": [
+    "Every event that leaves has an `event_id`, the same whichever upload it",
+    "came in, so an event is counted once however often its log is sent:",
+    "an `event_id` the event already has, kept only when it is exactly 16",
+    "lowercase hex; else the first 16 hex of the sha256 of the UTF-8 of",
+    "`launch_id|timestamp|event|interaction_id`, each its string as written",
+    "in the raw event, or empty when it is missing, null or not a string",
+    "(made before the event is sanitized, from the raw values). An event with",
+    "no `launch_id` (a string, not empty), from a build too old to write one,",
+    "is the first 16 hex of the sha256 of all of it, as Python's",
+    "json.dumps(event, sort_keys=True, separators=(\",\", \":\")) writes it:",
+    "keys sorted, no spaces, anything not ASCII as \\uXXXX."
+  ],
+  "batch": {
+    "_about": [
+      "A batch is one JSONL file: its first line the envelope, `event`",
+      "`ella_batch`, then its events, oldest first: by time, and in the order",
+      "they were written where two share one. `talks` is the number of",
+      "distinct `talk_id`s among its events; `first_event_at` and",
+      "`last_event_at` its first and last event's `timestamp`, as written.",
+      "No JSON key may appear twice in a line, nor NaN or Infinity in it.",
+      "`batch_id` is the first 32",
+      "hex of sha256(canonical(body) + \"\\n\" + the event lines' bytes, each",
+      "ending \"\\n\"), canonical being JSON with sorted keys and no spaces. The",
+      "body is frozen when the batch is prepared; `send` is filled in at each",
+      "try, so a retry is the same batch. Null in the body means not measured",
+      "(a manual batch), 0 measured and none.",
+      "",
+      "`install_id`: 16 hex from the OS's random generator, made once and kept in",
+      "telemetry/upload/state.json in the same write as the cursor and",
+      "`batch_seq`, so they are lost, or kept, together. Never from a host, a",
+      "user, a path or the cloud's install token. A state file lost or",
+      "unreadable starts a new install. A manual batch's is",
+      "sha256(\"manual:\" + its laptop's label), first 16 hex.",
+      "",
+      "`batch_seq`: 1, 2, 3... per install, given when a batch is prepared",
+      "(the last acknowledged + 1), part of the body and so of `batch_id`.",
+      "A retry, or a restart, sends the same batch with the same seq; it moves",
+      "on only once a batch is acknowledged. So no two batches of one install",
+      "share a seq: the same id twice is a duplicate, another id a fault, a gap",
+      "a batch that never came. 0 is a manual batch, which is not counted in",
+      "sequence: `origin` is `manual` exactly when `batch_seq` is 0."
     ],
-    "ella_assessment": [
-      "status", "error", "session_id", "kind", "answers", "checked_answers",
-      "since_close_ms", "scored_ms", "total_ms", "judges", "machine"
+    "body": {
+      "policy_version": "int", "install_id": "hex16", "batch_seq": "int", "origin": "enum:origin",
+      "app_version": "version", "events": "int", "talks": "int",
+      "first_event_at": "timestamp", "last_event_at": "timestamp",
+      "dropped_event_count": "int", "dropped_by_reason": "object:dropped_by_reason",
+      "log_resets": "int", "dropped_total": "int", "log_resets_total": "int",
+      "policy_excluded_count": "int", "values_replaced": "int", "unknown_fields_dropped": "int"
+    },
+    "send": {
+      "prepared_at": "timestamp", "sent_at": "timestamp", "attempts": "int",
+      "first_attempt_at": "timestamp", "oldest_queued_event_age_ms": "int",
+      "clock_suspect": "bool", "backlog_after_events": "int", "backlog_after_bytes": "int"
+    },
+    "required": [
+      "policy_version", "install_id", "batch_seq", "origin", "events", "talks", "prepared_at"
     ],
-    "ella_launch": [
-      "os", "arch", "cpu", "cores_physical", "cores_logical", "ram_mb", "machine",
-      "install", "previous_version"
+    "measured_by_app": [
+      "app_version", "dropped_event_count", "dropped_by_reason", "log_resets", "dropped_total",
+      "log_resets_total"
     ],
-    "ella_engine": [
-      "since_launch_ms", "llm_server", "llama_threads", "llama_build", "llama_expected",
-      "llm_ctx", "llm_model_mb", "stt", "stt_threads", "piper", "cloud", "error"
-    ],
-    "ella_cloud": ["up", "reason"],
-    "ella_update": ["step", "version", "ms", "bytes", "via", "error"]
+    "filled_when_sent": [
+      "sent_at", "attempts", "first_attempt_at", "oldest_queued_event_age_ms", "clock_suspect",
+      "backlog_after_events", "backlog_after_bytes"
+    ]
   }
 }

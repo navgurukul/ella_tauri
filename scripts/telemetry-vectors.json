@@ -1,0 +1,791 @@
+{
+ "_about": [
+  "Shared test vectors for the telemetry policy (telemetry-fields.json): what",
+  "any implementation of it, the scripts' or the app's, must do. `events`:",
+  "a raw event, what leaves (null: nothing), and the fields it counts as having",
+  "no rule (`unknown`), breaking their rule (`replaced`) or whole events left",
+  "out (`excluded`); each `event_id` is made by the policy's `event_id` recipe.",
+  "`error_codes`, `reason_codes`: text and its code (null: none). `batch_id`:",
+  "a batch's body and event lines, oldest first, and the id they make; its",
+  "`talks` counts the distinct `talk_id`s in the lines. Run by",
+  "scripts/test_telemetry_policy.py."
+ ],
+ "events": [
+  {
+   "name": "a turn keeps its timings and leaves the learner behind",
+   "raw": {
+    "event": "ella_turn_latency",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch_id": "d0ec3333-119c-4ae0-ac10-b69071ab640a",
+    "interaction_id": "i-1",
+    "status": "ok",
+    "kind": "voice",
+    "session_id": "talk-1",
+    "talk": "free",
+    "topic": "market",
+    "level": "A2",
+    "turn": 3,
+    "talk_over": false,
+    "learner_words": 6,
+    "reply_words": 9,
+    "stt_ms": 75,
+    "stt_engine": "streamed-chunks",
+    "stt_backend": "canary-180m-flash-q8_0",
+    "stt_fallback_from": null,
+    "llm_ttft_ms": 88,
+    "speech_ms": 403,
+    "total_ms": 406,
+    "notes": [
+     "cloud_fallback"
+    ],
+    "tts_path": "overlapped",
+    "transcript": "my name is Asha",
+    "llm_runs": [
+     {
+      "why": "reply",
+      "backend": "cloud",
+      "ttft_ms": 88,
+      "ms": 233,
+      "prompt": "You are Ella"
+     }
+    ],
+    "stt_pieces": [
+     {
+      "part": "tail",
+      "engine": "canary-180m-flash-q8_0",
+      "words": 6,
+      "ms": 74,
+      "done_ms": -3
+     }
+    ],
+    "machine": {
+     "on_ac": true,
+     "power_mode": "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c",
+     "cpu_busy_pct": 41,
+     "hostname": "ASHA-PC"
+    }
+   },
+   "sanitized": {
+    "event_id": "b599b6020bbe50d2",
+    "event": "ella_turn_latency",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch": "8b4c5f725391bfb6",
+    "status": "ok",
+    "kind": "voice",
+    "talk_id": "8abb45aec9a3be64",
+    "talk": "free",
+    "turn": 3,
+    "talk_over": false,
+    "learner_words": 6,
+    "reply_words": 9,
+    "stt_ms": 75,
+    "stt_engine": "streamed-chunks",
+    "stt_backend": "canary-180m-flash-q8_0",
+    "stt_fallback_from": null,
+    "llm_ttft_ms": 88,
+    "speech_ms": 403,
+    "total_ms": 406,
+    "notes": [
+     "cloud_fallback"
+    ],
+    "tts_path": "overlapped",
+    "llm_runs": [
+     {
+      "why": "reply",
+      "backend": "cloud",
+      "ttft_ms": 88,
+      "ms": 233
+     }
+    ],
+    "stt_pieces": [
+     {
+      "part": "tail",
+      "engine": "canary-180m-flash-q8_0",
+      "words": 6,
+      "ms": 74,
+      "done_ms": -3
+     }
+    ],
+    "machine": {
+     "on_ac": true,
+     "power_mode": "other",
+     "cpu_busy_pct": 41
+    }
+   },
+   "unknown": [
+    "ella_turn_latency.llm_runs.prompt",
+    "ella_turn_latency.machine.hostname",
+    "ella_turn_latency.transcript"
+   ],
+   "replaced": [
+    "ella_turn_latency.machine.power_mode"
+   ],
+   "excluded": []
+  },
+  {
+   "name": "no speech keeps its code",
+   "raw": {
+    "event": "ella_turn_latency",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch_id": "d0ec3333-119c-4ae0-ac10-b69071ab640a",
+    "interaction_id": "i-2",
+    "status": "error",
+    "kind": "voice",
+    "error": "NO_SPEECH_DETECTED: I couldn't hear any words in that recording.",
+    "failed_at": "stt",
+    "total_ms": 812
+   },
+   "sanitized": {
+    "event_id": "578c3b8e3833ec98",
+    "event": "ella_turn_latency",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch": "8b4c5f725391bfb6",
+    "status": "error",
+    "kind": "voice",
+    "error_code": "NO_SPEECH_DETECTED",
+    "failed_at": "stt",
+    "total_ms": 812
+   },
+   "unknown": [],
+   "replaced": [],
+   "excluded": []
+  },
+  {
+   "name": "an engine error keeps its category, not its words",
+   "raw": {
+    "event": "ella_turn_latency",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch_id": "d0ec3333-119c-4ae0-ac10-b69071ab640a",
+    "interaction_id": "i-3",
+    "status": "error",
+    "kind": "voice",
+    "error": "Local engine error: llama-server at C:\\Users\\asha\\AppData failed",
+    "failed_at": "llm",
+    "total_ms": 900
+   },
+   "sanitized": {
+    "event_id": "41e873955a2fbfef",
+    "event": "ella_turn_latency",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch": "8b4c5f725391bfb6",
+    "status": "error",
+    "kind": "voice",
+    "error_code": "engine",
+    "failed_at": "llm",
+    "total_ms": 900
+   },
+   "unknown": [],
+   "replaced": [],
+   "excluded": []
+  },
+  {
+   "name": "an error the app does not name is other",
+   "raw": {
+    "event": "ella_turn_latency",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch_id": "d0ec3333-119c-4ae0-ac10-b69071ab640a",
+    "interaction_id": "i-4",
+    "status": "error",
+    "kind": "text",
+    "error": "VALIDATION_FAILED: the learner said hello",
+    "total_ms": 10
+   },
+   "sanitized": {
+    "event_id": "2ca87743eec55af5",
+    "event": "ella_turn_latency",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch": "8b4c5f725391bfb6",
+    "status": "error",
+    "kind": "text",
+    "error_code": "other",
+    "total_ms": 10
+   },
+   "unknown": [],
+   "replaced": [],
+   "excluded": []
+  },
+  {
+   "name": "a number sent as text is left out",
+   "raw": {
+    "event": "ella_turn_latency",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch_id": "d0ec3333-119c-4ae0-ac10-b69071ab640a",
+    "interaction_id": "i-5",
+    "status": "ok",
+    "kind": "voice",
+    "total_ms": "1000",
+    "speech_ms": 900
+   },
+   "sanitized": {
+    "event_id": "77eaf7b32264c6dc",
+    "event": "ella_turn_latency",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch": "8b4c5f725391bfb6",
+    "status": "ok",
+    "kind": "voice",
+    "speech_ms": 900
+   },
+   "unknown": [],
+   "replaced": [
+    "ella_turn_latency.total_ms"
+   ],
+   "excluded": []
+  },
+  {
+   "name": "a stage and the pieces' engines keep their real form",
+   "raw": {
+    "event": "ella_turn_latency",
+    "schema_version": 2,
+    "timestamp": "2026-10-16T11:10:02.500133+00:00",
+    "app_version": "0.1.24",
+    "launch_id": "a65c6cfd-0000-4000-8000-000000000001",
+    "interaction_id": "i-9",
+    "status": "error",
+    "kind": "voice",
+    "error": "NO_SPEECH_DETECTED: I couldn't hear any words in that recording.",
+    "failed_at": "stt:done",
+    "stt_engine": "streamed-chunks",
+    "stt_backend": "canary-180m-flash-q8_0,canary-180m-flash-q8_0,silence",
+    "total_ms": 1310
+   },
+   "sanitized": {
+    "event_id": "22384329dfc4e513",
+    "event": "ella_turn_latency",
+    "schema_version": 2,
+    "timestamp": "2026-10-16T11:10:02.500133+00:00",
+    "app_version": "0.1.24",
+    "launch": "0031f619c8a5b7ac",
+    "status": "error",
+    "kind": "voice",
+    "error_code": "NO_SPEECH_DETECTED",
+    "failed_at": "stt:done",
+    "stt_engine": "streamed-chunks",
+    "stt_backend": "canary-180m-flash-q8_0,canary-180m-flash-q8_0,silence",
+    "total_ms": 1310
+   },
+   "unknown": [],
+   "replaced": [],
+   "excluded": []
+  },
+  {
+   "name": "a recap's judges keep their codes",
+   "raw": {
+    "event": "ella_assessment",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch_id": "d0ec3333-119c-4ae0-ac10-b69071ab640a",
+    "status": "ok",
+    "kind": "talk",
+    "session_id": "talk-1",
+    "answers": 6,
+    "total_ms": 2862,
+    "judges": [
+     {
+      "judge": "score",
+      "status": "error",
+      "error": "proxy said: the learner wrote 'hi'",
+      "ms": 1375,
+      "reply": "x"
+     }
+    ]
+   },
+   "sanitized": {
+    "event_id": "b62264aed7951a6a",
+    "event": "ella_assessment",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch": "8b4c5f725391bfb6",
+    "status": "ok",
+    "kind": "talk",
+    "talk_id": "8abb45aec9a3be64",
+    "answers": 6,
+    "total_ms": 2862,
+    "judges": [
+     {
+      "judge": "score",
+      "status": "error",
+      "error_code": "other",
+      "ms": 1375
+     }
+    ]
+   },
+   "unknown": [
+    "ella_assessment.judges.reply"
+   ],
+   "replaced": [],
+   "excluded": []
+  },
+  {
+   "name": "a launch keeps its hardware within the rules",
+   "raw": {
+    "event": "ella_launch",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch_id": "d0ec3333-119c-4ae0-ac10-b69071ab640a",
+    "os": "Windows 11 Home 23H2",
+    "arch": "x86_64",
+    "cpu": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
+    "cores_physical": 4,
+    "cores_logical": 8,
+    "ram_mb": 8192,
+    "install": {
+     "bundle": "nsis",
+     "place": "per_user",
+     "also_at": [
+      "per_machine"
+     ]
+    },
+    "previous_version": "0.1.25"
+   },
+   "sanitized": {
+    "event_id": "34bc7130db829ab6",
+    "event": "ella_launch",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch": "8b4c5f725391bfb6",
+    "os": "Windows 11 Home 23H2",
+    "arch": "x86_64",
+    "cpu": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
+    "cores_physical": 4,
+    "cores_logical": 8,
+    "ram_mb": 8192,
+    "install": {
+     "bundle": "nsis",
+     "place": "per_user",
+     "also_at": [
+      "per_machine"
+     ]
+    },
+    "previous_version": "0.1.25"
+   },
+   "unknown": [],
+   "replaced": [],
+   "excluded": []
+  },
+  {
+   "name": "a launch's odd strings leave as other",
+   "raw": {
+    "event": "ella_launch",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch_id": "d0ec3333-119c-4ae0-ac10-b69071ab640a",
+    "os": "Windows\u0007 11",
+    "arch": "x86_64",
+    "cpu": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    "previous_version": "0.1.25; rm -rf /"
+   },
+   "sanitized": {
+    "event_id": "34bc7130db829ab6",
+    "event": "ella_launch",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch": "8b4c5f725391bfb6",
+    "os": "other",
+    "arch": "x86_64",
+    "cpu": "other",
+    "previous_version": "other"
+   },
+   "unknown": [],
+   "replaced": [
+    "ella_launch.cpu",
+    "ella_launch.os",
+    "ella_launch.previous_version"
+   ],
+   "excluded": []
+  },
+  {
+   "name": "an engine names its cloud only as default or custom",
+   "raw": {
+    "event": "ella_engine",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch_id": "d0ec3333-119c-4ae0-ac10-b69071ab640a",
+    "since_launch_ms": 21036,
+    "llm_server": "started",
+    "llama_build": "b11405-1b43d3116",
+    "llama_expected": "b11405",
+    "stt": "canary-180m-flash-q8_0 > windows-speech",
+    "piper": "resident",
+    "cloud": "user:secret@proxy.example.org"
+   },
+   "sanitized": {
+    "event_id": "619b430a31213672",
+    "event": "ella_engine",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch": "8b4c5f725391bfb6",
+    "since_launch_ms": 21036,
+    "llm_server": "started",
+    "llama_build": "b11405-1b43d3116",
+    "llama_expected": "b11405",
+    "stt": "canary-180m-flash-q8_0 > windows-speech",
+    "piper": "resident",
+    "cloud": "custom"
+   },
+   "unknown": [],
+   "replaced": [],
+   "excluded": []
+  },
+  {
+   "name": "the default proxy is default",
+   "raw": {
+    "event": "ella_engine",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch_id": "d0ec3333-119c-4ae0-ac10-b69071ab640a",
+    "since_launch_ms": 5000,
+    "llm_server": "external",
+    "llama_build": "my own build",
+    "stt": "Canary-180M-Flash Q8_0",
+    "piper": "one-shot",
+    "cloud": "xoeydvvslyvslvpaajmi.supabase.co"
+   },
+   "sanitized": {
+    "event_id": "619b430a31213672",
+    "event": "ella_engine",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch": "8b4c5f725391bfb6",
+    "since_launch_ms": 5000,
+    "llm_server": "external",
+    "llama_build": "other",
+    "stt": "Canary-180M-Flash Q8_0",
+    "piper": "one-shot",
+    "cloud": "default"
+   },
+   "unknown": [],
+   "replaced": [
+    "ella_engine.llama_build"
+   ],
+   "excluded": []
+  },
+  {
+   "name": "the cloud's reason leaves as a code",
+   "raw": {
+    "event": "ella_cloud",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch_id": "d0ec3333-119c-4ae0-ac10-b69071ab640a",
+    "up": false,
+    "reason": "upstream_config: DeepSeek refused the request (400): messages[3] said 'hello'"
+   },
+   "sanitized": {
+    "event_id": "c79e08e1185e8950",
+    "event": "ella_cloud",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch": "8b4c5f725391bfb6",
+    "up": false,
+    "reason_code": "proxy_upstream_config"
+   },
+   "unknown": [],
+   "replaced": [],
+   "excluded": []
+  },
+  {
+   "name": "the cloud coming up has no reason",
+   "raw": {
+    "event": "ella_cloud",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch_id": "d0ec3333-119c-4ae0-ac10-b69071ab640a",
+    "up": true
+   },
+   "sanitized": {
+    "event_id": "c79e08e1185e8950",
+    "event": "ella_cloud",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch": "8b4c5f725391bfb6",
+    "up": true
+   },
+   "unknown": [],
+   "replaced": [],
+   "excluded": []
+  },
+  {
+   "name": "an update keeps its step and version",
+   "raw": {
+    "event": "ella_update",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch_id": "d0ec3333-119c-4ae0-ac10-b69071ab640a",
+    "step": "download",
+    "version": "0.1.26",
+    "bytes": 104857600,
+    "ms": 42000,
+    "via": "restart"
+   },
+   "sanitized": {
+    "event_id": "6ea12ac8d182f55c",
+    "event": "ella_update",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch": "8b4c5f725391bfb6",
+    "step": "download",
+    "version": "0.1.26",
+    "bytes": 104857600,
+    "ms": 42000,
+    "via": "restart"
+   },
+   "unknown": [],
+   "replaced": [],
+   "excluded": []
+  },
+  {
+   "name": "an update's odd version and error are not kept",
+   "raw": {
+    "event": "ella_update",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch_id": "d0ec3333-119c-4ae0-ac10-b69071ab640a",
+    "step": "check",
+    "version": "<script>",
+    "error": "error sending request for url (https://github.com/navgurukul/ella_tauri/releases/latest/download/latest.json)"
+   },
+   "sanitized": {
+    "event_id": "6ea12ac8d182f55c",
+    "event": "ella_update",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch": "8b4c5f725391bfb6",
+    "step": "check",
+    "version": "other",
+    "error_code": "other"
+   },
+   "unknown": [],
+   "replaced": [
+    "ella_update.version"
+   ],
+   "excluded": []
+  },
+  {
+   "name": "an old build's event is known by all of itself",
+   "raw": {
+    "event": "ella_turn_latency",
+    "schema_version": 1,
+    "timestamp": "2026-08-26T09:00:00Z",
+    "status": "ok",
+    "total_ms": 4000
+   },
+   "sanitized": {
+    "event_id": "d7b58c31f764ec8e",
+    "event": "ella_turn_latency",
+    "schema_version": 1,
+    "timestamp": "2026-08-26T09:00:00Z",
+    "status": "ok",
+    "total_ms": 4000
+   },
+   "unknown": [],
+   "replaced": [],
+   "excluded": []
+  },
+  {
+   "name": "an event the policy does not name stays behind",
+   "raw": {
+    "event": "ella_new_thing",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch_id": "d0ec3333-119c-4ae0-ac10-b69071ab640a",
+    "value": 1
+   },
+   "sanitized": null,
+   "unknown": [],
+   "replaced": [],
+   "excluded": [
+    "ella_new_thing"
+   ]
+  },
+  {
+   "name": "an event without a time stays behind",
+   "raw": {
+    "event": "ella_cloud",
+    "up": true
+   },
+   "sanitized": null,
+   "unknown": [],
+   "replaced": [],
+   "excluded": [
+    "ella_cloud without a time"
+   ]
+  }
+ ],
+ "error_codes": [
+  [
+   "NO_SPEECH_DETECTED: I couldn't hear any words in that recording.",
+   "NO_SPEECH_DETECTED"
+  ],
+  [
+   "Local engine error: llama-server exited",
+   "engine"
+  ],
+  [
+   "Database error: database is locked",
+   "database"
+  ],
+  [
+   "File or process error: No such file or directory (os error 2)",
+   "io"
+  ],
+  [
+   "Local engine request failed: error sending request for url (http://127.0.0.1:39091/v1)",
+   "engine_request"
+  ],
+  [
+   "Invalid local engine response: expected value at line 1",
+   "engine_response"
+  ],
+  [
+   "VALIDATION_FAILED: the learner said hello",
+   "other"
+  ],
+  [
+   "This talk is still going.",
+   "other"
+  ],
+  [
+   "could not open C:\\Users\\asha\\model.gguf",
+   "other"
+  ],
+  [
+   "",
+   null
+  ]
+ ],
+ "reason_codes": [
+  [
+   "could not connect",
+   "could_not_connect"
+  ],
+  [
+   "timed out",
+   "timed_out"
+  ],
+  [
+   "an answer that could not be read",
+   "unreadable_answer"
+  ],
+  [
+   "the request failed",
+   "request_failed"
+  ],
+  [
+   "the proxy has no model to ask",
+   "no_model"
+  ],
+  [
+   "the proxy gave no install token",
+   "no_install_token"
+  ],
+  [
+   "the answer broke off",
+   "broke_off"
+  ],
+  [
+   "the request stopped",
+   "request_stopped"
+  ],
+  [
+   "no first word in 5 s",
+   "no_first_word"
+  ],
+  [
+   "silent for 8 s partway",
+   "silent_partway"
+  ],
+  [
+   "HTTP 503",
+   "http_503"
+  ],
+  [
+   "HTTP 502: <html>bad gateway</html>",
+   "http_502"
+  ],
+  [
+   "cap",
+   "proxy_cap"
+  ],
+  [
+   "cap: today's spend has reached the cap",
+   "proxy_cap"
+  ],
+  [
+   "upstream_config: DeepSeek refused the request (402): Insufficient Balance",
+   "proxy_upstream_config"
+  ],
+  [
+   "Connection reset by peer (os error 54)",
+   "other"
+  ],
+  [
+   "evil_code: the learner said 'my name is Asha'",
+   "other"
+  ],
+  [
+   "",
+   null
+  ]
+ ],
+ "batch_id": {
+  "body": {
+   "policy_version": 2,
+   "install_id": "1d72bc052d5e6ce8",
+   "batch_seq": 0,
+   "origin": "manual",
+   "app_version": null,
+   "events": 2,
+   "talks": 1,
+   "first_event_at": "2026-10-20T06:00:00.123456789+00:00",
+   "last_event_at": "2026-10-20T06:00:00.123456789+00:00",
+   "dropped_event_count": null,
+   "dropped_by_reason": null,
+   "log_resets": null,
+   "dropped_total": null,
+   "log_resets_total": null,
+   "policy_excluded_count": 0,
+   "values_replaced": 0,
+   "unknown_fields_dropped": 0
+  },
+  "lines": "{\"event_id\":\"b599b6020bbe50d2\",\"event\":\"ella_turn_latency\",\"schema_version\":2,\"timestamp\":\"2026-10-20T06:00:00.123456789+00:00\",\"app_version\":\"0.1.26\",\"launch\":\"8b4c5f725391bfb6\",\"status\":\"ok\",\"kind\":\"voice\",\"talk_id\":\"8abb45aec9a3be64\",\"talk\":\"free\",\"turn\":3,\"talk_over\":false,\"learner_words\":6,\"reply_words\":9,\"stt_ms\":75,\"stt_engine\":\"streamed-chunks\",\"stt_backend\":\"canary-180m-flash-q8_0\",\"stt_fallback_from\":null,\"llm_ttft_ms\":88,\"speech_ms\":403,\"total_ms\":406,\"notes\":[\"cloud_fallback\"],\"tts_path\":\"overlapped\",\"llm_runs\":[{\"why\":\"reply\",\"backend\":\"cloud\",\"ttft_ms\":88,\"ms\":233}],\"stt_pieces\":[{\"part\":\"tail\",\"engine\":\"canary-180m-flash-q8_0\",\"words\":6,\"ms\":74,\"done_ms\":-3}],\"machine\":{\"on_ac\":true,\"power_mode\":\"other\",\"cpu_busy_pct\":41}}\n{\"event_id\":\"578c3b8e3833ec98\",\"event\":\"ella_turn_latency\",\"schema_version\":2,\"timestamp\":\"2026-10-20T06:00:00.123456789+00:00\",\"app_version\":\"0.1.26\",\"launch\":\"8b4c5f725391bfb6\",\"status\":\"error\",\"kind\":\"voice\",\"error_code\":\"NO_SPEECH_DETECTED\",\"failed_at\":\"stt\",\"total_ms\":812}\n",
+  "batch_id": "0f8d6371cfd6e793b27b17d509751e84"
+ }
+}
