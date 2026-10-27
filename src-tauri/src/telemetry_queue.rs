@@ -43,7 +43,14 @@ use crate::{
     telemetry_policy::{self as policy, Body, Reasons, Sanitizer, SendFields},
 };
 
-/// When the queue looks at the log, and how much it sends at a time.
+/// When the queue looks at the log, and how much it sends at a time. The app
+/// uses `Config::default()`, fixed; tests make their own, shorter ones.
+/// There is no setting or environment variable for any of it.
+///
+/// Two clocks, kept apart: `idle` says when the queue may work at all (no
+/// turn for 2 minutes), and says nothing of talks; `talk_quiet` says when a
+/// talk with no end recorded counts as over, for `due_talks`. A pause in a
+/// talk longer than `idle` lets the queue look, never ends the talk.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// The most of the log one batch is made from. A longer line goes alone.
@@ -177,6 +184,11 @@ pub struct Pending {
     /// The totals its body counted up to: acknowledged with it.
     pub dropped_total: Reasons,
     pub log_resets_total: u64,
+    /// The log's bytes it was made from, and the lines among them that were
+    /// no event: to make it again, should its outbox file be lost.
+    pub start: u64,
+    pub end: u64,
+    pub unreadable: u64,
 }
 
 /// What the queue lost, counted since the install began and never reset. A
@@ -267,7 +279,8 @@ impl Queue {
             if state.pending.is_some() {
                 match self.send(&mut state, now)? {
                     Sent::Stored => outcome.sent += 1,
-                    Sent::Lost => {}
+                    // Made again at once, due or not.
+                    Sent::Lost => made = true,
                     Sent::Waiting(at) => {
                         outcome.retry_at = Some(at);
                         break;
@@ -477,7 +490,7 @@ impl Queue {
         let mut sanitizer = Sanitizer::default();
         let mut events = Vec::new();
         let mut ids = std::collections::HashSet::new();
-        let (mut end, mut read) = (state.cursor.offset, 0);
+        let (start, mut end, mut read, mut unreadable) = (state.cursor.offset, state.cursor.offset, 0, 0);
         while read < self.config.batch_bytes {
             let Some(line) = lines.next_line()? else { break };
             read += line.end - line.start;
@@ -494,12 +507,13 @@ impl Queue {
                         }
                     }
                 }
-                None => state.health.dropped_total.unreadable_line += 1,
+                None => unreadable += 1,
             }
         }
-        if end == state.cursor.offset {
+        if end == start {
             return Ok(false);
         }
+        state.health.dropped_total.unreadable_line += unreadable;
         policy::oldest_first(&mut events);
         let health = &state.health;
         let dropped = health.dropped_total.since(&health.acked_through.dropped);
@@ -549,6 +563,9 @@ impl Queue {
             first_attempt_at: None,
             dropped_total: state.health.dropped_total,
             log_resets_total: state.health.log_resets_total,
+            start,
+            end,
+            unreadable,
         });
         state.cursor.offset = end;
         self.save(state)?;
@@ -569,10 +586,25 @@ impl Queue {
         };
         let Some((body, lines)) = frozen.filter(|(body, lines)| policy::batch_id_of(body, lines) == pending.batch_id)
         else {
-            // The batch is gone, or not whole: its events are lost, and
-            // counted, and the next batch takes its place in the sequence.
-            eprintln!("[TELEMETRY] the batch waiting was lost; its {} events are counted as dropped", pending.events);
-            state.health.dropped_total.write_failed += pending.events;
+            // The batch's file is gone, or not whole: no transport is
+            // involved, only the laptop's disk, or a person. While the log
+            // still has its lines, the batch is made again from them and
+            // nothing is lost or counted; the next batch has its number.
+            // Only when the log was replaced or cut since, or the cap has
+            // moved the cursor on, are its events gone, and counted as
+            // `write_failed`: events the app could not keep to send.
+            let lines_kept = state.cursor.offset == pending.end
+                && state.health.log_resets_total == pending.log_resets_total;
+            if lines_kept {
+                eprintln!("[TELEMETRY] the batch waiting was lost; making it again from the log");
+                state.cursor.offset = pending.start;
+                // Counted again when its lines are read again.
+                let unreadable = &mut state.health.dropped_total.unreadable_line;
+                *unreadable = unreadable.saturating_sub(pending.unreadable);
+            } else {
+                eprintln!("[TELEMETRY] the batch waiting was lost with its lines; {} events counted as dropped", pending.events);
+                state.health.dropped_total.write_failed += pending.events;
+            }
             state.pending = None;
             state.backoff_s = 0;
             state.next_attempt_at = None;
@@ -617,8 +649,12 @@ impl Queue {
                 Ok(Sent::Stored)
             }
             Err(SendError::Refused(why)) => {
-                // Sent again it would be refused again. Put aside; its
-                // number goes to the next batch, which carries its drops.
+                // Only a relay refuses (Phase 4); export never does, so this
+                // is a placeholder for it, to be settled with the relay. Sent
+                // again it would be refused again: put aside, and its number
+                // goes to the next batch, which carries its drops (they were
+                // never acknowledged). Its events are not counted as dropped
+                // here: the relay knows what it refused.
                 eprintln!("[TELEMETRY] batch {batch_id} was refused ({why}); put aside");
                 self.put_aside(&path, &batch_id);
                 state.pending = None;
@@ -1159,6 +1195,28 @@ mod tests {
     }
 
     #[test]
+    fn a_pause_in_a_talk_lets_the_queue_look_but_does_not_end_the_talk() {
+        let laptop = Laptop::new().installed();
+        let lines: Vec<_> = three_talks(t0()).into_iter().take(6).collect();
+        laptop.write(&lines);
+        let last_turn = t0() + TimeDelta::minutes(5);
+        laptop.write(&[turn("open", last_turn, false)]);
+        let config = Config::default();
+        // Three minutes on: past the idle wait, so the queue may look...
+        let paused = Duration::from_secs(3 * 60);
+        assert_eq!(still_busy(paused, config.idle), None);
+        // ...but the talk is not over, so nothing is due.
+        let now = last_turn + TimeDelta::minutes(3);
+        assert!(!laptop.queue(config.clone()).due(&laptop.state(), now).unwrap());
+        assert!(!laptop.queue(config.clone()).due(&laptop.state(), last_turn + TimeDelta::minutes(29)).unwrap());
+        assert_eq!(laptop.run(now).sent, 0);
+        // Only the 30 minutes, or its end, makes it over.
+        assert!(laptop.queue(config.clone()).due(&laptop.state(), last_turn + TimeDelta::minutes(31)).unwrap());
+        laptop.write(&[turn("open", now, true)]);
+        assert!(laptop.queue(config).due(&laptop.state(), now).unwrap());
+    }
+
+    #[test]
     fn a_batch_is_due_when_its_oldest_event_is_three_days_old() {
         let laptop = Laptop::new().installed();
         laptop.write(&[launch(t0())]);
@@ -1206,7 +1264,12 @@ mod tests {
         assert!((48..=72).contains(&first_wait.num_seconds()), "{first_wait}");
         let state = laptop.state();
         assert_eq!(state.backoff_s, 60);
-        assert_eq!(state.pending.as_ref().unwrap().attempts, 1);
+        let pending = state.pending.as_ref().unwrap();
+        assert_eq!(pending.attempts, 1);
+        // The cursor is past the batch's lines once it is in the outbox;
+        // the outbox, not the log, is what is sent again.
+        assert_eq!(state.cursor.offset, fs::metadata(laptop.log()).unwrap().len());
+        assert_eq!(laptop.outbox(), [format!("{}.jsonl", pending.batch_id)]);
 
         // Not before its time.
         assert_eq!(laptop.run(now + TimeDelta::seconds(30)).retry_at, outcome.retry_at);
@@ -1318,19 +1381,45 @@ mod tests {
     }
 
     #[test]
-    fn a_lost_outbox_file_counts_its_events_as_dropped() {
+    fn a_lost_outbox_file_is_made_again_from_the_log_and_nothing_counted_lost() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&three_talks(t0()));
+        laptop.write(&["junk".into()]);
+        laptop.fake.answer(Err(SendError::Unreachable));
+        laptop.run(t0() + TimeDelta::hours(1));
+        let lost = laptop.state().pending.unwrap();
+        fs::remove_file(laptop.dir.path().join(format!("upload/outbox/{}.jsonl", lost.batch_id))).unwrap();
+
+        assert_eq!(laptop.run(t0() + TimeDelta::hours(2)).sent, 1);
+        let (envelope, events) = laptop.fake.batches().pop().unwrap();
+        assert_eq!(envelope["batch_seq"], 1);
+        assert_eq!(events.len(), 9, "the same lines");
+        assert_eq!(
+            envelope["dropped_by_reason"],
+            serde_json::json!({"queue_full": 0, "unreadable_line": 1, "write_failed": 0}),
+            "the junk line counted once, nothing counted lost"
+        );
+        assert_eq!(envelope["dropped_total"], 1);
+        assert_eq!(laptop.state().cursor.offset, fs::metadata(laptop.log()).unwrap().len());
+    }
+
+    #[test]
+    fn a_lost_outbox_file_whose_lines_are_gone_counts_its_events_as_dropped() {
         let laptop = Laptop::new().installed();
         laptop.write(&three_talks(t0()));
         laptop.fake.answer(Err(SendError::Unreachable));
         laptop.run(t0() + TimeDelta::hours(1));
         let lost = laptop.state().pending.unwrap();
         fs::remove_file(laptop.dir.path().join(format!("upload/outbox/{}.jsonl", lost.batch_id))).unwrap();
+        // And the log replaced: its lines are nowhere now.
+        fs::write(laptop.log(), "").unwrap();
         laptop.write(&three_talks(t0() + TimeDelta::hours(2)));
         laptop.run(t0() + TimeDelta::hours(3));
-        let (envelope, _) = laptop.fake.batches().pop().unwrap();
+        let (envelope, events) = laptop.fake.batches().pop().unwrap();
         assert_eq!(envelope["batch_seq"], 1);
+        assert_eq!(events.len(), 9);
         assert_eq!(envelope["dropped_by_reason"]["write_failed"], 9);
-        assert_eq!(envelope["dropped_total"], 9);
+        assert_eq!(envelope["log_resets"], 1);
     }
 
     #[test]

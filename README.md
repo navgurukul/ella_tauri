@@ -781,8 +781,10 @@ kind of failure the app names before its own words (`engine`, `database`,
 `io`, `engine_request`, `engine_response`); else `other`. Why the cloud went
 down leaves as `could_not_connect`, `http_503`, `proxy_cap` and the like,
 since a proxy's refusal carries its own words. The proxy's host leaves as
-`default` or `custom`, never the host. The launch and talk IDs are hashed;
-`topic`, `level` and `interaction_id` stay behind.
+`default` or `custom`, never the host. The launch and talk IDs are hashed,
+and only when they are text: one that is not (the app always writes text)
+does not leave, and is counted as a value replaced. `topic`, `level` and
+`interaction_id` stay behind.
 
 What leaves, leaves as a **batch**: one JSONL file whose first line, the
 envelope (`ella_batch`), says what is in it, and whose other lines are the
@@ -811,8 +813,8 @@ it took and how old its oldest event was are filled in each time it is sent.
 any implementation of the policy must do, event by event: the scripts', and
 the app's (`src-tauri/src/telemetry_policy.rs`, which builds the policy file
 in and is tested against the vectors). The one difference: the app leaves
-out, and counts, an event with no `launch_id`, from a build before
-2026-10-07; `--batch-out` sends those by hand.
+out, and counts (`policy_excluded_count`), an event with no `launch_id` as
+text, from a build before 2026-10-07; `--batch-out` sends those by hand.
 
 #### The upload queue (export only, off by default)
 
@@ -832,20 +834,33 @@ nothing runs.
   sent is frozen in `upload/outbox/`, so a retry, or a restart, sends the
   same bytes. A state file that can't be read is kept as
   `state.json.corrupt-<time>`, and the laptop starts again as a new install.
-- **When.** After 120 s with no turn, at launch, after a recap, when the
-  cloud comes back, and every 30 minutes. A batch is due once 3 talks are
-  over (recapped, ended, or quiet for 30 minutes), the oldest event waiting
-  is 3 days old, or 256 KB waits. Once one is due, the rest of the log
-  follows, 256 KB a batch.
+- **When.** The queue looks at launch, after a recap, when the cloud comes
+  back, and every 30 minutes, but only once no turn has started or ended
+  for 120 s. A batch is due once 3 talks are over (recapped, ended, or
+  quiet for 30 minutes), the oldest event waiting is 3 days old, or 256 KB
+  waits. The two are kept apart: a 2-minute pause in a talk lets the queue
+  look, but only those 30 minutes, or the talk's end, count it as over.
+  Once a batch is due, the rest of the log follows, 256 KB a batch: the
+  turns of a talk still open go with it, without it being counted as over.
+- **Thresholds** are fixed in the app (`Config::default()`); there is no
+  setting or environment variable for them. Tests give the queue shorter
+  ones directly.
 - **Retries.** A batch that couldn't be written waits 1 minute, doubling to
   6 hours, a fifth either way.
 - **Drops.** Past 32 MB or 180 days of waiting, the oldest lines are dropped
   (`queue_full`). A line that isn't an event is `unreadable_line`. An event
-  the log couldn't take, or a batch lost from the outbox, is
-  `write_failed`. A log found replaced or cut is read again from its start
+  the log couldn't take is `write_failed` (and see below). A log found replaced or cut is read again from its start
   and counted (`log_resets`); the store keeps each `event_id` once. The
   totals are never reset: a batch carries what was lost since the last one
   acknowledged, and the totals.
+- **A batch lost from the outbox** (deleted, or not whole) is made again
+  from the same lines of the log, and nothing is counted lost. Only when
+  those lines are gone too (the log replaced or cut, or the cap past them)
+  are its events counted, as `write_failed`.
+- **A refused batch** is for a relay (Phase 4); export never refuses. As it
+  stands, a refused batch is put aside in `upload/refused/` (the newest 10
+  kept), its number goes to the next batch, and its drops come with that
+  one; its events are not counted as dropped. To be settled with the relay.
 - **Two copies of Ella** share the log; `upload/upload.lock` lets one queue
   work at a time.
 

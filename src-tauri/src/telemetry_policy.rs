@@ -719,6 +719,28 @@ mod tests {
     }
 
     #[test]
+    fn ids_that_are_not_text_do_not_leave() {
+        let raw = |launch: Value, talk: Value| {
+            serde_json::json!({
+                "event": "ella_assessment", "schema_version": 2, "timestamp": "2026-10-20T06:00:00Z",
+                "app_version": "0.1.26", "launch_id": launch, "status": "ok", "session_id": talk,
+            })
+        };
+        // A talk id that is not text: the event leaves without it, counted.
+        let mut sanitizer = Sanitizer::default();
+        let event = sanitizer.event(raw(Value::from("l-1"), Value::from(42)).as_object().unwrap()).unwrap();
+        assert!(!event.contains_key("talk_id") && !event.contains_key("session_id"));
+        assert_eq!(keys(&sanitizer.replaced), ["ella_assessment.session_id"]);
+        // A launch id that is not text: the event has no id the app can
+        // make, and stays behind, counted.
+        for launch in [Value::from(42), Value::from(""), Value::Null, serde_json::json!({"id": "l-1"})] {
+            let mut sanitizer = Sanitizer::default();
+            assert_eq!(sanitizer.event(raw(launch.clone(), Value::from("t-1")).as_object().unwrap()), None, "{launch}");
+            assert_eq!(keys(&sanitizer.excluded), ["ella_assessment without a launch_id"]);
+        }
+    }
+
+    #[test]
     fn hardware_is_printable_ascii_only() {
         assert!(holds(&Value::from("Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz"), "hardware"));
         assert!(!holds(&Value::from("Apple M1 Pro™"), "hardware"));
