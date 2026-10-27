@@ -846,7 +846,8 @@ nothing runs.
   setting or environment variable for them. Tests give the queue shorter
   ones directly.
 - **Retries.** A batch that couldn't be written waits 1 minute, doubling to
-  6 hours, a fifth either way.
+  6 hours, a fifth either way. A wait longer than twice that means the
+  clock was put back since; the batch is tried at once.
 - **Drops.** Past 32 MB or 180 days of waiting, the oldest lines are dropped
   (`queue_full`). A line that isn't an event is `unreadable_line`. An event
   the log couldn't take is `write_failed` (and see below). A log found replaced or cut is read again from its start

@@ -224,6 +224,9 @@ pub struct Outcome {
     pub sent: u32,
     /// A batch is waiting to be tried again then.
     pub retry_at: Option<DateTime<Utc>>,
+    /// What stopped the look once it had kept its state: the next look goes
+    /// on from there.
+    pub error: Option<String>,
 }
 
 pub struct Queue {
@@ -259,7 +262,10 @@ impl Queue {
     /// One look at the log: send the batch waiting, or make and send new
     /// ones once they are due. `write_failures`, the events the log could
     /// not take since the last look, are counted when this returns `Ok`
-    /// and not `locked`; else the caller keeps them for the next look.
+    /// and not `locked`; else the caller keeps them for the next look. They
+    /// are kept with the state before anything is sent, so what stops the
+    /// look after that is its `error`, not an `Err`: an `Err` would have
+    /// them counted again.
     pub fn run(&self, now: DateTime<Utc>, write_failures: u64) -> io::Result<Outcome> {
         fs::create_dir_all(self.outbox())?;
         let lock = File::options().create(true).truncate(false).write(true).open(self.dir.join("upload.lock"))?;
@@ -274,10 +280,23 @@ impl Queue {
         self.save(&state)?;
 
         let mut outcome = Outcome::default();
+        if let Err(error) = self.send_due(&mut state, now, &mut outcome) {
+            outcome.error = Some(error.to_string());
+        }
+        Ok(outcome)
+    }
+
+    /// Sends the batch waiting, and makes and sends new ones once they are
+    /// due: `batches_per_run` at most.
+    fn send_due(&self, state: &mut State, now: DateTime<Utc>, outcome: &mut Outcome) -> io::Result<()> {
         let mut made = false;
-        for _ in 0..self.config.batches_per_run {
+        // A batch takes two turns: one to make it, one to send it.
+        for _ in 0..self.config.batches_per_run.saturating_mul(2) {
+            if outcome.sent as usize >= self.config.batches_per_run {
+                break;
+            }
             if state.pending.is_some() {
-                match self.send(&mut state, now)? {
+                match self.send(state, now)? {
                     Sent::Stored => outcome.sent += 1,
                     // Made again at once, due or not.
                     Sent::Lost => made = true,
@@ -287,14 +306,14 @@ impl Queue {
                     }
                     Sent::Refused => break,
                 }
-            } else if (made || outcome.sent > 0 || self.due(&state, now)?) && self.prepare(&mut state, now)? {
+            } else if (made || outcome.sent > 0 || self.due(state, now)?) && self.prepare(state, now)? {
                 // Once a batch is due, the rest of the log follows it.
                 made = true;
             } else {
                 break;
             }
         }
-        Ok(outcome)
+        Ok(())
     }
 
     fn load(&self, now: DateTime<Utc>) -> io::Result<State> {
@@ -574,7 +593,10 @@ impl Queue {
 
     /// Tries the batch waiting once, unless it is to wait longer.
     fn send(&self, state: &mut State, now: DateTime<Utc>) -> io::Result<Sent> {
-        if let Some(at) = state.next_attempt_at.filter(|at| now < *at) {
+        // No wait is over twice the longest: one that is, the clock was put
+        // back since it was set, and the batch is tried now.
+        let longest = TimeDelta::from_std(self.config.backoff_max.saturating_mul(2)).unwrap_or(TimeDelta::MAX);
+        if let Some(at) = state.next_attempt_at.filter(|at| now < *at && *at - now <= longest) {
             return Ok(Sent::Waiting(at));
         }
         let pending = state.pending.clone().expect("a batch is waiting");
@@ -951,11 +973,14 @@ fn work(queue: &Queue, nudges: &mpsc::Receiver<Nudge>) {
         }
         let failures = telemetry::take_write_failures();
         let outcome = queue.run(Utc::now(), failures);
-        if !matches!(outcome, Ok(Outcome { locked: false, .. })) {
+        if !kept_failures(&outcome) {
             telemetry::restore_write_failures(failures);
         }
         if let Err(error) = &outcome {
             eprintln!("[TELEMETRY] the upload queue could not look at the log: {error}");
+        }
+        if let Ok(Outcome { error: Some(error), .. }) = &outcome {
+            eprintln!("[TELEMETRY] the upload queue stopped partway, to go on at its next look: {error}");
         }
         let mut next = Instant::now() + queue.config.every;
         if let Ok(Outcome { retry_at: Some(at), .. }) = outcome {
@@ -964,6 +989,12 @@ fn work(queue: &Queue, nudges: &mpsc::Receiver<Nudge>) {
         }
         wake_at = next;
     }
+}
+
+/// Whether a look kept the failed writes it was given: else they wait for
+/// the next.
+fn kept_failures(outcome: &io::Result<Outcome>) -> bool {
+    matches!(outcome, Ok(Outcome { locked: false, .. }))
 }
 
 /// How much longer to wait for the app to be idle: None once no turn has
@@ -1154,7 +1185,7 @@ mod tests {
         let install_id = laptop.state().install_id;
         laptop.write(&three_talks(t0()));
         let outcome = laptop.run(t0() + TimeDelta::hours(1));
-        assert_eq!(outcome, Outcome { locked: false, sent: 1, retry_at: None });
+        assert_eq!(outcome, Outcome { locked: false, sent: 1, retry_at: None, error: None });
 
         let (envelope, events) = laptop.fake.batches().remove(0);
         assert_eq!(envelope["event"], "ella_batch");
@@ -1252,6 +1283,15 @@ mod tests {
     }
 
     #[test]
+    fn a_look_sends_at_most_batches_per_run() {
+        let laptop = Laptop::new().installed();
+        let config = Config { batch_bytes: 1, due_bytes: 1, batches_per_run: 5, ..Config::default() };
+        laptop.write(&three_talks(t0()));
+        assert_eq!(laptop.queue(config.clone()).run(t0() + TimeDelta::hours(1), 0).unwrap().sent, 5);
+        assert_eq!(laptop.queue(config).run(t0() + TimeDelta::hours(2), 0).unwrap().sent, 4, "the rest at the next look");
+    }
+
+    #[test]
     fn a_batch_not_sent_is_tried_again_the_same_batch() {
         let laptop = Laptop::new().installed();
         laptop.write(&three_talks(t0()));
@@ -1305,6 +1345,17 @@ mod tests {
             let jittered = jittered(Duration::from_secs(100)).as_secs_f64();
             assert!((80.0..=120.0).contains(&jittered), "{jittered}");
         }
+    }
+
+    #[test]
+    fn a_clock_put_back_does_not_hold_a_batch_back() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&three_talks(t0()));
+        laptop.fake.answer(Err(SendError::Unreachable));
+        let now = t0() + TimeDelta::hours(1);
+        assert!(laptop.run(now).retry_at.is_some());
+        // Put back a day, the minute's wait would last a day and a minute.
+        assert_eq!(laptop.run(now - TimeDelta::days(1)).sent, 1);
     }
 
     #[test]
@@ -1496,6 +1547,35 @@ mod tests {
         );
         assert_eq!(envelope["dropped_event_count"], 4);
         assert_eq!(envelope["dropped_total"], 4);
+    }
+
+    #[test]
+    fn a_look_that_stops_partway_counts_the_failed_writes_once() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&three_talks(t0()));
+        laptop.fake.answer(Err(SendError::Unreachable));
+        laptop.run(t0() + TimeDelta::hours(1));
+        // The batch waiting can't be read back (held by an antivirus, say):
+        // each look stops once it has kept its state.
+        let frozen = laptop.dir.path().join(format!("upload/outbox/{}.jsonl", laptop.state().pending.unwrap().batch_id));
+        fs::remove_file(&frozen).unwrap();
+        fs::create_dir(&frozen).unwrap();
+        let queue = laptop.queue(Config::default());
+        let mut failures = 2;
+        for hour in 2..5 {
+            let outcome = queue.run(t0() + TimeDelta::hours(hour), failures);
+            assert!(outcome.as_ref().is_ok_and(|outcome| outcome.error.is_some()), "{outcome:?}");
+            // As the worker does.
+            if kept_failures(&outcome) {
+                failures = 0;
+            }
+        }
+        assert_eq!(laptop.state().health.dropped_total.write_failed, 2);
+
+        fs::remove_dir(&frozen).unwrap();
+        assert_eq!(queue.run(t0() + TimeDelta::hours(5), failures).unwrap().sent, 1);
+        let (envelope, _) = laptop.fake.batches().pop().unwrap();
+        assert_eq!(envelope["dropped_by_reason"]["write_failed"], 2, "two failed writes, counted once");
     }
 
     #[test]
