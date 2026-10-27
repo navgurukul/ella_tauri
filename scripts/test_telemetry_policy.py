@@ -449,7 +449,7 @@ class TheCommand(unittest.TestCase):
             envelope, _ = split(batches[0].read_bytes())
             self.assertEqual(envelope["policy_excluded_count"], 2)
             self.assertEqual(envelope["unknown_fields_dropped"], 4)
-            self.assertEqual(envelope["values_replaced"], 7)
+            self.assertEqual(envelope["values_replaced"], 10)
             self.assertNotIn(b"Asha", batches[0].read_bytes())
 
     def test_valid_batches_are_taken_in_with_their_install_and_refused_ones_are_not(self):

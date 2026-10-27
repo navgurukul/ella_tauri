@@ -772,8 +772,8 @@ policy (version 2): every field that may leave a laptop has a rule, and a
 field without one stays behind. Timings and counts must be numbers; the
 words the app picks itself (`status`, `failed_at`, `notes`) must be short
 lowercase tokens; engine and model names, versions and llama.cpp builds keep
-their own forms; `cpu` and `os` must be printable and at most 100
-characters; `power_mode` is one of Windows' four or `other`. A value that
+their own forms; `cpu` and `os` must be printable ASCII and at most
+100 characters; `power_mode` is one of Windows' four or `other`. A value that
 breaks its rule leaves as `other`, a number not at all, and each is counted.
 
 No free text leaves. An error leaves as its code: `NO_SPEECH_DETECTED`; the
@@ -808,8 +808,46 @@ it took and how old its oldest event was are filled in each time it is sent.
   with `--batch-out`, is 0, and is not counted in sequence.
 
 [`scripts/telemetry-vectors.json`](scripts/telemetry-vectors.json) holds what
-any implementation of the policy must do, event by event: the scripts' now,
-the app's when it makes batches itself.
+any implementation of the policy must do, event by event: the scripts', and
+the app's (`src-tauri/src/telemetry_policy.rs`, which builds the policy file
+in and is tested against the vectors). The one difference: the app leaves
+out, and counts, an event with no `launch_id`, from a build before
+2026-10-07; `--batch-out` sends those by hand.
+
+#### The upload queue (export only, off by default)
+
+With `ELLA_TELEMETRY_EXPORT=1` set, the app batches its own log
+(`src-tauri/src/telemetry_queue.rs`) and writes each batch to
+`telemetry/export/<batch_id>.jsonl` beside it. A tester hands those files
+over, and they go in with `--validate --data`; delete them once they're
+handed over. Nothing is sent over a network, and without the variable
+nothing runs.
+
+- **Where it starts.** A new install starts at the end of `latency.jsonl`:
+  what was in the log before the queue first ran stays on the laptop.
+- **State.** `telemetry/upload/state.json` holds the `install_id`, the
+  cursor (how far into the log the queue has read), the last `batch_seq`
+  acknowledged, the batch being sent, and the counts of what was dropped.
+  It's written atomically (temporary file, flush, rename). The batch being
+  sent is frozen in `upload/outbox/`, so a retry, or a restart, sends the
+  same bytes. A state file that can't be read is kept as
+  `state.json.corrupt-<time>`, and the laptop starts again as a new install.
+- **When.** After 120 s with no turn, at launch, after a recap, when the
+  cloud comes back, and every 30 minutes. A batch is due once 3 talks are
+  over (recapped, ended, or quiet for 30 minutes), the oldest event waiting
+  is 3 days old, or 256 KB waits. Once one is due, the rest of the log
+  follows, 256 KB a batch.
+- **Retries.** A batch that couldn't be written waits 1 minute, doubling to
+  6 hours, a fifth either way.
+- **Drops.** Past 32 MB or 180 days of waiting, the oldest lines are dropped
+  (`queue_full`). A line that isn't an event is `unreadable_line`. An event
+  the log couldn't take, or a batch lost from the outbox, is
+  `write_failed`. A log found replaced or cut is read again from its start
+  and counted (`log_resets`); the store keeps each `event_id` once. The
+  totals are never reset: a batch carries what was lost since the last one
+  acknowledged, and the totals.
+- **Two copies of Ella** share the log; `upload/upload.lock` lets one queue
+  work at a time.
 
 ## Latency on laptops
 
