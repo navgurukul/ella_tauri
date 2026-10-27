@@ -338,6 +338,38 @@
    "excluded": []
   },
   {
+   "name": "a talk id that is not text does not leave",
+   "raw": {
+    "event": "ella_assessment",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch_id": "d0ec3333-119c-4ae0-ac10-b69071ab640a",
+    "status": "ok",
+    "kind": "talk",
+    "session_id": 42,
+    "answers": 3,
+    "total_ms": 900
+   },
+   "sanitized": {
+    "event_id": "b62264aed7951a6a",
+    "event": "ella_assessment",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch": "8b4c5f725391bfb6",
+    "status": "ok",
+    "kind": "talk",
+    "answers": 3,
+    "total_ms": 900
+   },
+   "unknown": [],
+   "replaced": [
+    "ella_assessment.session_id"
+   ],
+   "excluded": []
+  },
+  {
    "name": "a launch keeps its hardware within the rules",
    "raw": {
     "event": "ella_launch",
@@ -416,6 +448,36 @@
     "ella_launch.cpu",
     "ella_launch.os",
     "ella_launch.previous_version"
+   ],
+   "excluded": []
+  },
+  {
+   "name": "a launch's hardware outside printable ASCII leaves as other",
+   "raw": {
+    "event": "ella_launch",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch_id": "d0ec3333-119c-4ae0-ac10-b69071ab640a",
+    "os": "Windows 11 Famíliar",
+    "arch": "aarch64",
+    "cpu": "Apple M1 Pro™"
+   },
+   "sanitized": {
+    "event_id": "34bc7130db829ab6",
+    "event": "ella_launch",
+    "schema_version": 2,
+    "timestamp": "2026-10-20T06:00:00.123456789+00:00",
+    "app_version": "0.1.26",
+    "launch": "8b4c5f725391bfb6",
+    "os": "other",
+    "arch": "aarch64",
+    "cpu": "other"
+   },
+   "unknown": [],
+   "replaced": [
+    "ella_launch.cpu",
+    "ella_launch.os"
    ],
    "excluded": []
   },

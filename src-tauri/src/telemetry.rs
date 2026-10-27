@@ -3,15 +3,22 @@ use std::{
     fs::{self, OpenOptions},
     io::Write as _,
     path::PathBuf,
-    sync::OnceLock,
-    time::Instant,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        OnceLock,
+    },
+    time::{Duration, Instant},
 };
 
 use chrono::Utc;
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::{domain::TurnTimings, install, machine};
+use crate::{
+    domain::TurnTimings,
+    install, machine,
+    telemetry_queue::{self, Nudge},
+};
 
 /// The build writing the events. Every release sets it. Telemetry used to
 /// carry no version, so turns had to be matched to releases by when each was
@@ -20,6 +27,12 @@ pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 static TELEMETRY_FILE: OnceLock<PathBuf> = OnceLock::new();
 static LAUNCH: OnceLock<Launch> = OnceLock::new();
+/// Events the log could not take, for the upload queue to count
+/// (`write_failed`) at its next look.
+static WRITE_FAILURES: AtomicU64 = AtomicU64::new(0);
+/// When the last turn started or ended, in ms from the launch, plus one: 0
+/// for none yet. The upload queue works only once turns have been quiet.
+static LAST_TURN: AtomicU64 = AtomicU64::new(0);
 
 /// This run of Ella. Every event names it, so the turns of one launch read
 /// together, and a restart, with its cold caches, shows.
@@ -113,7 +126,31 @@ fn append_event_line(line: &str) {
         .open(path)
         .and_then(|mut file| writeln!(file, "{line}"));
     if let Err(error) = appended {
+        WRITE_FAILURES.fetch_add(1, Ordering::Relaxed);
         eprintln!("[LATENCY] could not append telemetry to {}: {error}", path.display());
+    }
+}
+
+/// The events the log could not take since this was last asked.
+pub fn take_write_failures() -> u64 {
+    WRITE_FAILURES.swap(0, Ordering::Relaxed)
+}
+
+/// Gives back failures taken but not counted, for the next look.
+pub fn restore_write_failures(failures: u64) {
+    WRITE_FAILURES.fetch_add(failures, Ordering::Relaxed);
+}
+
+fn turn_now() {
+    LAST_TURN.store(elapsed_ms(launch().started) + 1, Ordering::Relaxed);
+}
+
+/// How long since a turn last started or ended: since the launch, before any.
+pub fn quiet_for() -> Duration {
+    let since_launch = launch().started.elapsed();
+    match LAST_TURN.load(Ordering::Relaxed) {
+        0 => since_launch,
+        last => since_launch.saturating_sub(Duration::from_millis(last - 1)),
     }
 }
 
@@ -218,6 +255,7 @@ pub fn engine_ready(details: &EngineDetails) {
         since_launch_ms: elapsed_ms(launch().started),
         details,
     });
+    telemetry_queue::nudge(Nudge::EngineReady);
 }
 
 /// The cloud language model came up, or went down and why, as an
@@ -236,6 +274,9 @@ pub fn cloud_changed(up: bool, reason: &str) {
         up,
         reason,
     });
+    if up {
+        telemetry_queue::nudge(Nudge::CloudUp);
+    }
 }
 
 /// What the updater, which runs in the window, did at one step.
@@ -534,6 +575,7 @@ impl LatencyTrace {
             "[LATENCY] ================= new {kind} turn ================="
         );
         REPLY.with(|reply| *reply.borrow_mut() = Some(ReplyRecord::default()));
+        turn_now();
         Self {
             started: Instant::now(),
             timings: TurnTimings {
@@ -725,6 +767,7 @@ impl LatencyTrace {
             timings: &self.timings,
             detail: &self.detail,
         });
+        turn_now();
         self.timings
     }
 }
@@ -897,6 +940,7 @@ impl AssessmentTrace {
             judges: &judges,
             machine: machine::state_since(&self.machine),
         });
+        telemetry_queue::nudge(Nudge::RecapDone);
     }
 }
 
@@ -980,6 +1024,134 @@ mod tests {
         // And the next turn starts with nothing.
         LatencyTrace::new("text").finish("ok", None);
         assert!(written().pop().unwrap().get("notes").is_none());
+    }
+
+    /// Every event, every field set, through the real write path: the
+    /// policy must have a rule for each field, and each value must keep it.
+    /// A field added here without one fails this, rather than staying
+    /// behind unseen.
+    #[test]
+    fn every_field_the_app_writes_has_a_rule_in_the_policy() {
+        write_launch(Some("0.1.19".into()));
+        engine_ready(&EngineDetails {
+            llm_server: "started",
+            llama_threads: Some(4),
+            llama_build: Some("b11405-1b43d3116".into()),
+            llama_expected: Some("b11405"),
+            llm_ctx: Some(4096),
+            llm_model_mb: Some(2_000),
+            stt: "canary-180m-flash-q8_0 > windows-speech".into(),
+            stt_threads: 4,
+            piper: "resident",
+            cloud: Some("proxy.example.org".into()),
+            error: Some("Local engine error: llama-server exited".into()),
+        });
+        cloud_changed(false, "timed out");
+        cloud_changed(true, "");
+        update_step(&UpdateStep {
+            step: "download_failed",
+            version: Some("0.1.21".into()),
+            ms: Some(4_200),
+            bytes: Some(1_048_576),
+            via: Some("restart"),
+            error: Some("error sending request".into()),
+        });
+
+        let mut trace = LatencyTrace::new("voice");
+        trace.record_vad(1.0, 4_000.0, 3_500.0);
+        trace.record_stt(
+            75.0,
+            "streamed-chunks".into(),
+            "canary-180m-flash-q8_0,silence".into(),
+            Some("canary-180m-flash-q8_0".into()),
+            Some(5.0),
+            Some(30.0),
+            Some(40.0),
+        );
+        trace.record_pieces(vec![SttPiece {
+            part: "background",
+            audio_ms: 6_000,
+            speech_ms: Some(5_500),
+            engine: "canary-180m-flash-q8_0".into(),
+            words: 9,
+            ms: 300,
+            queued_ms: Some(20),
+            attempts: Some(2),
+            done_ms: -1_200,
+            cut: Some("pause"),
+        }]);
+        trace.record_talk("talk-1", "free", "market", "A2", 3);
+        trace.record_talk_over(true);
+        trace.record_words("my name is Asha", "nice to meet you");
+        trace.record_llm_start();
+        trace.note("flagged");
+        record_llm_run(LlmRun {
+            why: "reply",
+            backend: "cloud",
+            failed: "cut",
+            wait_ms: 10,
+            errand: Some("judge"),
+            ttft_ms: 300,
+            ms: 900,
+            prompt_tokens: Some(1_200),
+            prompt_evaluated: Some(80),
+            prompt_ms: Some(150),
+            gen_tokens: Some(20),
+            gen_ms: Some(600),
+        });
+        record_warm_up(WarmUpReport {
+            began_ms_before: 4_000,
+            ms: 2_000,
+            restored_tokens: Some(1_100),
+            evaluated_tokens: 40,
+            errand: Some("judge"),
+        });
+        trace.record_llm(300.0, 900.0);
+        trace.record_tts(Some(950.0), Some(3_000.0));
+        trace.record_tts_path("overlapped");
+        trace.record_tts_sentences(2);
+        trace.record_speech(Instant::now());
+        trace.finish("error", Some("NO_SPEECH_DETECTED: I couldn't hear any words in that recording."));
+
+        let mut recap = AssessmentTrace::begin("talk-1", "talk", 6, Some(1_000));
+        recap.scored();
+        recap.checked(4);
+        record_judge(JudgeTiming {
+            judge: "score",
+            backend: "cloud",
+            status: "error",
+            error: Some("HTTP 503".into()),
+            waited_ms: 100,
+            ms: 1_400,
+            gave_way: 1,
+            attempts: 2,
+            restored_tokens: Some(900),
+            read_tokens: 300,
+            written_tokens: 40,
+            stopped_early: true,
+        });
+        recap.finish("ok", None);
+
+        let events = written();
+        let kinds: std::collections::BTreeSet<_> = events.iter().filter_map(|event| event["event"].as_str()).collect();
+        for kind in ["ella_launch", "ella_engine", "ella_cloud", "ella_update", "ella_turn_latency", "ella_assessment"] {
+            assert!(kinds.contains(kind), "{kind} was written");
+        }
+        let mut sanitizer = crate::telemetry_policy::Sanitizer::default();
+        for event in &events {
+            assert!(sanitizer.event(event.as_object().unwrap()).is_some(), "{event}");
+        }
+        assert!(sanitizer.unknown.is_empty(), "fields with no rule: {:?}", sanitizer.unknown);
+        assert!(sanitizer.replaced.is_empty(), "values that broke their rule: {:?}", sanitizer.replaced);
+        assert!(sanitizer.excluded.is_empty(), "{:?}", sanitizer.excluded);
+    }
+
+    #[test]
+    fn a_write_that_fails_is_counted_for_the_queue() {
+        take_write_failures();
+        restore_write_failures(2);
+        assert_eq!(take_write_failures(), 2);
+        assert_eq!(take_write_failures(), 0);
     }
 
     #[test]

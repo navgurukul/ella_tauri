@@ -12,6 +12,8 @@ pub mod progress;
 mod setup;
 pub mod skill_forms;
 mod telemetry;
+mod telemetry_policy;
+mod telemetry_queue;
 pub mod topics;
 pub mod words;
 mod window_fit;
@@ -109,6 +111,9 @@ pub fn run() {
             // Latency/error events and Canary failure audio outlive the
             // session so improvements can be reviewed over time.
             telemetry::persist_to(data_dir.join("telemetry"));
+            // Batches of it, for a tester to hand over: only with
+            // ELLA_TELEMETRY_EXPORT=1, and nothing leaves over a network.
+            telemetry_queue::start(data_dir.join("telemetry"));
             if std::env::var_os("ELLA_STT_DEBUG_DIR").is_none() {
                 std::env::set_var("ELLA_STT_DEBUG_DIR", data_dir.join("stt-failures"));
             }

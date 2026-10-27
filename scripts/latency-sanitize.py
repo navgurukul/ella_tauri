@@ -196,7 +196,9 @@ def output_rule(rule):
 
 
 def printable(text):
-    return 0 < len(text) <= POLICY["hardware_max"] and text.isprintable()
+    """Printable ASCII: what any reader of the policy, Python's or the app's,
+    takes as printable alike."""
+    return 0 < len(text) <= POLICY["hardware_max"] and all(" " <= char <= "~" for char in text)
 
 
 def check(value, rule, path, problems):
@@ -347,8 +349,8 @@ class Sanitizer:
         if item is None:
             return None
         kind, _, arg = rule.partition(":")
-        if kind == "hash":
-            return short_hash(str(item))
+        if kind == "hash" and isinstance(item, str):
+            return short_hash(item)
         if kind == "code" and not (isinstance(item, str) and code_allowed(arg, item)):
             # An empty error or reason is no error: left out, as the app does.
             code = CODERS[arg](item)
@@ -360,7 +362,7 @@ class Sanitizer:
         if kind == "list" and isinstance(item, list):
             values = (self._value(part, arg, path) for part in item)
             return [value for value in values if value is not _DROP]
-        if kind not in ("object", "list"):
+        if kind not in ("object", "list", "hash"):
             problems = []
             check(item, rule, path, problems)
             if not problems:
