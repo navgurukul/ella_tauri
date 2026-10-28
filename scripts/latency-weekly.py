@@ -6,7 +6,7 @@ or a laptop's own latency.jsonl, and writes the week's KPIs as Markdown, for
 people, and JSON, whose keys stay put for anything that reads them later.
 Weeks run Monday to Sunday in IST; the default is the last whole one.
 
-  npm run telemetry:weekly -- data/ [--week 2026-W43] [--out reports/]
+  npm run telemetry:weekly -- data/ [--ledger ledger/] [--week 2026-W43] [--out reports/]
 
 Latency is over the voice turns that succeeded: P50/P95/P99, nearest rank,
 as `telemetry:report` counts them. The headline is the wait, from the learner
@@ -18,6 +18,10 @@ each week; or a system error rate 2 points higher. "Didn't hear you"
 the day: its turns are the app's own lines or a short answer from the cloud,
 and its recap never asks the laptop, so a week with more of them would only
 look faster.
+
+With --ledger, the batch record ingest keeps (scripts/telemetry-health.py),
+the report says how collection went: batches by the week they were received,
+gaps, drops, delivery, and flags of their own.
 
 With --out, writes <week>.md and <week>.json there. Given the folder of past
 reports (--reports, by default --out), the report says how many of last
@@ -42,11 +46,12 @@ def _sibling(name, module):
 
 
 sanitize = _sibling("latency-sanitize.py", "latency_sanitize")
+health = _sibling("telemetry-health.py", "telemetry_health")
 pct = sanitize.report.pct
 by_cloud = sanitize.report.by_cloud
 IST = sanitize.IST
 
-REPORT_VERSION = 2
+REPORT_VERSION = 3
 
 # What a week must hold, and how far it must move, to be flagged.
 MIN_N = 30
@@ -99,6 +104,10 @@ def read_all(paths):
     for path in files:
         install_id = None
         for event in sanitize.read_events(path):
+            # A line of the batch record, put among the events by mistake:
+            # about a batch, never one of its events.
+            if "record" in event:
+                continue
             # A batch's envelope is about the batch, not an event of the
             # laptop's; its events are the install's it names.
             if event.get("event") == "ella_batch":
@@ -259,7 +268,7 @@ def notes_of(this, last, late):
     return notes
 
 
-def build(events, week, previous_report=None, tools_ref=None, now=None):
+def build(events, week, previous_report=None, tools_ref=None, now=None, ledger=None):
     start, end = week_bounds(week)
     previous = label_of(start - timedelta(days=7))
     this = summarize([e for e in events if sanitize.week_of(e) == week])
@@ -286,6 +295,7 @@ def build(events, week, previous_report=None, tools_ref=None, now=None):
         "late_events_previous_week": late if late and late > 0 else 0,
         "flags": flags_of(this, last),
         "notes": notes_of(this, last, late if late and late > 0 else 0),
+        "collection": None if ledger is None else health.summary(ledger, week),
     }
 
 
@@ -323,6 +333,12 @@ def markdown(report):
         "",
     ]
     flags = report["flags"]
+    collection = report["collection"]
+    if collection and collection["flags"]:
+        lines.append(
+            f"**Collection: {len(collection['flags'])} flagged** (see [Collection](#collection))."
+        )
+        lines.append("")
     if flags:
         lines.append(f"**Triage: {len(flags)} flagged.** Flags are reasons to look at the raw events, not measured regressions.")
         lines.append("")
@@ -390,6 +406,7 @@ def markdown(report):
         f"▲: at least {MIN_PCT:.0%} and {MIN_MS} ms slower, with {MIN_N}+ turns in both weeks. "
         "Percentiles are nearest-rank.",
     ]
+    lines += [""] + health.markdown_lines(collection)[:-1]
     return "\n".join(lines) + "\n"
 
 
@@ -399,6 +416,7 @@ def main(argv=None):
     parser.add_argument("--week", help="such as 2026-W43 (default: the last whole week, IST)")
     parser.add_argument("--out", type=Path, help="write <week>.md and <week>.json here")
     parser.add_argument("--reports", type=Path, help="past reports, for late events (default: --out)")
+    parser.add_argument("--ledger", type=Path, help="the batch record, for the Collection section")
     parser.add_argument("--tools-ref", default=os.environ.get("ELLA_TOOLS_REF"), help="the scripts' commit")
     args = parser.parse_args(argv)
 
@@ -411,7 +429,8 @@ def main(argv=None):
         if past.exists():
             previous_report = json.loads(past.read_text(encoding="utf-8"))
 
-    result = build(read_all(args.paths), week, previous_report, args.tools_ref)
+    ledger = health.read([args.ledger]) if args.ledger else None
+    result = build(read_all(args.paths), week, previous_report, args.tools_ref, ledger=ledger)
     text = markdown(result)
     if args.out:
         args.out.mkdir(parents=True, exist_ok=True)

@@ -721,10 +721,12 @@ to this public one, and the scripts that make the report live here.
 2. **Ingest**, on each upload, checks each batch as strictly as the policy
    says and takes in the events of those that pass, each with its batch's
    `install_id`, that are not already under `data/`, to a new
-   `data/<week>/<ingest>.jsonl`:
+   `data/<week>/<ingest>.jsonl`, and records every file it saw in the batch
+   record, a new `ledger/<ingest>.jsonl` (see
+   [Collection health](#collection-health)):
 
    ```bash
-   npm run telemetry:sanitize -- --validate inbox/*.jsonl --data data/
+   npm run telemetry:sanitize -- --validate inbox/*.jsonl --data data/ --ledger ledger/
    ```
 
    A batch that breaks the policy (a field, a value, a count, a key twice,
@@ -733,9 +735,14 @@ to this public one, and the scripts that make the report live here.
    there instead, with `--data data/` alone, which refuses a batch. The
    upload is kept as a 90-day Actions artifact and removed from `inbox/`.
 3. **Report**, Mondays at 12:00 IST, runs
-   `npm run telemetry:weekly -- data/ --out reports/` for the last whole week,
-   Monday to Sunday in IST, commits `reports/<week>.md` and `.json`, and opens
-   an issue, "Latency report <week>", with the Markdown.
+   `npm run telemetry:weekly -- data/ --ledger ledger/ --out reports/` for the
+   last whole week, Monday to Sunday in IST, commits `reports/<week>.md` and
+   `.json`, and opens an issue, "Latency report <week>", with the Markdown,
+   its "Collection" section included.
+
+The workflow that runs steps 2 and 3 belongs in `navgurukul/ella-telemetry`
+and is added once that repository exists; until then the commands are run by
+hand, as above.
 
 The report's latency is over the voice turns that succeeded, P50/P95/P99
 (nearest rank, as `telemetry:report` counts): the wait, from the learner
@@ -755,7 +762,8 @@ also says when the mix moved (the cloud's share by more than 20 points, or
 the build most turns ran) and how many of last week's events came after last
 week's report. Claiming a change still takes the raw samples and a test. The
 JSON's keys stay put; a change to what they mean bumps `report_version`
-(2: laptops are counted by `install_id`, and batches are read).
+(2: laptops are counted by `install_id`, and batches are read; 3: the
+`collection` section, from the batch record).
 
 Either script also reads a laptop's own file, to see a week locally:
 
@@ -763,7 +771,52 @@ Either script also reads a laptop's own file, to see a week locally:
 npm run telemetry:weekly -- "$HOME/Library/Application Support/org.navgurukul.ella.desktop/telemetry/latency.jsonl" --week 2026-W42
 ```
 
-`npm run test:telemetry` tests both, and the policy.
+`npm run test:telemetry` tests both, the policy and the collection health.
+
+#### Collection health
+
+Ingest keeps a record of every batch file it sees, apart from the events:
+`ledger/<ingest>.jsonl`, a new file each ingest, written after its events
+(an ingest cut short in between is taken in again whole, its events once).
+A valid batch's line holds its envelope, how many of its events were new,
+and its outcome:
+
+- `new`: the first time this batch is seen;
+- `duplicate`: the same `batch_id` again, a retry, or a batch the app
+  remade from the same lines after losing its outbox; its events go through
+  the same `event_id` check and are stored once;
+- `manual`: a laptop's file (`batch_seq` 0), never in sequence;
+- `seq_conflict`: an install's `batch_seq` already given to another batch,
+  which the queue never does. Its events are valid and taken in all the
+  same, and the report flags it.
+
+A refused file leaves only its hash, its size and its problems, which name
+fields, never values (a field the policy does not name is "a field").
+
+`npm run telemetry:health -- ledger/ [--week 2026-W44] [--json]` reads the
+record, and the weekly report shows the same as its "Collection" section
+(`report_version` 3; without `--ledger` it says there is no record). A batch
+counts in the IST week it was **received**, not the week of its events. It
+counts batch files by outcome and refused files by problem; installs
+reporting, and those silent this week that sent in the 28 days before; the
+events received and new; what the laptops dropped, by reason, and the log
+resets (a manual batch measures neither, and is shown as not measured); what
+the policy left behind; the time from a batch's last event to its receipt,
+its tries, its oldest queued event and the backlog left; and the builds.
+
+Each install's seqs run 1, 2, 3...: a missing one is a gap, pending while
+the batch that showed it came less than 7 days ago, and then taken as lost,
+flagged in the week its wait ran out. A gap the late batch fills is closed.
+Each install's `dropped_total` and `log_resets_total` never go back, and a
+batch's counts are its totals less those of the seq before.
+
+A flag (▲) is a reason to look, as for latency: a refused file; a seq
+conflict; a gap taken as lost; dropped events above 1% of the events
+received; any field the policy has no rule for (the app writes something
+new); totals that went back or counts that do not add up; a clock the app
+marked `clock_suspect`, or a batch whose last event is more than a day after
+it was received. Installs are named by the first 8 hex of their
+`install_id` only.
 
 #### The telemetry policy and batches
 
