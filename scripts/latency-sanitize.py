@@ -11,6 +11,7 @@ an event to the laptop's own database are hashed. Every event gets an
   npm run telemetry:sanitize -- <label>.jsonl... --batch-out out/  # batches
   npm run telemetry:sanitize -- --validate out/*.jsonl              # check them
   npm run telemetry:sanitize -- --validate in/*.jsonl --data data/ # take them in
+      [--ledger ledger/]                                  # and record each
   npm run telemetry:sanitize -- <label>.jsonl...                    # to stdout
 
 --batch-out writes each file as one batch, `out/<batch_id>.jsonl`: the
@@ -22,6 +23,13 @@ named without its value, and a file that breaks any rule is refused whole.
 With --data, the events of the batches that pass, each with its batch's
 `install_id`, go into data/ as below. --unsent accepts an app's batch not
 yet sent.
+
+--ledger keeps the batch record, a new ledger/<ingest>.jsonl each ingest, after
+its events: a line per file, a valid batch's envelope and outcome (`new`;
+`duplicate`, a batch seen before, a retry; `manual`; `seq_conflict`, an
+install's seq already given to another batch, its events taken in all the
+same), a refused file's hash, size and problems, nothing else of it. It
+lives apart from data/, and scripts/telemetry-health.py reads it.
 
 Before batches, the Stage-1 store took events stamped with their laptop
 (`source`): to stdout, or with --data, the events not already under data/,
@@ -66,6 +74,8 @@ HTTP_CODE = re.compile(r"http_[1-5][0-9]{2}")
 
 # A field name a problem shows as it is: one of the policy's own.
 PLAIN = re.compile(r"[a-z0-9_]{1,40}")
+# A problem's field the policy does not name: the batch record keeps none.
+UNNAMED = re.compile(r"\..*: not in the policy$")
 
 # Taken from the event itself, never from its fields: a Stage-1 file's
 # `source` included.
@@ -619,11 +629,71 @@ def check_file(path, sent):
         return [f"could not be checked ({type(error).__name__})"], None, []
 
 
-def validate_files(paths, sent, data=None, ingest_id=None):
+def read_ledger(ledger):
+    """Every line of the batch record: one per batch file an ingest saw."""
+    records = []
+    for path in sorted(Path(ledger).rglob("*.jsonl")) if ledger and Path(ledger).is_dir() else []:
+        records.extend(record for record in read_events(path) if isinstance(record, dict) and "record" in record)
+    return records
+
+
+def outcome_of(envelope, ids, seqs):
+    """What a valid batch is, against every batch recorded before it:
+    `duplicate`, the same batch again (a retry, or one remade from the same
+    lines); `manual`, a laptop's file, never in sequence; `seq_conflict`,
+    an install's seq already given to another batch, which the queue never
+    does (its events are taken in all the same); else `new`."""
+    if envelope["batch_id"] in ids:
+        return "duplicate"
+    if envelope["origin"] == "manual":
+        return "manual"
+    if seqs.get((envelope["install_id"], envelope["batch_seq"]), envelope["batch_id"]) != envelope["batch_id"]:
+        return "seq_conflict"
+    return "new"
+
+
+def refused_record(path, problems):
+    """What is kept of a refused file: its hash, its size and our problems,
+    which name fields, never values. Nothing of its envelope, untrusted."""
+    try:
+        data = path.read_bytes()
+        digest, size = hashlib.sha256(data).hexdigest()[:32], len(data)
+    except OSError:
+        digest, size = None, None
+    # A field the policy does not name is named by the file: kept as one.
+    kept = [UNNAMED.sub(".(a field): not in the policy", problem) for problem in problems[:50]]
+    return {"record": "refused", "file_sha256": digest, "bytes": size, "problems": kept}
+
+
+def write_ledger(records, ledger, ingest, received_at):
+    """The batch record of one ingest, ledger/<ingest>.jsonl: a new file
+    each time, never a changed one, and written after the events, so an
+    ingest cut short in between is taken in again whole."""
+    target = Path(ledger) / f"{ingest}.jsonl"
+    if target.exists():
+        raise SystemExit(f"{target} exists: every ingest writes files of its own")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8") as out:
+        for record in records:
+            line = {"record": record.pop("record"), "received_at": received_at, "ingest_id": ingest, **record}
+            out.write(json.dumps(line, separators=(",", ":")) + "\n")
+    print(f"recorded {len(records)} batch file(s) in {target}", file=sys.stderr)
+
+
+def validate_files(paths, sent, data=None, ingest_id=None, ledger=None, received_at=None):
     """Checks each batch; with `data`, takes the events of those that pass
     into it, each with its batch's `install_id`. Refused batches are named
-    and leave nothing behind."""
-    refused, clean, batches = 0, {}, 0
+    and leave nothing behind. With `ledger`, each file is also recorded:
+    a valid batch's envelope and outcome, a refused file's problems."""
+    received = received_at or datetime.now(timezone.utc)
+    ingest = ingest_id or received.strftime("%Y%m%dT%H%M%SZ")
+    before = read_ledger(ledger)
+    ids = {r["batch_id"] for r in before if r["record"] == "batch"}
+    seqs = {}
+    for r in before:
+        if r["record"] == "batch" and r["outcome"] == "new":
+            seqs.setdefault((r["install_id"], r["batch_seq"]), r["batch_id"])
+    refused, clean, valid, records = 0, {}, [], []
     for path in paths:
         problems, envelope, events = check_file(path, sent)
         if problems:
@@ -631,18 +701,40 @@ def validate_files(paths, sent, data=None, ingest_id=None):
             print(f"{path}: refused, {len(problems)} problem(s)")
             for problem in problems[:50]:
                 print(f"  {problem}")
+            records.append(refused_record(path, problems))
             continue
-        print(f"{path}: ok")
-        batches += 1
+        outcome = outcome_of(envelope, ids, seqs)
+        print(f"{path}: ok" + ("" if outcome == "new" else f" ({outcome.replace('_', ' ')})"))
+        ids.add(envelope["batch_id"])
+        if outcome == "new":
+            seqs[(envelope["install_id"], envelope["batch_seq"])] = envelope["batch_id"]
+        valid.append((envelope, events))
+        records.append({
+            "record": "batch", "outcome": outcome, "batch_id": envelope["batch_id"],
+            "install_id": envelope["install_id"], "batch_seq": envelope["batch_seq"], "origin": envelope["origin"],
+            "body": {name: envelope[name] for name in BODY}, "send": {name: envelope[name] for name in SEND},
+        })
+        # A duplicate's events go through the same check as any: none is
+        # skipped for its batch having been seen.
         for event in events:
             clean.setdefault(event["event_id"], {**event, "install_id": envelope["install_id"]})
     if data:
+        if ledger and (Path(ledger) / f"{ingest}.jsonl").exists():
+            raise SystemExit(f"{Path(ledger) / ingest}.jsonl exists: every ingest writes files of its own")
         fresh = fresh_events(clean, data)
-        store(fresh, data, ingest_id)
-        new = sum(len(events) for events in fresh.values())
-        print(f"{new} new events from {batches} batch(es) ({len(clean) - new} already had); {refused} refused", file=sys.stderr)
+        store(fresh, data, ingest)
+        new_ids = {event["event_id"] for events in fresh.values() for event in events}
+        new = len(new_ids)
+        if ledger:
+            batches = iter(r for r in records if r["record"] == "batch")
+            for (envelope, events), record in zip(valid, batches):
+                record["events_new"] = sum(1 for e in events if e["event_id"] in new_ids)
+                record["events_known"] = len(events) - record["events_new"]
+                new_ids -= {e["event_id"] for e in events}
+            write_ledger(records, ledger, ingest, received.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        print(f"{new} new events from {len(valid)} batch(es) ({len(clean) - new} already had); {refused} refused", file=sys.stderr)
     else:
-        print(f"{batches} of {len(paths)} batches valid", file=sys.stderr)
+        print(f"{len(valid)} of {len(paths)} batches valid", file=sys.stderr)
     return 1 if refused else 0
 
 
@@ -682,11 +774,14 @@ def main(argv=None):
     parser.add_argument("--unsent", action="store_true", help="with --validate: an app's batch not yet sent")
     parser.add_argument("--data", type=Path, help="take events into this folder (with --validate: batches')")
     parser.add_argument("--ingest-id", help="with --data: the new files' name (default: the time, UTC)")
+    parser.add_argument("--ledger", type=Path, help="with --validate --data: record each batch file here")
     args = parser.parse_args(argv)
     if args.source and len(args.files) > 1:
         parser.error("--source names one file's laptop; name several files after theirs")
+    if args.ledger and not (args.validate and args.data):
+        parser.error("--ledger records an ingest: use it with --validate --data")
     if args.validate:
-        return validate_files(args.files, not args.unsent, args.data, args.ingest_id)
+        return validate_files(args.files, not args.unsent, args.data, args.ingest_id, args.ledger)
     if args.batch_out:
         return write_batches(args.files, args.source, args.batch_out)
 

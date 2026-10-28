@@ -285,7 +285,7 @@ class Reporting(unittest.TestCase):
             self.assertIn("▲", text)
             saved = json.loads((tmp / "out" / "2026-W43.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["previous_week"], "2026-W42")
-            self.assertEqual(saved["report_version"], 2)
+            self.assertEqual(saved["report_version"], 3)
             self.assertEqual(saved["this"]["latency"]["wait_ms"]["p50"], 1400)
 
 
