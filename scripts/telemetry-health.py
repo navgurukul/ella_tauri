@@ -13,7 +13,7 @@ A batch counts in the week, Monday to Sunday in IST, it was received, not
 the week of its events. A flag is a reason to look, as in the weekly report:
 a refused file; a seq given to two batches; a gap in an install's seqs still
 open 7 days after it was seen, now taken as lost; dropped events above 1% of
-the events received; a field the policy has no rule for; totals that went
+the app's events received; a field the policy has no rule for; totals that went
 back or counts that do not add up; a clock the app or the record doubts.
 
 Installs are named by the first 8 hex of their `install_id` only.
@@ -146,6 +146,8 @@ def summary(records, week):
     problems = Counter(re.sub(r"line \d+", "line N", p) for r in refused for p in r["problems"])
 
     events = sum(r["body"]["events"] for r in received)
+    # Only the app measures drops: its events alone are what they are of.
+    app_events = sum(r["body"]["events"] for r in app)
     dropped = sum(r["body"]["dropped_event_count"] or 0 for r in app)
     by_reason = {name: sum((r["body"]["dropped_by_reason"] or {}).get(name) or 0 for r in app) for name in REASONS}
 
@@ -192,7 +194,7 @@ def summary(records, week):
         "loss": {
             "dropped": dropped,
             "dropped_by_reason": by_reason,
-            "drop_rate": ratio(dropped, events),
+            "drop_rate": ratio(dropped, app_events),
             "log_resets": sum(r["body"]["log_resets"] or 0 for r in app),
             "policy_excluded": sum(r["body"]["policy_excluded_count"] or 0 for r in received),
             "values_replaced": sum(r["body"]["values_replaced"] or 0 for r in received),
@@ -236,8 +238,10 @@ FLAG_TEXT = {
     "refused": "{count} batch file(s) refused",
     "seq_conflict": "{count} seq(s) given to two batches",
     "probably_lost": "{count} batch(es) taken as lost: a gap open {days} days",
-    "dropped": "{count} events dropped on the laptops ({rate} of those received)",
-    "unknown_fields": "{count} field(s) the policy has no rule for: the app writes something new",
+    "dropped": "{count} events dropped on the laptops ({rate} of the app's events received)",
+    # The batch counts each value of such a field, never which fields: their
+    # names stay on the laptop.
+    "unknown_fields": "{count} value(s) dropped from fields the policy has no rule for: the app writes something new",
     "inconsistent_counts": "{count} batch(es) whose totals went back or counts do not add up",
     "clock_suspect": "{count} batch(es) with a clock in doubt",
 }
@@ -286,7 +290,7 @@ def markdown_lines(health):
         ("Events received (new)", f"{health['events_received']} ({health['events_new']})"),
         ("Dropped on the laptops", f"{loss['dropped']} ({share(loss['drop_rate'])})"),
         ("Log resets", loss["log_resets"]),
-        ("Left behind by the policy (events / values / fields)",
+        ("Left behind by the policy (events / values replaced / values of fields with no rule)",
          f"{loss['policy_excluded']} / {loss['values_replaced']} / {loss['unknown_fields_dropped']}"),
         ("Last event → received, P50 / P95 (hours)", f"{hours(d['delay_ms']['p50'])} / {hours(d['delay_ms']['p95'])}"),
         ("Oldest queued event when sent, P95 (hours)", hours(d["oldest_queued_age_ms"]["p95"])),
@@ -303,7 +307,8 @@ def markdown_lines(health):
         f"- Seq conflicts: {named(s['conflicts'])}",
         f"- Counts: {checks or 'consistent'}",
         f"- Clock in doubt: {named(d['clock_suspect'])}",
-        f"- Silent installs (sent in the {SILENT_AFTER.days} days before, not this week): {', '.join(health['installs']['silent']) or 'none'}",
+        f"- Installs: {health['installs']['reporting']} reporting; silent (sent in the {SILENT_AFTER.days} days before, "
+        f"not this week): {', '.join(health['installs']['silent']) or 'none'}",
         f"- Batches by build: {listed(health['app_versions'])}",
     ]
     if health["refused_problems"]:

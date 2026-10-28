@@ -282,8 +282,29 @@ class Health(unittest.TestCase):
         self.assertEqual(self.checks(week(2)), ["dropped"])
         self.assertEqual(health.summary(week(2), WEEK)["loss"]["drop_rate"], 0.02)
 
+    def test_manual_batches_do_not_dilute_the_drop_rate(self):
+        reasons = {"queue_full": 15, "unreadable_line": 0, "write_failed": 0}
+        records = [
+            record(1, MONDAY, events=1000, dropped_event_count=15, dropped_total=15, dropped_by_reason=reasons),
+            record(0, MONDAY, origin="manual", outcome="manual", install=OTHER_INSTALL, events=600),
+        ]
+        result = health.summary(records, WEEK)
+        self.assertEqual(result["events_received"], 1600)
+        self.assertEqual(result["loss"]["drop_rate"], 0.015)
+        self.assertIn("(1.5% of the app's events received)", "\n".join(health.markdown_lines(result)))
+
     def test_a_field_with_no_rule_is_flagged(self):
         self.assertEqual(self.checks([record(1, MONDAY, unknown_fields_dropped=2)]), ["unknown_fields"])
+
+    def test_one_new_field_in_three_events_is_counted_as_three_values_not_three_fields(self):
+        sanitizer = sanitize.Sanitizer()
+        for event in clean_events()[:3]:
+            sanitizer.event({**event, "mood": "fine"})
+        dropped = sanitizer.counts()["unknown_fields_dropped"]
+        self.assertEqual(dropped, 3)
+        text = "\n".join(health.markdown_lines(health.summary([record(1, MONDAY, unknown_fields_dropped=dropped)], WEEK)))
+        self.assertIn("▲ 3 value(s) dropped from fields the policy has no rule for", text)
+        self.assertNotIn("3 field(s)", text)
 
     def test_a_clock_in_doubt_is_flagged(self):
         suspect = record(1, MONDAY, send={"clock_suspect": True})
@@ -307,6 +328,18 @@ class Health(unittest.TestCase):
         result = health.summary([refused], WEEK)
         self.assertEqual(result["refused_problems"], {"line N: not JSON": 2})
         self.assertEqual(self.checks([refused]), ["refused"])
+
+    def test_an_install_that_sent_before_and_during_the_week_is_reporting(self):
+        records = [
+            record(1, MONDAY - timedelta(days=10)),
+            record(2, MONDAY - timedelta(days=3)),
+            record(3, MONDAY + timedelta(days=1)),
+            record(1, MONDAY - timedelta(days=5), install=OTHER_INSTALL),
+        ]
+        result = health.summary(records, WEEK)
+        self.assertEqual(result["installs"], {"reporting": 1, "silent": ["fedcba98"]})
+        self.assertIn("- Installs: 1 reporting; silent (sent in the 28 days before, not this week): fedcba98",
+                      health.markdown_lines(result))
 
     def test_an_install_that_stopped_sending_is_named_silent(self):
         records = [record(1, MONDAY - timedelta(days=10)), record(1, MONDAY - timedelta(days=40), install=OTHER_INSTALL)]

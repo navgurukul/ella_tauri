@@ -812,8 +812,10 @@ batch's counts are its totals less those of the seq before.
 
 A flag (▲) is a reason to look, as for latency: a refused file; a seq
 conflict; a gap taken as lost; dropped events above 1% of the events
-received; any field the policy has no rule for (the app writes something
-new); totals that went back or counts that do not add up; a clock the app
+received in the app's batches (a manual batch measures no drops, so its
+events are not counted against them); any field the policy has no rule for
+(the app writes something new), counted by the values dropped, since which
+fields they were never leaves the laptop; totals that went back or counts that do not add up; a clock the app
 marked `clock_suspect`, or a batch whose last event is more than a day after
 it was received. Installs are named by the first 8 hex of their
 `install_id` only.
