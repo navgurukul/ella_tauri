@@ -820,6 +820,33 @@ marked `clock_suspect`, or a batch whose last event is more than a day after
 it was received. Installs are named by the first 8 hex of their
 `install_id` only.
 
+#### Running the telemetry repository
+
+`navgurukul/ella-telemetry` (private) holds the data and reports, and no
+code: `inbox/` for batches as they arrive, `data/`, `ledger/` and `reports/`.
+`scripts/telemetry-repo.py` runs ingest and the weekly report against a
+checkout of it, with the scripts beside it:
+
+```bash
+npm run telemetry:repo -- ingest --repo ../ella-telemetry
+npm run telemetry:repo -- report --repo ../ella-telemetry [--week 2026-W44]
+npm run telemetry:repo -- health --repo ../ella-telemetry [--week 2026-W44]
+```
+
+The telemetry repository's `TOOLS_REF` names the ella_tauri commit its data
+is processed with. `ingest` and `report` run only from a checkout of exactly
+that commit, with `scripts/` unchanged, and each commit they make names it;
+the report records it as `tools_ref`. `health` only warns.
+
+Each run takes a lock in the checkout, needs it clean, pulls
+(`--ff-only`), makes one commit and pushes it. A push refused because the
+branch moved on is never forced: the run drops its own commit, pulls and
+runs again, so no batch is recorded `new` twice. A run that fails leaves the
+checkout as it found it. Every file leaves `inbox/` in the ingest's commit, a
+refused one into `.refused/` in the checkout, never committed; a file
+committed to `inbox/` stays in Git history after it leaves the tree. Its
+`OPERATIONS.md` says how to run it day to day.
+
 #### The telemetry policy and batches
 
 [`scripts/telemetry-fields.json`](scripts/telemetry-fields.json) is the

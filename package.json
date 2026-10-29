@@ -24,6 +24,7 @@
     "telemetry:sanitize": "python3 scripts/latency-sanitize.py",
     "telemetry:weekly": "python3 scripts/latency-weekly.py",
     "telemetry:health": "python3 scripts/telemetry-health.py",
+    "telemetry:repo": "python3 scripts/telemetry-repo.py",
     "test:telemetry": "python3 -m unittest discover -s scripts -p 'test_*.py'",
     "bench:chore": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin chore-bench --"
   },
