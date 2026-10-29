@@ -715,9 +715,9 @@ to this public one, and the scripts that make the report live here.
    The policy is applied on the laptop, so nothing it does not allow leaves
    (see [The telemetry policy and batches](#the-telemetry-policy-and-batches)).
    The file only grows, and the whole of it goes every time: nothing is
-   counted twice. The `stt-failures` recordings and `ella.sqlite3` never go.
-   A tester who cannot run the script uploads the raw file, as at first; it
-   stays in that repository's history, until the app makes its own batches.
+   counted twice. The `stt-failures` recordings and `ella.sqlite3` never go,
+   nor does the raw `latency.jsonl`: whatever is uploaded to `inbox/` stays
+   in that repository's Git history, even after ingest removes it.
 2. **Ingest**, on each upload, checks each batch as strictly as the policy
    says and takes in the events of those that pass, each with its batch's
    `install_id`, that are not already under `data/`, to a new
@@ -726,23 +726,28 @@ to this public one, and the scripts that make the report live here.
    [Collection health](#collection-health)):
 
    ```bash
-   npm run telemetry:sanitize -- --validate inbox/*.jsonl --data data/ --ledger ledger/
+   npm run telemetry:repo -- ingest --repo ../ella-telemetry
    ```
 
    A batch that breaks the policy (a field, a value, a count, a key twice,
    a hash that does not match) is refused whole, named with its problems,
-   and leaves nothing behind; the run then fails. A raw file is sanitized
-   there instead, with `--data data/` alone, which refuses a batch. The
-   upload is kept as a 90-day Actions artifact and removed from `inbox/`.
-3. **Report**, Mondays at 12:00 IST, runs
-   `npm run telemetry:weekly -- data/ --ledger ledger/ --out reports/` for the
-   last whole week, Monday to Sunday in IST, commits `reports/<week>.md` and
-   `.json`, and opens an issue, "Latency report <week>", with the Markdown,
-   its "Collection" section included.
+   and none of its events are taken in. Every file leaves `inbox/`; a
+   refused one goes to `.refused/` in the checkout that ran ingest, never
+   committed, and the batch record keeps only its hash, size and problems.
+3. **Report**, Mondays after 11:00 IST, once the week's batches are in:
 
-The workflow that runs steps 2 and 3 belongs in `navgurukul/ella-telemetry`
-and is added once that repository exists; until then the commands are run by
-hand, as above.
+   ```bash
+   npm run telemetry:repo -- report --repo ../ella-telemetry
+   ```
+
+   It reports the last whole week, Monday to Sunday in IST, and commits
+   `reports/<week>.md` and `.json`. The Markdown, its "Collection" section
+   included, goes to the team as an issue, "Latency report <week>".
+
+Steps 2 and 3 are run by hand, from a checkout of this repository beside one
+of `navgurukul/ella-telemetry`; no workflow runs them yet. See
+[Running the telemetry repository](#running-the-telemetry-repository), and
+that repository's `OPERATIONS.md`.
 
 The report's latency is over the voice turns that succeeded, P50/P95/P99
 (nearest rank, as `telemetry:report` counts): the wait, from the learner
