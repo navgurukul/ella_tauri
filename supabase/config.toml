@@ -418,3 +418,8 @@ enabled = true
 # gateway must not ask for a Supabase JWT.
 [functions.ella-desktop]
 verify_jwt = false
+
+# The telemetry relay checks its own telemetry tokens, and the pull token, so
+# the gateway must not ask for a Supabase JWT either.
+[functions.ella-telemetry]
+verify_jwt = false

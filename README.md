@@ -834,6 +834,7 @@ checkout of it, with the scripts beside it:
 
 ```bash
 npm run telemetry:repo -- ingest --repo ../ella-telemetry
+npm run telemetry:repo -- pull --repo ../ella-telemetry    # from the relay, below
 npm run telemetry:repo -- report --repo ../ella-telemetry [--week 2026-W44]
 npm run telemetry:repo -- health --repo ../ella-telemetry [--week 2026-W44]
 ```
@@ -851,6 +852,67 @@ checkout as it found it. Every file leaves `inbox/` in the ingest's commit, a
 refused one into `.refused/` in the checkout, never committed; a file
 committed to `inbox/` stays in Git history after it leaves the tree. Its
 `OPERATIONS.md` says how to run it day to day.
+
+#### The telemetry relay
+
+The app does not send batches over the network yet: a tester exports them
+(`ELLA_TELEMETRY_EXPORT=1`) and hands them over for `inbox/`. Sending will
+go to the `ella-telemetry` Edge Function in the Supabase project *Ella
+Desktop* ([`supabase/functions/ella-telemetry`](supabase/functions/ella-telemetry)),
+apart from the chat proxy so neither can take the other down. It stores each
+batch once in the project's private Storage bucket `telemetry`, as
+`incoming/<batch_id>.jsonl`, with the project's secret key, which Supabase
+gives every function and no laptop ever holds; no bucket policy is needed,
+and none may open it to anyone else.
+
+- **Its own tokens.** A laptop asks `POST /v1/installs` once for a telemetry
+  token, kept only as its SHA-256 in `ella_desktop.telemetry_installs` and
+  revocable one laptop at a time. It is not the chat proxy's install token,
+  and opens nothing there, nor that one anything here; sending does not
+  depend on `ELLA_CLOUD`.
+- **Whole batches only.** `POST /v1/batches/<batch_id>` takes
+  `application/x-ndjson` of at most 1,000,000 bytes, the bucket's own limit
+  (a batch is made at about 256 KB). It checks that the envelope is an
+  app's, its id is the path's and the hash of its body and events, and its
+  event lines are JSON objects as many as it says; whether each event keeps
+  the policy is ingest's to say, so a second copy of the policy cannot drift
+  from it. A batch stored already answers 200 `duplicate`; nothing is ever
+  overwritten.
+- **Refused only when certain.** A laptop puts a batch aside for good only on
+  400 or 413 with `"error":"bad_batch"`: its own bytes are wrong, and would
+  be refused again. Anything else — a `policy_version` not taken yet
+  (`ELLA_TELEMETRY_POLICY_VERSIONS`), a limit, Storage down, any answer that
+  is not the relay's own JSON — keeps the batch to send again. Each refusal
+  is counted by its reason in `ella_desktop.telemetry_refusals`, nothing of
+  the batch kept; `ELLA_TELEMETRY_REFUSE=off` turns refusals into "try
+  later" while the relay is suspected of refusing good batches.
+- **Limits of its own.** 300 batches and 64 MB per install a day, 30,000 and
+  3 GB across every install, new installs per address as the proxy has
+  them (`ELLA_TELEMETRY_LIMITS`); the chat proxy's limits and spend cap are
+  untouched. Its log lines have an outcome, a size and the token's row, never
+  a batch's `install_id`, its events or the caller's address.
+- **Pulled, then deleted.** `telemetry:repo pull` asks the relay's pull routes,
+  which reach `telemetry/incoming/` and nothing else, with the maintainers'
+  `ELLA_TELEMETRY_PULL_TOKEN`. It downloads what waits to a temporary folder
+  outside the checkout, takes it in as `ingest` does (a refused batch into
+  `.refused/`), pushes the commit, and only then deletes those batches at the
+  relay: a pull cut short leaves them there, and the next takes them again as
+  `duplicate`.
+
+It is deployed from this repository, its tables with the proxy's:
+
+```bash
+supabase db push --linked          # supabase/migrations/
+supabase functions deploy ella-telemetry --project-ref xoeydvvslyvslvpaajmi --no-verify-jwt --use-api
+cd supabase/functions/ella-telemetry && deno task test
+```
+
+The pull token is made and kept by the maintainers, set as a function secret
+and never written anywhere else:
+
+```bash
+read -s T && supabase secrets set --project-ref xoeydvvslyvslvpaajmi ELLA_TELEMETRY_PULL_TOKEN="$T"; unset T
+```
 
 #### The telemetry policy and batches
 

@@ -6,12 +6,16 @@ beside it.
 """
 import contextlib
 import fcntl
+import http.server
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import tempfile
+import threading
 import unittest
+import unittest.mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -342,6 +346,283 @@ class Provenance(Repos):
         plain = self.root / "plain"
         plain.mkdir()
         self.assertEqual(real(plain), (None, False))
+
+
+def batch_id_of(data):
+    return policy_tests.split(data)[0]["batch_id"]
+
+
+class FakeRelay:
+    """The relay's incoming/ in memory: `cut` makes that many deletes fail."""
+
+    def __init__(self, *batches):
+        self.objects = {batch_id_of(data): data for data in batches}
+        self.cut = 0
+        self.asked = []
+
+    def waiting(self):
+        self.asked.append("waiting")
+        return sorted(self.objects)
+
+    def get(self, batch_id):
+        return self.objects.get(batch_id)
+
+    def delete(self, batch_id):
+        if self.cut:
+            self.cut -= 1
+            raise telemetry.Failed(f"the relay did not delete batch {batch_id}: HTTP 503 (storage)")
+        self.objects.pop(batch_id, None)
+
+
+class Pull(Repos):
+    def setUp(self):
+        super().setUp()
+        self.real_relay_from_env = telemetry.relay_from_env
+        self.relay = FakeRelay()
+        telemetry.relay_from_env = lambda: self.relay
+        self.real_mkdtemp = tempfile.mkdtemp
+        self.pulled_into = []
+
+        def watched(*args, **kwargs):
+            folder = self.real_mkdtemp(*args, **kwargs)
+            self.pulled_into.append(Path(folder))
+            return folder
+
+        tempfile.mkdtemp = watched
+
+    def tearDown(self):
+        telemetry.relay_from_env = self.real_relay_from_env
+        tempfile.mkdtemp = self.real_mkdtemp
+        super().tearDown()
+
+    def test_batches_waiting_are_taken_in_in_one_commit_then_deleted_at_the_relay(self):
+        self.relay = FakeRelay(self.batch(), self.batch(batch_seq=2, events=EVENTS[:1]))
+        code, err = quietly("pull", "--repo", str(self.a))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.relay.objects, {})
+        self.assertEqual(sorted(r["outcome"] for r in self.ledger()), ["new", "new"])
+        # Each event once in data/, though the second batch repeats one.
+        self.assertEqual(len(self.stored()), len(EVENTS))
+        changed = sh(self.a, "git", "show", "--name-status", "--format=", "HEAD").split()
+        self.assertTrue(all(p.startswith(("data/", "ledger/")) for p in changed if "/" in p))
+        self.assertIn("pulled from the relay", sh(self.a, "git", "log", "-1", "--format=%B"))
+        self.assertEqual(sh(self.a, "git", "status", "--porcelain"), "")
+        # Nothing raw stayed anywhere: not in the checkout, not in the temporary folder.
+        self.assertEqual(self.pulled_into and [p.exists() for p in self.pulled_into], [False])
+        self.assertFalse(self.pulled_into[0].is_relative_to(self.a))
+
+    def test_a_batch_already_taken_in_is_a_duplicate_and_still_deleted(self):
+        batch = self.batch()
+        self.upload({"one.jsonl": batch})
+        quietly("ingest", "--repo", str(self.a))
+        self.relay = FakeRelay(batch)
+        code, _ = quietly("pull", "--repo", str(self.a))
+        self.assertEqual(code, 0)
+        self.assertEqual(sorted(r["outcome"] for r in self.ledger()), ["duplicate", "new"])
+        self.assertEqual(len(self.stored()), len(EVENTS))
+        self.assertEqual(self.relay.objects, {})
+
+    def test_a_refused_batch_is_set_aside_locally_never_committed_and_deleted(self):
+        envelope, lines = policy_tests.split(self.batch())
+        broken = policy_tests.join(envelope, lines.replace(b'"total_ms":406', b'"total_ms":407'))
+        self.relay = FakeRelay(broken, self.batch(batch_seq=2))
+        code, err = quietly("pull", "--repo", str(self.a))
+        self.assertEqual(code, 1)
+        self.assertIn("1 batch(es) refused", err)
+        aside = list((self.a / ".refused").iterdir())
+        self.assertEqual(len(aside), 1)
+        self.assertEqual(aside[0].read_bytes(), broken)
+        self.assertEqual(sorted(r.get("outcome", r["record"]) for r in self.ledger()), ["new", "refused"])
+        tree = sh(self.root, "git", "--git-dir", str(self.remote), "ls-tree", "-r", "--name-only", "main")
+        self.assertNotIn(".refused", tree)
+        self.assertEqual(self.relay.objects, {})
+        self.assertEqual(sh(self.a, "git", "status", "--porcelain"), "")
+
+    def test_nothing_waiting_commits_nothing(self):
+        before = sh(self.a, "git", "rev-parse", "HEAD")
+        code, err = quietly("pull", "--repo", str(self.a))
+        self.assertEqual(code, 0)
+        self.assertIn("nothing waiting", err)
+        self.assertEqual(sh(self.a, "git", "rev-parse", "HEAD"), before)
+
+    def test_nothing_is_deleted_at_the_relay_before_the_push(self):
+        self.relay = FakeRelay(self.batch())
+        real = telemetry.push
+
+        def refused(repo):
+            raise telemetry.Failed("git push: remote said no")
+
+        telemetry.push = refused
+        try:
+            code, err = quietly("pull", "--repo", str(self.a))
+        finally:
+            telemetry.push = real
+        self.assertEqual(code, 2)
+        self.assertIn("remote said no", err)
+        self.assertEqual(len(self.relay.objects), 1)
+        self.assertEqual(self.on_remote("ledger"), {})
+        self.assertEqual(sh(self.a, "git", "status", "--porcelain"), "")
+        self.assertEqual(self.pulled_into and [p.exists() for p in self.pulled_into], [False])
+        # The next pull takes it in whole.
+        self.assertEqual(quietly("pull", "--repo", str(self.a))[0], 0)
+        self.assertEqual([r["outcome"] for r in self.ledger()], ["new"])
+        self.assertEqual(self.relay.objects, {})
+
+    def test_a_pull_cut_short_after_its_push_takes_the_rest_again_as_duplicates(self):
+        self.relay = FakeRelay(self.batch(), self.batch(batch_seq=2))
+        self.relay.cut = 1
+        code, err = quietly("pull", "--repo", str(self.a))
+        self.assertEqual(code, 2)
+        self.assertIn("pushed, but 2 batch(es) are still at the relay", err)
+        self.assertEqual(sorted(r["outcome"] for r in self.ledger()), ["new", "new"])
+        self.assertEqual(len(self.relay.objects), 2)
+        self.assertEqual(quietly("pull", "--repo", str(self.b))[0], 0)
+        self.assertEqual(sorted(r["outcome"] for r in self.ledger()), ["duplicate", "duplicate", "new", "new"])
+        self.assertEqual(len(self.stored()), len(EVENTS))
+        self.assertEqual(self.relay.objects, {})
+
+    def test_a_pull_whose_push_the_branch_refused_takes_its_batches_in_again(self):
+        self.upload({"one.jsonl": self.batch()})
+        sh(self.b, "git", "pull", "-q", "--ff-only")
+        self.assertEqual(quietly("ingest", "--repo", str(self.a))[0], 0)
+        self.relay = FakeRelay(self.batch(batch_seq=2))
+        real_pull, pulls = telemetry.pull, []
+
+        def stale_first(repo):
+            pulls.append(repo)
+            if len(pulls) > 1:
+                real_pull(repo)
+
+        telemetry.pull = stale_first
+        try:
+            code, err = quietly("pull", "--repo", str(self.b))
+        finally:
+            telemetry.pull = real_pull
+        self.assertEqual(code, 0, err)
+        self.assertIn("the branch moved on", err)
+        self.assertEqual(sorted(r["outcome"] for r in self.ledger()), ["new", "new"])
+        self.assertEqual(self.relay.objects, {})
+
+    def test_a_batch_another_pull_took_meanwhile_is_skipped(self):
+        self.relay = FakeRelay(self.batch())
+        gone = FakeRelay.get
+        self.relay.get = lambda batch_id: None
+        code, err = quietly("pull", "--repo", str(self.a))
+        self.relay.get = gone.__get__(self.relay)
+        self.assertEqual(code, 0)
+        self.assertIn("were gone", err)
+        self.assertEqual(self.on_remote("ledger"), {})
+
+    def test_scripts_other_than_the_pinned_ones_pull_nothing(self):
+        self.relay = FakeRelay(self.batch())
+        telemetry.tools_commit = lambda path=None: (ELSEWHERE, True)
+        code, err = quietly("pull", "--repo", str(self.a))
+        self.assertEqual(code, 2)
+        self.assertIn("TOOLS_REF pins", err)
+        self.assertEqual(self.relay.asked, [])
+        self.assertEqual(len(self.relay.objects), 1)
+
+    def test_the_pull_token_must_be_set(self):
+        telemetry.relay_from_env = self.real_relay_from_env
+        for value in (None, "", "short", "AB" * 32):
+            with self.subTest(value=value):
+                env = {k: v for k, v in os.environ.items() if k != "ELLA_TELEMETRY_PULL_TOKEN"}
+                if value is not None:
+                    env["ELLA_TELEMETRY_PULL_TOKEN"] = value
+                with unittest.mock.patch.dict(os.environ, env, clear=True):
+                    code, err = quietly("pull", "--repo", str(self.a))
+                self.assertEqual(code, 2)
+                self.assertIn("ELLA_TELEMETRY_PULL_TOKEN must hold the pull token", err)
+
+
+class RelayClient(unittest.TestCase):
+    """telemetry-repo.py's relay client against a real HTTP server."""
+
+    TOKEN = "9f" * 32
+
+    def setUp(self):
+        self.seen = []
+        self.answers = {}
+        test = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def answer(self):
+                test.seen.append((self.command, self.path, self.headers.get("Authorization")))
+                status, body, headers = test.answers.get((self.command, self.path.split("?")[0]), (404, b"{}", {}))
+                if callable(body):
+                    body = body(self.path)
+                self.send_response(status)
+                for name, value in headers.items():
+                    self.send_header(name, value)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            do_GET = do_DELETE = answer
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_port}/functions/v1/ella-telemetry"
+        self.relay = telemetry.Relay(self.url + "/", self.TOKEN)
+        self.base = "/functions/v1/ella-telemetry"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def test_it_lists_every_page_reads_and_deletes_with_the_token(self):
+        ids = [f"{n:032x}" for n in range(5)]
+        # What Storage holds: an object the relay does not list among them.
+        held = ["notes.txt"] + ids
+        real_page = telemetry.PAGE
+        telemetry.PAGE = 2
+
+        def page(path):
+            offset = int(path.split("offset=")[1])
+            shown = held[offset:offset + 2]
+            objects = [{"batch_id": i, "size": 1, "created_at": None} for i in shown if i in ids]
+            return json.dumps({"objects": objects, "listed": len(shown)}).encode()
+
+        self.answers[("GET", f"{self.base}/v1/pull/incoming")] = (200, page, {})
+        self.answers[("GET", f"{self.base}/v1/pull/incoming/{ids[0]}")] = (200, b"{}\n", {})
+        self.answers[("DELETE", f"{self.base}/v1/pull/incoming/{ids[0]}")] = (204, b"", {})
+        try:
+            self.assertEqual(self.relay.waiting(), ids)
+        finally:
+            telemetry.PAGE = real_page
+        self.assertEqual(self.relay.get(ids[0]), b"{}\n")
+        self.assertIsNone(self.relay.get(ids[1]))
+        self.relay.delete(ids[0])
+        self.assertTrue(all(auth == f"Bearer {self.TOKEN}" for _, _, auth in self.seen))
+        self.assertIn(("GET", f"{self.base}/v1/pull/incoming?limit=2&offset=6", f"Bearer {self.TOKEN}"), self.seen)
+
+    def test_a_refusal_names_its_status_and_never_the_token(self):
+        self.answers[("GET", f"{self.base}/v1/pull/incoming")] = (401, b'{"error":"unauthorized"}', {})
+        with self.assertRaises(telemetry.Failed) as stopped:
+            self.relay.waiting()
+        self.assertIn("HTTP 401 (unauthorized)", str(stopped.exception))
+        self.assertNotIn(self.TOKEN, str(stopped.exception))
+        self.answers[("DELETE", f"{self.base}/v1/pull/incoming/{'a' * 32}")] = (503, b"<html>", {})
+        with self.assertRaises(telemetry.Failed) as stopped:
+            self.relay.delete("a" * 32)
+        self.assertIn("HTTP 503", str(stopped.exception))
+
+    def test_a_redirect_is_never_followed(self):
+        self.answers[("GET", f"{self.base}/v1/pull/incoming")] = (302, b"", {"Location": "/elsewhere"})
+        with self.assertRaises(telemetry.Failed) as stopped:
+            self.relay.waiting()
+        self.assertIn("HTTP 302", str(stopped.exception))
+        self.assertEqual([path for _, path, _ in self.seen], [f"{self.base}/v1/pull/incoming?limit=1000&offset=0"])
+
+    def test_a_relay_that_cannot_be_reached_stops_the_pull_without_the_token(self):
+        closed = telemetry.Relay("http://127.0.0.1:9", self.TOKEN)
+        with self.assertRaises(telemetry.Failed) as stopped:
+            closed.waiting()
+        self.assertIn("could not be reached", str(stopped.exception))
+        self.assertNotIn(self.TOKEN, str(stopped.exception))
 
 
 if __name__ == "__main__":
