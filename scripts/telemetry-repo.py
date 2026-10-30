@@ -4,6 +4,7 @@ telemetry repository, navgurukul/ella-telemetry, with the scripts beside
 this one (latency-sanitize.py, latency-weekly.py, telemetry-health.py).
 
   npm run telemetry:repo -- ingest --repo ../ella-telemetry            # inbox/ -> data/ + ledger/
+  npm run telemetry:repo -- pull --repo ../ella-telemetry              # the relay -> data/ + ledger/
   npm run telemetry:repo -- report --repo ../ella-telemetry [--week W] # reports/<week>.md and .json
   npm run telemetry:repo -- health --repo ../ella-telemetry [--week W] # changes nothing
 
@@ -25,17 +26,30 @@ is moved to .refused/ in the checkout, which is never committed, for a person
 to look at; its hash and problems are in the ledger. A file committed to
 inbox/ stays in Git history after it leaves the tree.
 
+pull takes in, the same way, the batches waiting at the telemetry relay
+(the `ella-telemetry` Supabase function, its bucket's incoming/), with the
+pull token in ELLA_TELEMETRY_PULL_TOKEN; ELLA_TELEMETRY_URL names another
+relay. They are downloaded to a temporary folder outside the checkout, so
+nothing raw is ever in Git, and deleted at the relay only once the commit
+that records them is pushed. A pull cut short before that leaves them
+there: the next one takes them again, and the ledger records them
+`duplicate`.
+
 POSIX only (macOS, Linux): the lock is flock(2).
 """
 import argparse
 import fcntl
 import hashlib
 import json
+import os
 import re
 import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
+import urllib.error
+import urllib.request
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +68,13 @@ ADDED = re.compile(r"(data/\d{4}-W\d{2}/[0-9A-Za-z-]+\.jsonl|ledger/[0-9A-Za-z-]
 REMOVED = re.compile(r"inbox/[^/]+")
 KEEP = ".gitkeep"
 COMMIT = re.compile(r"[0-9a-f]{40}")
+
+# The telemetry relay, and what it is asked with.
+RELAY = "https://xoeydvvslyvslvpaajmi.supabase.co/functions/v1/ella-telemetry"
+BATCH_ID = re.compile(r"[0-9a-f]{32}")
+PULL_TOKEN = re.compile(r"[0-9a-f]{64}")
+# Batches listed per request; the relay gives at most this many.
+PAGE = 1000
 
 
 class Failed(Exception):
@@ -213,6 +234,135 @@ def committed(repo, base, attempt):
     raise Failed(f"the branch kept moving on: tried {ATTEMPTS} times")
 
 
+def take_in(repo, files, refused_total, from_inbox):
+    """Ingests `files` into data/ and ledger/ and stages them: (ingest id,
+    ledger records). A refused file is set aside in .refused/, never
+    committed. Files from inbox/ leave the tree; any others (a pull's) are
+    copied aside and left where they are, for a try after a push the branch
+    refused."""
+    ingest_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(2)
+    hashes = {path: short_hash(path) for path in files}
+    code = run_tool(
+        "latency-sanitize.py", "--validate", *files, "--data", repo / "data",
+        "--ledger", repo / "ledger", "--ingest-id", ingest_id, cwd=repo,
+    )
+    record = repo / "ledger" / f"{ingest_id}.jsonl"
+    if code not in (0, 1) or not record.exists():
+        raise Failed(f"ingest stopped (exit {code}) before it recorded the batches")
+    lines = [json.loads(line) for line in record.read_text(encoding="utf-8").splitlines()]
+    refused = {r["file_sha256"] for r in lines if r["record"] == "refused"}
+    aside = repo / REFUSED
+    # A try whose push was refused set its files aside too: they are
+    # back in inbox/ now, and set aside again under this ingest's id.
+    for stale in refused_total:
+        stale.unlink(missing_ok=True)
+    refused_total.clear()
+    for path in files:
+        if from_inbox:
+            git(repo, "rm", "-q", "--cached", "--ignore-unmatch", "--", str(path.relative_to(repo)))
+        if hashes[path] in refused:
+            aside.mkdir(exist_ok=True)
+            target = aside / f"{ingest_id}-{path.name}"
+            if from_inbox:
+                shutil.move(str(path), target)
+            else:
+                shutil.copyfile(path, target)
+            refused_total.append(target)
+        elif from_inbox:
+            path.unlink()
+    git(repo, "add", "--", "data", "ledger")
+    return ingest_id, lines
+
+
+def summary(lines):
+    """`1 duplicate, 2 new, 1 refused`: what an ingest recorded."""
+    outcomes = {}
+    for r in lines:
+        key = r.get("outcome", r["record"])
+        outcomes[key] = outcomes.get(key, 0) + 1
+    return ", ".join(f"{count} {name.replace('_', ' ')}" for name, count in sorted(outcomes.items()))
+
+
+# The relay.
+
+
+class NoRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect is an answer, never followed: the token goes nowhere else."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+class Relay:
+    """The relay's pull routes. The token is sent only in the
+    Authorization header, and never written in a message."""
+
+    def __init__(self, url, token, opener=None):
+        self.url = url.rstrip("/")
+        self._token = token
+        self._open = (opener or urllib.request.build_opener(NoRedirects)).open
+
+    def _call(self, method, path):
+        request = urllib.request.Request(
+            self.url + path, method=method, headers={"Authorization": f"Bearer {self._token}"}
+        )
+        try:
+            with self._open(request, timeout=30) as response:
+                return response.status, response.read()
+        except urllib.error.HTTPError as error:
+            return error.code, error.read()
+        except (urllib.error.URLError, OSError) as error:
+            reason = getattr(error, "reason", error)
+            raise Failed(f"the relay could not be reached: {reason}") from None
+
+    @staticmethod
+    def _refused(what, status, data):
+        try:
+            code = json.loads(data).get("error", "")
+        except (ValueError, AttributeError):
+            code = ""
+        return Failed(f"the relay did not {what}: HTTP {status}" + (f" ({code})" if code else ""))
+
+    def waiting(self):
+        """The ids of every batch waiting, in name order."""
+        ids, offset = [], 0
+        while True:
+            status, data = self._call("GET", f"/v1/pull/incoming?limit={PAGE}&offset={offset}")
+            if status != 200:
+                raise self._refused("list the batches waiting", status, data)
+            try:
+                page = json.loads(data)
+                objects, listed = page["objects"], int(page["listed"])
+            except (ValueError, KeyError, TypeError):
+                raise Failed("the relay's list of batches could not be read") from None
+            ids += [o["batch_id"] for o in objects if BATCH_ID.fullmatch(str(o.get("batch_id", "")))]
+            # `listed` counts what Storage gave for the page, batches or not.
+            if listed < PAGE:
+                return ids
+            offset += listed
+
+    def get(self, batch_id):
+        """A batch's bytes, or None when it is gone (another pull took it)."""
+        status, data = self._call("GET", f"/v1/pull/incoming/{batch_id}")
+        if status == 404:
+            return None
+        if status != 200:
+            raise self._refused(f"give batch {batch_id}", status, data)
+        return data
+
+    def delete(self, batch_id):
+        status, data = self._call("DELETE", f"/v1/pull/incoming/{batch_id}")
+        if status not in (200, 204):
+            raise self._refused(f"delete batch {batch_id}", status, data)
+
+
+def relay_from_env():
+    token = os.environ.get("ELLA_TELEMETRY_PULL_TOKEN", "").strip()
+    if not PULL_TOKEN.fullmatch(token):
+        raise Failed("ELLA_TELEMETRY_PULL_TOKEN must hold the pull token (64 hex); see OPERATIONS.md")
+    return Relay(os.environ.get("ELLA_TELEMETRY_URL", "").strip() or RELAY, token)
+
+
 # The commands.
 
 
@@ -224,39 +374,8 @@ def ingest(repo):
         if not files:
             print("inbox/ is empty: nothing to take in", file=sys.stderr)
             return None
-        ingest_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(2)
-        hashes = {path: short_hash(path) for path in files}
-        code = run_tool(
-            "latency-sanitize.py", "--validate", *files, "--data", repo / "data",
-            "--ledger", repo / "ledger", "--ingest-id", ingest_id, cwd=repo,
-        )
-        record = repo / "ledger" / f"{ingest_id}.jsonl"
-        if code not in (0, 1) or not record.exists():
-            raise Failed(f"ingest stopped (exit {code}) before it recorded the batches")
-        lines = [json.loads(line) for line in record.read_text(encoding="utf-8").splitlines()]
-        refused = {r["file_sha256"] for r in lines if r["record"] == "refused"}
-        aside = repo / REFUSED
-        # A try whose push was refused set its files aside too: they are
-        # back in inbox/ now, and set aside again under this ingest's id.
-        for stale in refused_total:
-            stale.unlink(missing_ok=True)
-        refused_total.clear()
-        for path in files:
-            git(repo, "rm", "-q", "--cached", "--ignore-unmatch", "--", str(path.relative_to(repo)))
-            if hashes[path] in refused:
-                aside.mkdir(exist_ok=True)
-                target = aside / f"{ingest_id}-{path.name}"
-                shutil.move(str(path), target)
-                refused_total.append(target)
-            else:
-                path.unlink()
-        git(repo, "add", "--", "data", "ledger")
-        outcomes = {}
-        for r in lines:
-            key = r.get("outcome", r["record"])
-            outcomes[key] = outcomes.get(key, 0) + 1
-        summary = ", ".join(f"{count} {name.replace('_', ' ')}" for name, count in sorted(outcomes.items()))
-        return f"Ingest {ingest_id}: {len(files)} file(s), {summary}\n\nTools: ella_tauri {ref}"
+        ingest_id, lines = take_in(repo, files, refused_total, from_inbox=True)
+        return f"Ingest {ingest_id}: {len(files)} file(s), {summary(lines)}\n\nTools: ella_tauri {ref}"
 
     with locked(repo):
         require_clean(repo)
@@ -273,6 +392,63 @@ def ingest(repo):
             print(f"  {path.name}", file=sys.stderr)
     if pushed:
         print(f"pushed {head(repo)[:12]}", file=sys.stderr)
+    return 1 if refused_total else 0
+
+
+def pull_relay(repo, relay):
+    refused_total = []
+    with locked(repo):
+        require_clean(repo)
+        pull(repo)
+        require_pinned(repo)
+        waiting = relay.waiting()
+        if not waiting:
+            print("the relay has nothing waiting: nothing to take in", file=sys.stderr)
+            return 0
+        # Outside the checkout: nothing raw can be staged, and nothing is
+        # left behind however the run ends.
+        with tempfile.TemporaryDirectory(prefix="ella-telemetry-pull-") as folder:
+            files, taken = [], []
+            for batch_id in waiting:
+                data = relay.get(batch_id)
+                if data is None:
+                    continue
+                path = Path(folder) / f"{batch_id}.jsonl"
+                path.write_bytes(data)
+                files.append(path)
+                taken.append(batch_id)
+            if not files:
+                print("the batches listed were gone: nothing to take in", file=sys.stderr)
+                return 0
+
+            def attempt(ref):
+                ingest_id, lines = take_in(repo, files, refused_total, from_inbox=False)
+                return (
+                    f"Ingest {ingest_id}: {len(files)} batch(es) pulled from the relay, {summary(lines)}"
+                    f"\n\nTools: ella_tauri {ref}"
+                )
+
+            try:
+                committed(repo, head(repo), attempt)
+            except BaseException:
+                for path in refused_total:
+                    path.unlink(missing_ok=True)
+                raise
+        print(f"pushed {head(repo)[:12]}", file=sys.stderr)
+        # Only now: every batch taken is in the ledger, on the remote.
+        for done, batch_id in enumerate(taken):
+            try:
+                relay.delete(batch_id)
+            except Failed as error:
+                raise Failed(
+                    f"{error}; pushed, but {len(taken) - done} batch(es) are still at the relay: "
+                    "the next pull takes them again, and the ledger records them duplicate"
+                ) from None
+    if refused_total:
+        print(f"{len(refused_total)} batch(es) refused, kept out of Git in {REFUSED}/:", file=sys.stderr)
+        for path in refused_total:
+            print(f"  {path.name}", file=sys.stderr)
+    print(f"{len(taken)} batch(es) taken in and deleted at the relay", file=sys.stderr)
     return 1 if refused_total else 0
 
 
@@ -312,12 +488,13 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     for name, text in (
         ("ingest", "take in inbox/, commit and push"),
+        ("pull", "take in the batches waiting at the relay, commit and push, then delete them there"),
         ("report", "write the weekly report, commit and push"),
         ("health", "print collection health; changes nothing"),
     ):
         command = commands.add_parser(name, help=text)
         command.add_argument("--repo", type=Path, required=True, help="a checkout of navgurukul/ella-telemetry")
-        if name != "ingest":
+        if name in ("report", "health"):
             command.add_argument("--week", help="such as 2026-W44 (default: the last whole week, IST)")
     commands.choices["health"].add_argument("--json", action="store_true", help="print the JSON")
     args = parser.parse_args(argv)
@@ -326,6 +503,8 @@ def main(argv=None):
         require_repo(repo)
         if args.command == "ingest":
             return ingest(repo)
+        if args.command == "pull":
+            return pull_relay(repo, relay_from_env())
         if args.command == "report":
             return report(repo, args.week)
         return health(repo, args.week, args.json)
