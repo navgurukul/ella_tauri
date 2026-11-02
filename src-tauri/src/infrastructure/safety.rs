@@ -28,10 +28,40 @@
 //! ("that price is a rip-off!"), which only reaches its milder `MEAN` level.
 use rustrict::{CensorStr, Type};
 
+/// Whether this is a narrowly recognizable complaint about repeated questions.
+pub fn is_repetition_complaint(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let mentions_repeat = lower.contains("repeated question")
+        || lower.contains("repeat question")
+        || lower.contains("asking me again");
+    let mentions_answer = lower.contains("already answered")
+        || lower.contains("answered this question")
+        || lower.contains("answered that question");
+
+    mentions_repeat && mentions_answer
+}
+
 /// Whether `text` trips rustrict's general-audience profanity/vulgarity
-/// threshold.
+/// threshold, except for a narrowly recognized, independently benign
+/// complaint about repeated questions.
 pub fn flagged(text: &str) -> bool {
-    text.is(Type::INAPPROPRIATE)
+    let is_flagged = text.is(Type::INAPPROPRIATE);
+
+    if !is_repetition_complaint(text) {
+        return is_flagged;
+    }
+
+    // A repetition complaint must not exempt a separate inappropriate sentence.
+    let sentences: Vec<&str> = text
+        .split(['.', '?', '!', '\n'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+
+    !sentences.is_empty()
+        && sentences
+            .iter()
+            .any(|sentence| sentence.is(Type::INAPPROPRIATE))
 }
 
 /// A censored copy of `text` with anything rustrict recognizes as profane,
@@ -193,5 +223,19 @@ mod tests {
             censor("I ate bhel puri near my college yesterday."),
             "I ate bhel puri near my college yesterday."
         );
+    }
+
+    #[test]
+    fn repetition_complaint_is_not_flagged_as_inappropriate() {
+        let complaint = "You are asking me repeated question, right? It is I have already answered this question previously. Mmhmm";
+        assert!(is_repetition_complaint(complaint));
+        assert!(!flagged(complaint));
+    }
+
+    #[test]
+    fn repetition_complaint_does_not_exempt_an_unsafe_sentence() {
+        let mixed = "You are asking me repeated question, right? It is I have already answered this question previously. You are a fucking idiot.";
+        assert!(is_repetition_complaint(mixed));
+        assert!(flagged(mixed));
     }
 }

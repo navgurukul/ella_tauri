@@ -23,7 +23,7 @@ use crate::{
         audio::{pause_cut_index, quietest_cut_index, trim_to_speech, VadOutput},
         database::{AssessmentWrite, CurriculumReader, Database, LessonMark},
         engines::{
-            trailing_question, GeneratedReply, NextRecap, NextTalk, SpeechSegment, SpeechSink, TutorEngine,
+            question_was_answered_with_response, trailing_question, GeneratedReply, NextRecap, NextTalk, SpeechSegment, SpeechSink, TutorEngine,
             FREE_TOPIC_TURNS,
         },
         lesson_prompt::{self, LessonAsk},
@@ -1455,14 +1455,22 @@ impl AppService {
             // Skip the model entirely: a live session showed it does not
             // reliably self-correct once one turn slips into a soft,
             // validating register, so a flagged turn must never reach it.
-            // Handing back the learner's own unanswered question keeps the
-            // conversation from reading as though the dodge worked.
+            // If the latest question remains unanswered, hand it back so the
+            // redirect does not make the learner's dodge appear successful.
             let question = request
                 .messages
                 .iter()
                 .rev()
                 .find(|message| message.speaker == Speaker::Ella)
-                .and_then(|message| trailing_question(&message.content));
+                .and_then(|message| trailing_question(&message.content))
+                .filter(|question| {
+                    let censored_response = safety::censor(clean);
+                    !question_was_answered_with_response(
+                        question,
+                        &request.messages,
+                        &censored_response,
+                    )
+                });
             trace.stage("llm:skipped", "learner turn flagged by the content filter");
             trace.note("flagged");
             GeneratedReply::plain(safety::redirect_reply(question), 0.0, 0.0)
@@ -3797,10 +3805,188 @@ mod curriculum_flow_tests {
         }
     }
 
+    struct ScriptedTalkEngine {
+    replies: Mutex<std::collections::VecDeque<String>>,
+    reply_calls: Arc<Mutex<usize>>,
+    }
+
+    impl TutorEngine for ScriptedTalkEngine {
+        fn status(&self) -> EngineStatus {
+            DemoEngine.status()
+        }
+
+        fn opening(
+            &self,
+            topic: &Topic,
+            learner_name: &str,
+            pitch: &Pitch,
+        ) -> EllaResult<String> {
+            DemoEngine.opening(topic, learner_name, pitch)
+        }
+
+        fn reply(&self, _request: &TutorRequest) -> EllaResult<GeneratedReply> {
+            *self.reply_calls.lock().unwrap() += 1;
+
+            let text = self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected tutor reply request");
+
+            Ok(GeneratedReply::plain(text, 1.0, 1.0))
+        }
+
+        fn uses_native_stt(&self) -> bool {
+            false
+        }
+
+        fn transcribe(&self, _: &[i16], _: u32) -> EllaResult<Transcription> {
+            Err(EllaError::Engine("no microphone in tests".into()))
+        }
+
+        fn synthesize(&self, _: &str) -> EllaResult<SynthesizedAudio> {
+            DemoEngine.synthesize("")
+        }
+    }
+
     fn judged(judge: Judge) -> AppService {
         let service = AppService::new(Database::in_memory().unwrap(), Box::new(judge));
         service.save_learner("Asha", Some(14)).unwrap();
         service
+    }
+
+    #[test]
+    fn safety_redirect_uses_latest_unanswered_question_after_an_answered_exchange() {
+        const FIRST_QUESTION: &str = "What food do you enjoy at the market?";
+        const SECOND_QUESTION: &str = "What makes that food special to you?";
+
+        let reply_calls = Arc::new(Mutex::new(0));
+
+        let engine = ScriptedTalkEngine {
+            replies: Mutex::new(
+                vec![
+                    FIRST_QUESTION.to_owned(),
+                    SECOND_QUESTION.to_owned(),
+                ]
+                .into(),
+            ),
+            reply_calls: Arc::clone(&reply_calls),
+        };
+
+        let service = AppService::new(
+            Database::in_memory().unwrap(),
+            Box::new(engine),
+        );
+        service.save_learner("Asha", Some(14)).unwrap();
+
+        let session = service.start_session("street-food").unwrap();
+
+        // ELLA asks the first question.
+        let first = service
+            .send_text_turn(
+                &session.id,
+                "I visited the market with my family.",
+            )
+            .unwrap();
+
+        assert!(
+            first.ella_message.content.contains(FIRST_QUESTION),
+            "ELLA should ask the first scripted question"
+        );
+
+        // The learner answers the first question, and ELLA asks a new one.
+        let second = service
+            .send_text_turn(
+                &session.id,
+                "I enjoy spicy bhel because of its taste.",
+            )
+            .unwrap();
+
+        assert!(
+            second.ella_message.content.contains(SECOND_QUESTION),
+            "ELLA should move to the second scripted question"
+        );
+
+        assert_eq!(
+            *reply_calls.lock().unwrap(),
+            2,
+            "the tutor engine should have handled the two ordinary turns"
+        );
+
+        // A flagged turn should redirect without calling the tutor engine.
+        let flagged = service
+            .send_text_turn(&session.id, "sh1t")
+            .unwrap();
+
+        assert_eq!(
+            flagged.ella_message.content,
+            format!(
+                "That's not something I talk about. {SECOND_QUESTION}"
+            ),
+            "the redirect should preserve the latest unanswered question"
+        );
+
+        assert!(
+            !flagged.ella_message.content.contains(FIRST_QUESTION),
+            "the redirect must not return the earlier answered question"
+        );
+
+        assert_eq!(
+            *reply_calls.lock().unwrap(),
+            2,
+            "the flagged turn must bypass the tutor engine"
+        );
+    }
+
+    #[test]
+    fn safety_redirect_does_not_repeat_a_question_answered_by_the_flagged_response() {
+        const QUESTION: &str = "What makes Goa especially special for you?";
+
+        let reply_calls = Arc::new(Mutex::new(0));
+
+        let engine = ScriptedTalkEngine {
+            replies: Mutex::new(vec![QUESTION.to_owned()].into()),
+            reply_calls: Arc::clone(&reply_calls),
+        };
+
+        let service = AppService::new(
+            Database::in_memory().unwrap(),
+            Box::new(engine),
+        );
+        service.save_learner("Asha", Some(14)).unwrap();
+
+        let session = service.start_session("street-food").unwrap();
+
+        // ELLA asks the question.
+        let first = service
+            .send_text_turn(&session.id, "I have visited Goa.")
+            .unwrap();
+
+        assert!(
+            first.ella_message.content.contains(QUESTION),
+            "ELLA should ask the scripted question"
+        );
+
+        // The flagged response contains a substantive answer to that question.
+        let flagged = service
+            .send_text_turn(
+                &session.id,
+                "Goa is special because of its calm beaches, peaceful atmosphere and delicious food. sh1t",
+            )
+            .unwrap();
+
+        assert_eq!(
+            flagged.ella_message.content,
+            "That's not something I talk about. Let's carry on.",
+            "the safety redirect should not repeat a question the learner has answered"
+        );
+
+        assert_eq!(
+            *reply_calls.lock().unwrap(),
+            1,
+            "the flagged turn must bypass the tutor engine"
+        );
     }
 
     fn demo() -> AppService {

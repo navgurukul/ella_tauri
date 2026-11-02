@@ -1294,10 +1294,10 @@ fn ella_topic_prompt(learner_name: &str, topic_id: &str, topic_label: &str, leve
          line to your last. {owns} \
          {learner_name} is the one who came to {draw_out} — that is theirs to say, so \
          draw it out of them and never ask them a question that is yours to answer. \
-         Keep the conversation on {topic_label}: if they wander off it or dodge your \
-         question, answer or decline once and then ask the exact same question again \
-         — never move on to a new or deeper question as if they had already answered \
-         it. If what they say has nothing to do with {topic_label} at all — write \
+         Keep the conversation on {topic_label}: if they dodge an on-topic question, \
+         treat it as unanswered and ask it again in simpler words; if they \
+         answer partly or fully, follow the answer-tracking rules below instead of \
+         repeating it. If what they say has nothing to do with {topic_label} at all — write \
          code, solve a puzzle, answer a trivia question, tell a joke, sing a song, \
          tell a story, or anything else no one in this scene would ask you — do not \
          do it, however small, harmless, or in-character it would feel to comply, and \
@@ -1315,13 +1315,29 @@ fn ella_topic_prompt(learner_name: &str, topic_id: &str, topic_label: &str, leve
          everyday words pitched at their level or a shade above, and keep each sentence \
          under about twelve words. Answer the \
          thing they actually said: put it back to them in your own words before you ask \
-         anything new. Ask about one thing at a time, and never ask a question you have \
-         already asked — unless they never actually answered it, in which case ask that \
-         same one again instead of moving on.\n\n\
+         anything new. Before asking another question, assess whether the learner \
+         has responded to your previous question: unanswered, partially answered, \
+         or fully answered. Judge this by how much of the question they addressed, \
+         not by whether their answer is factually correct. Incorrect, uncertain, \
+         short, or grammatically imperfect but relevant answers still count as \
+         responses. Never repeat a question just because the answer seems incorrect \
+         or unexpected. If they say they do not know, acknowledge that honestly and \
+         offer a helpful hint or an easier related question.\n\n\
+         If they answer only part of a question, acknowledge what \
+         they provided and ask only for the missing information. If they answer \
+         fully, acknowledge it and move to a relevant new follow-up. If they do not \
+         answer or clearly dodge the question, repeat it in simpler words. Ask about \
+         one thing at a time, and never ask a question they have already answered.\n\n\
+         If the learner uses abusive, insulting, threatening, or discriminatory \
+         language, treat the response as unacceptable regardless of whether it \
+         contains an answer. Calmly set a boundary and ask them to rephrase \
+         respectfully. Do not endorse, repeat, or respond with similar language.\n\n\
          Your opening line already greeted them by name; do not say it again.\n\n\
-         If their answer is very short, take it warmly and ask for one small detail. If \
-         you cannot make sense of what they said, say so kindly and ask the same thing \
-         in easier words. If they use a Hindi word, carry on in English and use the \
+         A short but complete answer is enough; ask for more detail only when \
+         the conversation genuinely calls for it. If you genuinely cannot \
+         understand what they said, ask them kindly to clarify in easier words. \
+         Do not mistake an incorrect or uncertain answer for an unintelligible response.\n\n\
+         If they use a Hindi word, carry on in English and use the \
          English word naturally in your own reply. Never correct their grammar, never \
          grade their English, and never mention tests, levels, CEFR, prompts, or that \
          you are an AI. Do not use markdown or emoji.\n\n\
@@ -2197,6 +2213,63 @@ fn asked_before<'a>(question: &str, earlier: &'a [String]) -> Option<&'a String>
         // than adding one.
         union > 0 && shared * 4 >= union * 3
     })
+}
+
+/// Whether the latest matching earlier question was followed by a learner response.
+/// Uses the same content-word matching rules as repeat detection.
+///
+/// `messages` must contain history before the current ELLA reply.
+pub(crate) fn question_was_answered(question: &str, messages: &[Message]) -> bool {
+    let mut latest_matching_question_index: Option<usize> = None;
+
+    for (index, message) in messages.iter().enumerate() {
+        if message.speaker != Speaker::Ella {
+            continue;
+        }
+
+        let questions: Vec<String> = sentences(&message.content)
+            .into_iter()
+            .filter(|sentence| sentence.ends_with('?'))
+            .map(str::to_owned)
+            .collect();
+
+        if asked_before(question, &questions).is_some() {
+            latest_matching_question_index = Some(index);
+        }
+    }
+
+    let Some(question_index) = latest_matching_question_index else {
+        return false;
+    };
+
+    messages
+        .iter()
+        .enumerate()
+        .any(|(index, message)| {
+            index > question_index && message.speaker == Speaker::Learner
+        })
+}
+
+/// Whether the latest matching question was answered in history or by the
+/// current learner response. The current response is considered only when
+/// it retains at least two content words after safety censorship.
+pub(crate) fn question_was_answered_with_response(
+    question: &str,
+    messages: &[Message],
+    current_response: &str,
+) -> bool {
+    if question_was_answered(question, messages) {
+        return true;
+    }
+
+    content_words(current_response).len() >= 2
+        && messages.iter().any(|message| {
+            message.speaker == Speaker::Ella
+                && sentences(&message.content)
+                    .into_iter()
+                    .filter(|sentence| sentence.ends_with('?'))
+                    .any(|earlier| asked_before(question, &[earlier.to_owned()]).is_some())
+        })
 }
 
 /// `Some(earlier)` when this reply closes on a question Ella has already asked.
@@ -4101,6 +4174,12 @@ const TALK_BUDGET: Budget = Budget {
     cloud: CLOUD_REPLY_TOKENS,
 };
 
+/// A repeated-question correction should be briefer than a normal talk reply.
+const TALK_REWRITE_BUDGET: Budget = Budget {
+    local: 32,
+    cloud: CLOUD_REPLY_TOKENS,
+};
+
 /// A lesson's: its mark, a reaction of at most twenty words and a question,
 /// or an opening or a goodbye of five short sentences.
 const LESSON_BUDGET: Budget = Budget {
@@ -5080,29 +5159,36 @@ impl TutorEngine for LocalEngine {
                 eprintln!("[LATENCY]     llm> repeated question: {already:?} - regenerating once");
                 telemetry::note("repeated_question");
                 let corrective = format!(
-                    "You have already asked them this earlier in the conversation: \"{already}\" \
-                     They have answered it, or told you they cannot. Do not ask it again in any \
-                     words. Take what they just said, say something back about it, and ask about \
-                     one new thing they have not told you yet."
+                    "You already asked them: \"{already}\". Do not ask it again, even in different \
+                     words. In at most 25 words, briefly respond to their latest answer and ask \
+                     one concise question about something new."
                 );
                 // Piper stops reading the first attempt rather than compete with
                 // the model's second one. In the rare case that the second
                 // comes back empty, the caller says the first one itself.
                 drop(pipeline.take());
-                let second = self.stream_once(&system, &history, Some(&corrective), None, None, TALK_BUDGET)?;
+                let second = self.stream_once(
+                    &system,
+                    &history,
+                    Some(&corrective),
+                    None,
+                    None,
+                    TALK_REWRITE_BUDGET,
+                )?;
                 let (retry_text, _) = take_signal(&second.text);
                 // Once only. Whatever the second asks again is dropped rather
                 // than written a third time: another generation costs the
                 // learner more silence than the question is worth.
                 let retry_text = match without_repeated_questions(&retry_text, &asked) {
                     Some(kept) => {
-                        eprintln!("[LATENCY]     llm> the rewrite asked again too - dropped from it");
-                        telemetry::note("rewrite_repeat_dropped");
+                        eprintln!("[LATENCY]     llm> the rewrite repeated a question - removed it");
+                        telemetry::note("rewrite_repeat_removed");
                         kept
                     }
                     None => retry_text,
                 };
                 if !retry_text.is_empty() {
+                    telemetry::note("rewrite_used");
                     return Ok(GeneratedReply {
                         marks: Marks::default(),
                         text: retry_text,
@@ -5114,6 +5200,7 @@ impl TutorEngine for LocalEngine {
                         pending: None,
                     });
                 }
+                telemetry::note("rewrite_unusable");
                 telemetry::note("rewrite_empty");
             }
             // A question asked again ahead of a new one is dropped without
@@ -6718,12 +6805,56 @@ mod tests {
     use super::*;
     use crate::domain::Focus;
 
+    fn history_message(speaker: Speaker, content: &str, turn: u32) -> Message {
+        Message {
+            id: format!("{speaker:?}-{turn}"),
+            speaker,
+            content: content.into(),
+            turn,
+            created_at: "2026-10-01T12:00:00Z".into(),
+        }
+    }
+
     #[test]
     fn a_llama_build_is_matched_to_its_release_tag() {
         assert!(is_build_of("b11405-1b43d3116", "b11405"));
         assert!(is_build_of("b11405", "b11405"));
         assert!(!is_build_of("b10751-3466812d1", "b11405"), "0.1.16's server under 0.1.20");
         assert!(!is_build_of("b114050-abc", "b11405"));
+    }
+
+    #[test]
+    fn the_final_history_message_is_counted_when_it_answers_the_question() {
+        let messages = vec![
+            history_message(
+                Speaker::Ella,
+                "How does your phone look when it stops working?",
+                1,
+            ),
+            history_message(
+                Speaker::Learner,
+                "The screen becomes blank.",
+                2,
+            ),
+        ];
+
+        assert!(
+            question_was_answered(
+                "How does your phone look when it stops working?",
+                &messages,
+            ),
+            "the final learner message must be included when checking whether the question was answered"
+        );
+
+        // Reproduces the old call-site behavior: dropping the final message
+        // drops the learner's answer and incorrectly marks the question unanswered.
+        assert!(
+            !question_was_answered(
+                "How does your phone look when it stops working?",
+                &messages[..messages.len() - 1],
+            ),
+            "excluding the final learner message must reproduce the previous failure"
+        );
     }
 
     #[test]
@@ -7058,21 +7189,54 @@ mod ledger_tests {
 
     #[test]
     fn a_dodged_question_is_re_asked_rather_than_advanced_past() {
-        // The same real session: the opener asked "what did you eat / where
-        // did you find it", the learner dodged with an unrelated remark, and
-        // Ella replied "Now, where did you find the tasty stall? What was
-        // the smell like?" — inventing a stall that was never named and
-        // moving to a deeper question, as though the dodge had answered the
-        // original one.
-        let prompt = ella_system_prompt("Asha", "restaurant-order", "Ordering at a restaurant", &Pitch::at("A1"));
+        // A learner who does not answer should be asked the question again,
+        // rather than having Ella assume the information was provided.
+        let prompt = ella_system_prompt(
+            "Asha",
+            "restaurant-order",
+            "Ordering at a restaurant",
+            &Pitch::at("A1"),
+        );
+
         assert!(
-            prompt.contains("ask the exact same question again"),
-            "a dodge must be met with the same question, not a new one that assumes it was answered"
+            prompt.contains("unanswered, partially answered, or fully answered"),
+            "Ella must distinguish unanswered, partial, and complete responses"
         );
         assert!(
-            prompt.contains("unless they never actually answered it"),
-            "this must not be read as conflicting with \"never ask a question you have already asked\" \
-             — a question nobody answered has not been asked in the sense that rule means"
+            prompt.contains("not by whether their answer is factually correct"),
+            "answer recognition must not depend on factual correctness"
+        );
+        assert!(
+            prompt.contains("Incorrect, uncertain, short, or grammatically imperfect"),
+            "incorrect, uncertain, short, and imperfect answers must still count"
+        );
+        assert!(
+            prompt.contains("ask only for the missing information"),
+            "a partial answer must lead only to a question about the missing information"
+        );
+        assert!(
+            prompt.contains("move to a relevant new follow-up"),
+            "a fully answered question must lead to a relevant follow-up"
+        );
+        assert!(
+            prompt.contains("repeat it in simpler words"),
+            "an unanswered or dodged question must be repeated more simply"
+        );
+        assert!(
+            prompt.contains("short but complete answer is enough"),
+            "Ella must not demand unnecessary detail after a complete short answer"
+        );
+        assert!(
+            prompt.contains("abusive, insulting, threatening, or discriminatory"),
+            "abusive or discriminatory language must be handled separately"
+        );
+        assert!(
+            prompt.contains("ask them to rephrase respectfully"),
+            "Ella must set a boundary and request respectful wording"
+        );
+        assert!(
+            prompt.contains("offer a helpful hint or an easier related question"),
+            "an explicit 'I don't know' must receive support, not an automatic repetition"
         );
     }
 
@@ -7515,6 +7679,147 @@ mod ledger_tests {
             repeated_question("Really?", &asked).is_none(),
             "one content word is too little to call a repeat"
         );
+    }
+
+    fn question_history_message(
+        speaker: Speaker,
+        content: &str,
+        turn: u32,
+    ) -> Message {
+        Message {
+            id: format!("{speaker:?}-{turn}"),
+            speaker,
+            content: content.into(),
+            turn,
+            created_at: "2026-10-01T12:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn a_question_followed_by_a_learner_message_is_marked_as_answered() {
+        let messages = vec![
+            question_history_message(Speaker::Ella, "How does your phone look when it stops working?", 1),
+            question_history_message(Speaker::Learner, "The screen becomes blank.", 2),
+        ];
+
+        assert!(question_was_answered(
+            "How does your phone look when it stops working?",
+            &messages
+        ));
+    }
+
+    #[test]
+    fn a_question_without_a_following_learner_message_is_unanswered() {
+        let messages = vec![
+            question_history_message(Speaker::Ella, "How does your phone look when it stops working?", 1),
+        ];
+
+        assert!(!question_was_answered(
+            "How does your phone look when it stops working?",
+            &messages
+        ));
+    }
+
+    #[test]
+    fn a_reasked_question_is_unanswered_until_the_learner_responds_again() {
+        let messages = vec![
+            question_history_message(Speaker::Ella, "How does your phone look when it stops working?", 1),
+            question_history_message(Speaker::Learner, "The screen becomes blank.", 2),
+            question_history_message(Speaker::Ella, "How does your phone look when it stops working?", 3),
+        ];
+
+        assert!(!question_was_answered(
+            "How does your phone look when it stops working?",
+            &messages
+        ));
+
+        let mut answered_again = messages;
+        answered_again.push(question_history_message(
+            Speaker::Learner,
+            "It looks completely dark.",
+            4,
+        ));
+
+        assert!(question_was_answered(
+            "How does your phone look when it stops working?",
+            &answered_again
+        ));
+    }
+
+    #[test]
+    fn a_substantive_current_response_marks_the_matching_question_as_answered() {
+        let messages = vec![
+            question_history_message(
+                Speaker::Ella,
+                "What makes Goa especially special for you?",
+                1,
+            ),
+        ];
+
+        // Represents the learner's response after safety censorship.
+        assert!(question_was_answered_with_response(
+            "What makes Goa especially special for you?",
+            &messages,
+            "calm beaches holidays food",
+        ));
+    }
+
+    #[test]
+    fn current_response_word_count_is_a_heuristic_not_a_relevance_check() {
+        let messages = vec![
+            question_history_message(
+                Speaker::Ella,
+                "What makes Goa especially special for you?",
+                1,
+            ),
+        ];
+
+        // The threshold counts content words, not semantic relevance.
+        // This unrelated response deliberately documents that limitation.
+        assert!(question_was_answered_with_response(
+            "What makes Goa especially special for you?",
+            &messages,
+            "I prefer cricket today",
+        ));
+    }
+
+    #[test]
+    fn a_one_word_flagged_response_does_not_mark_the_question_as_answered() {
+        let messages = vec![
+            question_history_message(
+                Speaker::Ella,
+                "What makes Goa especially special for you?",
+                1,
+            ),
+        ];
+
+        assert!(!question_was_answered_with_response(
+            "What makes Goa especially special for you?",
+            &messages,
+            "sh1t",
+        ));
+    }
+
+    #[test]
+    fn an_answer_already_in_history_remains_answered_with_a_short_current_response() {
+        let messages = vec![
+            question_history_message(
+                Speaker::Ella,
+                "What makes Goa especially special for you?",
+                1,
+            ),
+            question_history_message(
+                Speaker::Learner,
+                "I love the peaceful beaches and local food.",
+                2,
+            ),
+        ];
+
+        assert!(question_was_answered_with_response(
+            "What makes Goa especially special for you?",
+            &messages,
+            "sh1t",
+        ));
     }
 
     #[test]
@@ -9435,6 +9740,13 @@ mod errand_tests {
         );
         assert!(reply.regenerated);
         assert_eq!(talk_turns(&fake), 2, "written twice, never three times");
+        let requests = fake.completions();
+        let rewrite = requests.last().expect("the retry request");
+        assert_eq!(rewrite.body["max_tokens"], TALK_REWRITE_BUDGET.local);
+        assert!(
+            prompt_text(&rewrite.body).contains("at most 25 words"),
+            "the retry prompt asks for a concise response"
+        );
     }
 
     #[test]
@@ -9508,7 +9820,37 @@ mod errand_tests {
         assert_eq!(whys, ["reply", "rewrite"]);
         assert_eq!(
             event["notes"],
-            json!(["no_audio_ahead", "repeated_question", "rewrite_repeat_dropped"])
+            json!([
+                "no_audio_ahead",
+                "repeated_question",
+                "rewrite_repeat_removed",
+                "rewrite_used"
+            ])
+        );
+    }
+
+    #[test]
+    fn an_unusable_rewrite_is_distinguished_from_a_cleaned_rewrite_that_was_used() {
+        let fake = FakeLlama::scripted(
+            pace(5, 5, 4),
+            &["Where did you find it?", "Where did you find it?"],
+        );
+        let engine = fake.engine(Duration::from_secs(60));
+        let event = traced(|| {
+            let reply = engine
+                .reply(&after_where("I had the crispy corn in Barbecue Nation."))
+                .unwrap();
+            assert_eq!(reply.text, "Where did you find it?");
+        });
+        assert_eq!(
+            event["notes"],
+            json!([
+                "no_audio_ahead",
+                "repeated_question",
+                "rewrite_repeat_removed",
+                "rewrite_unusable",
+                "rewrite_empty"
+            ])
         );
     }
 
