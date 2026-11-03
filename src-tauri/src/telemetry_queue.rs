@@ -12,9 +12,11 @@
 //! the team's store, which keeps each `batch_id` and `event_id` once, counts
 //! it once.
 //!
-//! Off unless `ELLA_TELEMETRY_EXPORT=1`, and then it only exports: each batch
-//! is written to `telemetry/export/`, for a tester to hand over. Nothing is
-//! sent over a network here; a relay would be another `Transport`.
+//! Off unless asked for. `ELLA_TELEMETRY_SEND=1` sends each batch over
+//! HTTPS to the telemetry relay (`supabase/functions/ella-telemetry`), with
+//! a token of its own kept in `telemetry/send-token`. Else
+//! `ELLA_TELEMETRY_EXPORT=1` writes each batch to `telemetry/export/`, for a
+//! tester to hand over, and nothing leaves over a network.
 //!
 //! A new install starts at the end of the log: what was there before the
 //! queue first ran stays on the laptop.
@@ -26,7 +28,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         mpsc::{self, RecvTimeoutError, SyncSender},
-        OnceLock,
+        Mutex, OnceLock, PoisonError,
     },
     thread,
     time::{Duration, Instant},
@@ -39,6 +41,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
+    infrastructure::cloud_llm::{is_token, keep_token, read_token},
     telemetry,
     telemetry_policy::{self as policy, Body, Reasons, Sanitizer, SendFields},
 };
@@ -108,13 +111,12 @@ const REFUSED_KEPT: usize = 10;
 
 // Where a batch goes.
 
-/// Where a batch goes once it is made. Phase 2 has one, `ExportTransport`.
+/// Where a batch goes once it is made: `HttpTransport`, the relay, or
+/// `ExportTransport`, a folder.
 pub trait Transport: Send {
     fn send(&self, batch: &[u8], batch_id: &str) -> Result<Ack, SendError>;
 }
 
-// Export only ever stores; a relay gives the other answers.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ack {
     Stored,
@@ -122,7 +124,6 @@ pub enum Ack {
     Duplicate,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendError {
     /// Tried again later.
@@ -144,6 +145,125 @@ impl Transport for ExportTransport {
             .and_then(|()| write_atomically(&self.dir.join(format!("{batch_id}.jsonl")), batch))
             .map(|()| Ack::Stored)
             .map_err(|error| SendError::Failed(error.kind().to_string()))
+    }
+}
+
+/// The relay an installed build sends to: Ella Desktop's Supabase project.
+pub const DEFAULT_RELAY: &str = "https://xoeydvvslyvslvpaajmi.supabase.co/functions/v1/ella-telemetry";
+
+/// Sends each batch to the telemetry relay, `POST /v1/batches/<batch_id>`,
+/// with this install's telemetry token: one of its own, asked for once from
+/// `POST /v1/installs` and kept in `token_file`, never the cloud's.
+///
+/// What the relay says decides, as its `errors.ts` asks: a batch is put
+/// aside only when the relay says its bytes are wrong (`bad_batch`); any
+/// other answer, or none, keeps it to send again. A token the relay refuses
+/// is kept too, and no new one asked for: one revoked stays revoked.
+pub struct HttpTransport {
+    client: reqwest::blocking::Client,
+    url: String,
+    token_file: PathBuf,
+    token: Mutex<Option<String>>,
+}
+
+/// The longest a laptop waits to reach the relay, and for all of one request.
+const CONNECT_LIMIT: Duration = Duration::from_secs(10);
+const REQUEST_LIMIT: Duration = Duration::from_secs(30);
+
+impl HttpTransport {
+    pub fn new(url: &str, token_file: PathBuf) -> Self {
+        Self::with_limit(url, token_file, REQUEST_LIMIT)
+    }
+
+    fn with_limit(url: &str, token_file: PathBuf, limit: Duration) -> Self {
+        Self {
+            client: reqwest::blocking::Client::builder()
+                .connect_timeout(CONNECT_LIMIT.min(limit))
+                .timeout(limit)
+                // An answer from elsewhere is no answer from the relay.
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("reqwest client configuration is valid"),
+            url: url.trim_end_matches('/').to_owned(),
+            token: Mutex::new(read_token(&token_file)),
+            token_file,
+        }
+    }
+
+    /// This install's token: the one kept, or a new one asked for and kept.
+    fn token(&self) -> Result<String, SendError> {
+        let mut token = self.token.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(token) = token.as_ref() {
+            return Ok(token.clone());
+        }
+        let response = self
+            .client
+            .post(format!("{}/v1/installs", self.url))
+            .json(&serde_json::json!({"app_version": telemetry::APP_VERSION}))
+            .send()
+            .map_err(|error| unsent(&error))?;
+        let status = response.status().as_u16();
+        let body = response.bytes().map_err(|error| unsent(&error))?;
+        let minted = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .filter(|_| status == 201)
+            .and_then(|answer| answer["token"].as_str().filter(|minted| is_token(minted)).map(str::to_owned))
+            .ok_or_else(|| SendError::Failed(format!("no telemetry token: {}", said(status, &body))))?;
+        keep_token(&self.token_file, &minted);
+        *token = Some(minted.clone());
+        Ok(minted)
+    }
+}
+
+impl Transport for HttpTransport {
+    fn send(&self, batch: &[u8], batch_id: &str) -> Result<Ack, SendError> {
+        let token = self.token()?;
+        let response = self
+            .client
+            .post(format!("{}/v1/batches/{batch_id}", self.url))
+            .bearer_auth(token)
+            .header(reqwest::header::CONTENT_TYPE, "application/x-ndjson")
+            .body(batch.to_vec())
+            .send()
+            .map_err(|error| unsent(&error))?;
+        let status = response.status().as_u16();
+        let body = response.bytes().map_err(|error| unsent(&error))?;
+        answer(status, &body)
+    }
+}
+
+/// What the relay's answer to a batch means for it.
+fn answer(status: u16, body: &[u8]) -> Result<Ack, SendError> {
+    let json = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+    match status {
+        // Only the relay's own JSON says it kept the batch: a page that
+        // answers 200 in its place, such as a school Wi-Fi's sign-in,
+        // does not.
+        201 if json["stored"] == Value::Bool(true) => Ok(Ack::Stored),
+        200 if json["duplicate"] == Value::Bool(true) => Ok(Ack::Duplicate),
+        400 | 413 if json["error"] == "bad_batch" => {
+            Err(SendError::Refused(json["reason"].as_str().unwrap_or("bad_batch").to_owned()))
+        }
+        _ => Err(SendError::Failed(said(status, body))),
+    }
+}
+
+/// An answer in a few words: its status, and the relay's code when it gave one.
+fn said(status: u16, body: &[u8]) -> String {
+    let json = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+    match json["error"].as_str() {
+        Some(code) => format!("HTTP {status} {code}"),
+        None => format!("HTTP {status}"),
+    }
+}
+
+/// A request that got no answer: the relay out of reach, or the network gone
+/// partway. A redirect refused is an answer, from somewhere else.
+fn unsent(error: &reqwest::Error) -> SendError {
+    if error.is_redirect() {
+        SendError::Failed("a redirect".into())
+    } else {
+        SendError::Unreachable
     }
 }
 
@@ -671,12 +791,12 @@ impl Queue {
                 Ok(Sent::Stored)
             }
             Err(SendError::Refused(why)) => {
-                // Only a relay refuses (Phase 4); export never does, so this
-                // is a placeholder for it, to be settled with the relay. Sent
-                // again it would be refused again: put aside, and its number
-                // goes to the next batch, which carries its drops (they were
-                // never acknowledged). Its events are not counted as dropped
-                // here: the relay knows what it refused.
+                // The relay found the batch's own bytes wrong (`bad_batch`);
+                // export never refuses. Sent again it would be refused again:
+                // put aside, and its number goes to the next batch, which
+                // carries its drops (they were never acknowledged). Its
+                // events are not counted as dropped here: the relay counts
+                // what it refused.
                 eprintln!("[TELEMETRY] batch {batch_id} was refused ({why}); put aside");
                 self.put_aside(&path, &batch_id);
                 state.pending = None;
@@ -934,12 +1054,22 @@ pub fn nudge(why: Nudge) {
     }
 }
 
-pub fn enabled() -> bool {
-    std::env::var("ELLA_TELEMETRY_EXPORT").is_ok_and(|value| value == "1")
+fn switched_on(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| value == "1")
 }
 
-/// Starts the queue of the log in `telemetry_dir`, exporting to `export/`
-/// beside it, when `ELLA_TELEMETRY_EXPORT=1`.
+/// `ELLA_TELEMETRY_SEND=1`: batches go to the relay.
+fn sending() -> bool {
+    switched_on("ELLA_TELEMETRY_SEND")
+}
+
+pub fn enabled() -> bool {
+    sending() || switched_on("ELLA_TELEMETRY_EXPORT")
+}
+
+/// Starts the queue of the log in `telemetry_dir`: sending to the relay when
+/// `ELLA_TELEMETRY_SEND=1` (`ELLA_TELEMETRY_URL` names another), else
+/// exporting to `export/` beside it when `ELLA_TELEMETRY_EXPORT=1`.
 pub fn start(telemetry_dir: PathBuf) {
     if !enabled() {
         return;
@@ -948,12 +1078,27 @@ pub fn start(telemetry_dir: PathBuf) {
     if NUDGES.set(sender).is_err() {
         return;
     }
-    let transport = ExportTransport { dir: telemetry_dir.join("export") };
-    let queue = Queue::new(&telemetry_dir, Config::default(), Box::new(transport));
-    eprintln!("[TELEMETRY] exporting batches to {}", telemetry_dir.join("export").display());
-    let spawned = thread::Builder::new()
-        .name("telemetry-queue".into())
-        .spawn(move || work(&queue, &receiver));
+    let relay = std::env::var("ELLA_TELEMETRY_URL")
+        .ok()
+        .map(|url| url.trim().to_owned())
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| DEFAULT_RELAY.to_owned());
+    if sending() {
+        eprintln!("[TELEMETRY] sending batches to {relay}");
+    } else {
+        eprintln!("[TELEMETRY] exporting batches to {}", telemetry_dir.join("export").display());
+    }
+    let spawned = thread::Builder::new().name("telemetry-queue".into()).spawn(move || {
+        // Made on this thread: a blocking client may not be dropped where
+        // an async runtime runs.
+        let transport: Box<dyn Transport> = if sending() {
+            Box::new(HttpTransport::new(&relay, telemetry_dir.join("send-token")))
+        } else {
+            Box::new(ExportTransport { dir: telemetry_dir.join("export") })
+        };
+        let queue = Queue::new(&telemetry_dir, Config::default(), transport);
+        work(&queue, &receiver);
+    });
     if let Err(error) = spawned {
         eprintln!("[TELEMETRY] the upload queue could not start: {error}");
     }
@@ -1005,6 +1150,7 @@ fn still_busy(quiet: Duration, idle: Duration) -> Option<Duration> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -1706,6 +1852,342 @@ mod tests {
             ),
             Err(error) => eprintln!("python3 not found ({error}): the batches were not checked by the scripts"),
         }
+    }
+
+    // The relay, over HTTP.
+
+    const TOKEN_CD: &str = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+
+    #[derive(Debug, Clone)]
+    struct Request {
+        path: String,
+        authorization: String,
+        content_type: String,
+        body: Vec<u8>,
+    }
+
+    /// What the fake relay does with a batch.
+    #[derive(Debug, Clone)]
+    enum Reply {
+        Status(u16, &'static str),
+        /// Keeps it, and the connection breaks before the answer.
+        LostAnswer,
+        /// Says nothing for this long.
+        Silent(Duration),
+    }
+
+    /// The relay on this machine: mints `TOKEN_CD`, and answers each batch
+    /// as told, else 201 stored.
+    struct Relay {
+        url: String,
+        seen: Arc<Mutex<Vec<Request>>>,
+        replies: Arc<Mutex<Vec<Reply>>>,
+    }
+
+    impl Relay {
+        fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/ella-telemetry", listener.local_addr().unwrap());
+            let (seen, replies) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(Vec::new())));
+            let (kept, told) = (Arc::clone(&seen), Arc::clone(&replies));
+            thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let (kept, told) = (Arc::clone(&kept), Arc::clone(&told));
+                    thread::spawn(move || {
+                        let _ = serve(stream, &kept, &told);
+                    });
+                }
+            });
+            Self { url, seen, replies }
+        }
+
+        fn reply(&self, reply: Reply) {
+            self.replies.lock().unwrap().push(reply);
+        }
+
+        fn batches(&self) -> Vec<Request> {
+            self.seen.lock().unwrap().iter().filter(|request| request.path.contains("/v1/batches/")).cloned().collect()
+        }
+
+        fn installs(&self) -> usize {
+            self.seen.lock().unwrap().iter().filter(|request| request.path.ends_with("/v1/installs")).count()
+        }
+
+        fn transport(&self, laptop: &Laptop) -> HttpTransport {
+            HttpTransport::new(&self.url, laptop.dir.path().join("send-token"))
+        }
+    }
+
+    fn serve(mut stream: TcpStream, seen: &Mutex<Vec<Request>>, replies: &Mutex<Vec<Reply>>) -> io::Result<()> {
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let path = line.split_whitespace().nth(1).unwrap_or_default().to_owned();
+        let (mut length, mut authorization, mut content_type) = (0, String::new(), String::new());
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header)?;
+            let header = header.trim_end();
+            if header.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = header.split_once(':') {
+                match name.to_ascii_lowercase().as_str() {
+                    "content-length" => length = value.trim().parse().unwrap_or(0),
+                    "authorization" => authorization = value.trim().to_owned(),
+                    "content-type" => content_type = value.trim().to_owned(),
+                    _ => {}
+                }
+            }
+        }
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body)?;
+        seen.lock().unwrap().push(Request { path: path.clone(), authorization: authorization.clone(), content_type, body });
+        let reply = if path == "/ella-telemetry/v1/installs" {
+            Reply::Status(201, r#"{"token":"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"}"#)
+        } else if !path.starts_with("/ella-telemetry/v1/batches/") {
+            Reply::Status(404, r#"{"error":"not_found"}"#)
+        } else if authorization != format!("Bearer {TOKEN_CD}") {
+            Reply::Status(401, r#"{"error":"unauthorized"}"#)
+        } else {
+            let mut told = replies.lock().unwrap();
+            if told.is_empty() { Reply::Status(201, r#"{"stored":true}"#) } else { told.remove(0) }
+        };
+        match reply {
+            Reply::Status(status, body) => {
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nLocation: http://127.0.0.1:1/\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )?;
+                stream.flush()
+            }
+            Reply::LostAnswer => stream.shutdown(std::net::Shutdown::Both),
+            Reply::Silent(pause) => {
+                thread::sleep(pause);
+                Ok(())
+            }
+        }
+    }
+
+    impl Laptop {
+        fn queue_to(&self, transport: HttpTransport) -> Queue {
+            Queue::new(self.dir.path(), Config::default(), Box::new(transport))
+        }
+    }
+
+    /// An address nothing listens at.
+    fn nowhere() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://{}/ella-telemetry", listener.local_addr().unwrap())
+    }
+
+    #[test]
+    fn the_relays_answers_decide_what_becomes_of_a_batch() {
+        let failed = |status, body: &str| matches!(answer(status, body.as_bytes()), Err(SendError::Failed(_)));
+        assert_eq!(answer(201, br#"{"stored":true}"#), Ok(Ack::Stored));
+        assert_eq!(answer(200, br#"{"duplicate":true}"#), Ok(Ack::Duplicate));
+        assert_eq!(
+            answer(400, br#"{"error":"bad_batch","message":"the batch is not whole","reason":"hash_mismatch"}"#),
+            Err(SendError::Refused("hash_mismatch".into()))
+        );
+        assert_eq!(answer(413, br#"{"error":"bad_batch","reason":"too_large"}"#), Err(SendError::Refused("too_large".into())));
+        // Only the relay's own `bad_batch` puts a batch aside: anything else
+        // is kept, to try again.
+        assert!(failed(413, "<html>Request Entity Too Large</html>"), "a gateway's 413");
+        assert!(failed(400, "<html>Bad Request</html>"));
+        assert!(failed(400, r#"{"error":"bad_request"}"#));
+        for (status, code) in [
+            (401, "unauthorized"),
+            (404, "not_found"),
+            (409, "policy_not_accepted"),
+            (415, "unsupported_type"),
+            (429, "limit"),
+            (500, "internal"),
+            (503, "paused"),
+            (503, "storage"),
+            (503, "refusals_off"),
+        ] {
+            let body = format!(r#"{{"error":"{code}","message":"no"}}"#);
+            assert_eq!(answer(status, body.as_bytes()), Err(SendError::Failed(format!("HTTP {status} {code}"))));
+        }
+        // A page in the relay's place is not the relay keeping it.
+        assert!(failed(200, "<html>Sign in to the school Wi-Fi</html>"));
+        assert!(failed(201, "{}"));
+        assert!(failed(302, ""));
+        assert!(failed(502, "<html>bad gateway</html>"));
+    }
+
+    #[test]
+    fn a_batch_the_relay_keeps_is_acknowledged_and_the_queue_moves_on() {
+        let relay = Relay::start();
+        let laptop = Laptop::new().installed();
+        laptop.write(&three_talks(t0()));
+        let outcome = laptop.queue_to(relay.transport(&laptop)).run(t0() + TimeDelta::hours(1), 0).unwrap();
+        assert_eq!(outcome, Outcome { locked: false, sent: 1, retry_at: None, error: None });
+
+        let [sent] = relay.batches().try_into().unwrap();
+        let (body, id, _, lines) = policy::read_batch(&sent.body).unwrap();
+        assert_eq!(sent.path, format!("/ella-telemetry/v1/batches/{id}"));
+        assert_eq!(policy::batch_id_of(&body, lines), id);
+        assert_eq!(sent.authorization, format!("Bearer {TOKEN_CD}"));
+        assert_eq!(sent.content_type, "application/x-ndjson");
+        let (envelope, events) = parse(&sent.body);
+        assert_eq!((envelope["batch_seq"].as_u64(), events.len()), (Some(1), 9));
+
+        let state = laptop.state();
+        assert_eq!((state.batch_seq_acked, state.pending), (1, None));
+        assert_eq!(state.cursor.offset, fs::metadata(laptop.log()).unwrap().len());
+        assert!(laptop.outbox().is_empty());
+
+        // The token was asked for once and kept, for this launch and the next.
+        let token_file = laptop.dir.path().join("send-token");
+        assert_eq!(fs::read_to_string(&token_file).unwrap(), TOKEN_CD);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&token_file).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        laptop.write(&three_talks(t0() + TimeDelta::hours(2)));
+        assert_eq!(laptop.queue_to(relay.transport(&laptop)).run(t0() + TimeDelta::hours(3), 0).unwrap().sent, 1);
+        assert_eq!(relay.installs(), 1);
+        assert_eq!(laptop.state().batch_seq_acked, 2);
+    }
+
+    #[test]
+    fn a_batch_that_gets_no_answer_stays_queued() {
+        let relay = Relay::start();
+        for transport in [
+            HttpTransport::new(&nowhere(), PathBuf::from("/nonexistent/send-token")),
+            HttpTransport::with_limit(&relay.url, PathBuf::from("/nonexistent/send-token"), Duration::from_millis(300)),
+        ] {
+            relay.reply(Reply::Silent(Duration::from_secs(2)));
+            let laptop = Laptop::new().installed();
+            *transport.token.lock().unwrap() = Some(TOKEN_CD.into());
+            laptop.write(&three_talks(t0()));
+            let now = t0() + TimeDelta::hours(1);
+            let outcome = laptop.queue_to(transport).run(now, 0).unwrap();
+            assert_eq!(outcome.sent, 0);
+            assert!(outcome.retry_at.is_some_and(|at| at > now));
+            let state = laptop.state();
+            let pending = state.pending.unwrap();
+            assert_eq!((pending.attempts, state.batch_seq_acked, state.backoff_s), (1, 0, 60));
+            assert_eq!(laptop.outbox(), [format!("{}.jsonl", pending.batch_id)]);
+        }
+    }
+
+    #[test]
+    fn a_relay_failing_is_tried_again_later_with_the_same_batch() {
+        let relay = Relay::start();
+        let laptop = Laptop::new().installed();
+        laptop.write(&three_talks(t0()));
+        relay.reply(Reply::Status(503, r#"{"error":"storage","message":"try again later"}"#));
+        relay.reply(Reply::Status(500, r#"{"error":"internal"}"#));
+        let queue = laptop.queue_to(relay.transport(&laptop));
+        let first = queue.run(t0() + TimeDelta::hours(1), 0).unwrap();
+        assert_eq!((first.sent, laptop.state().backoff_s), (0, 60));
+        let second = queue.run(first.retry_at.unwrap(), 0).unwrap();
+        assert_eq!((second.sent, laptop.state().backoff_s), (0, 120), "the wait doubles");
+        assert_eq!(queue.run(second.retry_at.unwrap(), 0).unwrap().sent, 1);
+
+        let batches = relay.batches();
+        assert_eq!(batches.len(), 3);
+        assert!(batches.iter().all(|batch| batch.path == batches[0].path), "one batch, three tries");
+        assert_eq!(parse(&batches[2].body).0["attempts"], 3);
+        let state = laptop.state();
+        assert_eq!((state.batch_seq_acked, state.backoff_s, state.next_attempt_at), (1, 0, None));
+    }
+
+    #[test]
+    fn a_token_the_relay_refuses_keeps_the_batch_and_asks_for_no_other() {
+        let relay = Relay::start();
+        let laptop = Laptop::new().installed();
+        laptop.write(&three_talks(t0()));
+        relay.reply(Reply::Status(401, r#"{"error":"unauthorized","message":"a telemetry token from POST /v1/installs is required"}"#));
+        let queue = laptop.queue_to(relay.transport(&laptop));
+        let outcome = queue.run(t0() + TimeDelta::hours(1), 0).unwrap();
+        assert_eq!(outcome.sent, 0);
+        assert!(laptop.state().pending.is_some(), "kept, to send once the token is good");
+        assert_eq!(laptop.state().batch_seq_acked, 0);
+        assert!(laptop.dir.path().join("send-token").exists(), "a revoked token is not thrown away");
+        assert_eq!(queue.run(outcome.retry_at.unwrap(), 0).unwrap().sent, 1);
+        assert_eq!(relay.installs(), 1, "nor a new one asked for");
+    }
+
+    #[test]
+    fn only_the_relays_bad_batch_puts_a_batch_aside() {
+        let relay = Relay::start();
+        let laptop = Laptop::new().installed();
+        laptop.write(&three_talks(t0()));
+        relay.reply(Reply::Status(413, "<html>Request Entity Too Large</html>"));
+        relay.reply(Reply::Status(400, r#"{"error":"bad_batch","message":"the batch is not whole","reason":"hash_mismatch"}"#));
+        let queue = laptop.queue_to(relay.transport(&laptop));
+        let outcome = queue.run(t0() + TimeDelta::hours(1), 0).unwrap();
+        assert!(laptop.state().pending.is_some(), "a gateway's 413 is kept");
+        queue.run(outcome.retry_at.unwrap(), 0).unwrap();
+        let refused = &relay.batches()[1].path["/ella-telemetry/v1/batches/".len()..];
+        assert!(laptop.dir.path().join(format!("upload/refused/{refused}.jsonl")).exists());
+        let state = laptop.state();
+        assert_eq!((state.pending, state.batch_seq_acked), (None, 0));
+
+        laptop.write(&three_talks(t0() + TimeDelta::hours(2)));
+        assert_eq!(queue.run(t0() + TimeDelta::hours(3), 0).unwrap().sent, 1);
+        assert_eq!(parse(&relay.batches()[2].body).0["batch_seq"], 1, "its number goes to the next");
+    }
+
+    #[test]
+    fn an_empty_queue_asks_the_relay_nothing() {
+        let relay = Relay::start();
+        let laptop = Laptop::new().installed();
+        let queue = laptop.queue_to(relay.transport(&laptop));
+        assert_eq!(queue.run(t0() + TimeDelta::days(5), 0).unwrap().sent, 0);
+        laptop.write(&[turn("going", t0() + TimeDelta::days(5), false)]);
+        assert_eq!(queue.run(t0() + TimeDelta::days(5) + TimeDelta::hours(1), 0).unwrap().sent, 0);
+        assert!(relay.seen.lock().unwrap().is_empty(), "not even a token asked for");
+        assert!(!laptop.dir.path().join("send-token").exists());
+    }
+
+    #[test]
+    fn a_batch_made_offline_survives_a_restart_and_goes_once_online() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&three_talks(t0()));
+        let offline = HttpTransport::new(&nowhere(), laptop.dir.path().join("send-token"));
+        let now = t0() + TimeDelta::hours(1);
+        assert_eq!(laptop.queue_to(offline).run(now, 0).unwrap().sent, 0);
+        let waiting = laptop.state().pending.unwrap();
+
+        // The app quits, and starts again online.
+        let relay = Relay::start();
+        let outcome = laptop.queue_to(relay.transport(&laptop)).run(now + TimeDelta::minutes(5), 0).unwrap();
+        assert_eq!(outcome.sent, 1);
+        let [sent] = relay.batches().try_into().unwrap();
+        assert_eq!(sent.path, format!("/ella-telemetry/v1/batches/{}", waiting.batch_id));
+        let (envelope, _) = parse(&sent.body);
+        assert_eq!((envelope["batch_seq"].as_u64(), envelope["attempts"].as_u64()), (Some(1), Some(2)));
+        assert_eq!(laptop.state().batch_seq_acked, 1);
+    }
+
+    #[test]
+    fn a_batch_whose_answer_was_lost_is_sent_again_under_the_same_id_and_counted_once() {
+        let relay = Relay::start();
+        let laptop = Laptop::new().installed();
+        laptop.write(&three_talks(t0()));
+        relay.reply(Reply::LostAnswer);
+        relay.reply(Reply::Status(200, r#"{"duplicate":true}"#));
+        let queue = laptop.queue_to(relay.transport(&laptop));
+        let outcome = queue.run(t0() + TimeDelta::hours(1), 0).unwrap();
+        assert_eq!(outcome.sent, 0);
+        assert_eq!(queue.run(outcome.retry_at.unwrap(), 0).unwrap().sent, 1);
+
+        let [first, second] = relay.batches().try_into().unwrap();
+        assert_eq!(first.path, second.path, "the same batch_id");
+        assert_ne!(first.body, second.body, "its send fields differ...");
+        for sent in [&first, &second] {
+            let (body, id, _, lines) = policy::read_batch(&sent.body).unwrap();
+            assert_eq!(policy::batch_id_of(&body, lines), id, "...and are no part of its id");
+        }
+        let state = laptop.state();
+        assert_eq!((state.batch_seq_acked, state.pending), (1, None), "acknowledged once");
     }
 
     /// A real log, batched as the app would: `ELLA_SMOKE_LOG=<copy of a

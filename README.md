@@ -855,9 +855,8 @@ committed to `inbox/` stays in Git history after it leaves the tree. Its
 
 #### The telemetry relay
 
-The app does not send batches over the network yet: a tester exports them
-(`ELLA_TELEMETRY_EXPORT=1`) and hands them over for `inbox/`. Sending will
-go to the `ella-telemetry` Edge Function in the Supabase project *Ella
+A laptop set to `ELLA_TELEMETRY_SEND=1` sends its batches to the
+`ella-telemetry` Edge Function in the Supabase project *Ella
 Desktop* ([`supabase/functions/ella-telemetry`](supabase/functions/ella-telemetry)),
 apart from the chat proxy so neither can take the other down. It stores each
 batch once in the project's private Storage bucket `telemetry`, as
@@ -965,14 +964,25 @@ in and is tested against the vectors). The one difference: the app leaves
 out, and counts (`policy_excluded_count`), an event with no `launch_id` as
 text, from a build before 2026-10-07; `--batch-out` sends those by hand.
 
-#### The upload queue (export only, off by default)
+#### The upload queue (off by default)
 
-With `ELLA_TELEMETRY_EXPORT=1` set, the app batches its own log
-(`src-tauri/src/telemetry_queue.rs`) and writes each batch to
-`telemetry/export/<batch_id>.jsonl` beside it. A tester hands those files
-over, and they go in with `--validate --data`; delete them once they're
-handed over. Nothing is sent over a network, and without the variable
-nothing runs.
+The app batches its own log (`src-tauri/src/telemetry_queue.rs`) only when
+asked to, and each batch goes one of two ways:
+
+- **`ELLA_TELEMETRY_SEND=1`** sends it over HTTPS to the telemetry relay
+  ([The telemetry relay](#the-telemetry-relay)), from where `telemetry:repo
+  pull` takes it in. The laptop asks the relay for its own telemetry token
+  once and keeps it in `telemetry/send-token` (readable by the user only);
+  it is not the cloud's install token, and `ELLA_CLOUD` does not change it.
+  `ELLA_TELEMETRY_URL` names another relay, for a test.
+- **`ELLA_TELEMETRY_EXPORT=1`**, without `SEND`, writes it to
+  `telemetry/export/<batch_id>.jsonl` beside the log. A tester hands those
+  files over, and they go in with `--validate --data`; delete them once
+  they're handed over. Nothing is sent over a network.
+
+With neither, nothing runs. With both, `SEND` wins and nothing is exported.
+The queue runs on a thread of its own, never in a talk's way: a request to
+the relay waits at most 10 s to connect and 30 s in all.
 
 - **Where it starts.** A new install starts at the end of `latency.jsonl`:
   what was in the log before the queue first ran stays on the laptop.
@@ -994,9 +1004,15 @@ nothing runs.
 - **Thresholds** are fixed in the app (`Config::default()`); there is no
   setting or environment variable for them. Tests give the queue shorter
   ones directly.
-- **Retries.** A batch that couldn't be written waits 1 minute, doubling to
-  6 hours, a fifth either way. A wait longer than twice that means the
-  clock was put back since; the batch is tried at once.
+- **Retries.** A batch that couldn't be written or sent waits 1 minute,
+  doubling to 6 hours, a fifth either way. A wait longer than twice that
+  means the clock was put back since; the batch is tried at once. A batch
+  leaves the outbox only once the relay answers that it stored it (201
+  `stored`), or had already (200 `duplicate`, a try whose answer was lost).
+  No answer, a timeout, any 5xx, a limit, a `policy_version` not taken yet,
+  a page that is not the relay's (a school Wi-Fi's sign-in), or a redirect
+  keeps it, to send the same bytes again. So does a token the relay refuses
+  (401): no new one is asked for, so that a revoked token stays revoked.
 - **Drops.** Past 32 MB or 180 days of waiting, the oldest lines are dropped
   (`queue_full`). A line that isn't an event is `unreadable_line`. An event
   the log couldn't take is `write_failed` (and see below). A log found replaced or cut is read again from its start
@@ -1007,10 +1023,11 @@ nothing runs.
   from the same lines of the log, and nothing is counted lost. Only when
   those lines are gone too (the log replaced or cut, or the cap past them)
   are its events counted, as `write_failed`.
-- **A refused batch** is for a relay (Phase 4); export never refuses. As it
-  stands, a refused batch is put aside in `upload/refused/` (the newest 10
+- **A refused batch**, one the relay answers 400 or 413 `bad_batch` (its
+  own bytes are wrong), is put aside in `upload/refused/` (the newest 10
   kept), its number goes to the next batch, and its drops come with that
-  one; its events are not counted as dropped. To be settled with the relay.
+  one; its events are not counted as dropped, since the relay counts its
+  refusals. Export never refuses.
 - **Two copies of Ella** share the log; `upload/upload.lock` lets one queue
   work at a time.
 
@@ -1464,8 +1481,10 @@ answers for a recap. It goes over HTTPS to Ella Desktop's proxy on Supabase
 used, under an install token that names nobody; and from there to DeepSeek,
 whose privacy policy says it stores what it is sent in China and may use it to
 improve its models. Recordings never leave the laptop, nor do the database, the
-avatar, the progress and badges, or the telemetry. A laptop set to
-`ELLA_CLOUD=off` sends none of it.
+avatar, or the progress and badges. A laptop set to `ELLA_CLOUD=off` sends none
+of it. The timing telemetry leaves only from a laptop set to
+`ELLA_TELEMETRY_SEND=1`, as batches the telemetry policy allows, which name
+nobody ([The upload queue](#the-upload-queue-off-by-default)).
 
 `models/llm-slots/` beside it holds llama.cpp's saved slots: the evaluated
 instructions of the last six talks' topics, chores and placement chat, and of
