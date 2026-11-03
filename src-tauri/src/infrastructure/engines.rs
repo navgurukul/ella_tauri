@@ -2143,6 +2143,17 @@ fn content_words(sentence: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// Normalize equivalent question words for repeat comparison only.
+/// Learner-facing text is never rewritten.
+fn question_comparison_words(sentence: &str) -> BTreeSet<String> {
+    content_words(sentence)
+        .into_iter()
+        .map(|word| match word.as_str() {
+            "special" | "unique" | "distinctive" => "distinctive".to_owned(),
+            _ => word,
+        })
+        .collect()
+}
 /// The reply's sentences, each with the mark that ends it. A mark ends a
 /// sentence only where a space or the end of the reply follows it, so
 /// "Rs 2.5" and "Wait..." stay whole.
@@ -2189,13 +2200,13 @@ fn asked_questions(messages: &[Message]) -> Vec<String> {
 /// not strings, because the repeat comes back reworded — "How long will the
 /// trip take?" then "How long will the trip to the airport take?"
 fn asked_before<'a>(question: &str, earlier: &'a [String]) -> Option<&'a String> {
-    let asking = content_words(question);
+    let asking = question_comparison_words(question);
     // One content word is too little to call: "Really?" is not a repeat.
     if asking.len() < 2 {
         return None;
     }
     earlier.iter().find(|previous| {
-        let before = content_words(previous);
+        let before = question_comparison_words(previous);
         if before.len() < 2 {
             return false;
         }
@@ -7854,6 +7865,79 @@ mod ledger_tests {
         );
     }
 
+
+    #[test]
+    fn special_and_unique_are_treated_as_equivalent_question_wording() {
+        let asked_special = vec![
+            "What makes the academic year special there?".to_owned(),
+        ];
+        let asked_unique = vec![
+            "What makes the academic year unique there?".to_owned(),
+        ];
+
+        assert!(repeated_question(
+            "What makes the academic year unique there?",
+            &asked_special,
+        ).is_some());
+
+        assert!(repeated_question(
+            "What makes the academic year special there?",
+            &asked_unique,
+        ).is_some());
+    }
+
+    #[test]
+    fn an_answer_to_a_special_question_matches_its_unique_rewording() {
+        let messages = vec![
+            question_history_message(
+                Speaker::Ella,
+                "What makes the academic year special there?",
+                1,
+            ),
+            question_history_message(
+                Speaker::Learner,
+                "The teachers have extensive experience.",
+                2,
+            ),
+        ];
+
+        assert!(question_was_answered(
+            "What makes the academic year unique there?",
+            &messages,
+        ));
+    }
+
+    #[test]
+    fn synonym_normalization_does_not_match_different_academic_questions() {
+        let asked = vec![
+            "What makes the academic year special there?".to_owned(),
+        ];
+
+        assert!(repeated_question(
+            "What extracurricular activities are available?",
+            &asked,
+        ).is_none());
+
+        assert!(repeated_question(
+            "How do experienced teachers help students?",
+            &asked,
+        ).is_none());
+    }
+
+    #[test]
+    fn rewrite_cleanup_removes_a_synonym_reworded_repeat() {
+        let asked = vec![
+            "What makes the academic year special there?".to_owned(),
+        ];
+
+        assert_eq!(
+            without_repeated_questions(
+                "That sounds interesting. What makes the academic year unique there?",
+                &asked,
+            ),
+            Some("That sounds interesting.".to_owned()),
+        );
+    }
     #[test]
     fn a_reply_splits_into_sentences_only_where_a_space_follows_the_mark() {
         assert_eq!(
