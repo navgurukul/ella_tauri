@@ -681,11 +681,11 @@ fn usage_of(usage: &Value) -> Option<Usage> {
     (counted != Usage::default()).then_some(counted)
 }
 
-fn is_token(token: &str) -> bool {
+pub(crate) fn is_token(token: &str) -> bool {
     token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn read_token(file: &Path) -> Option<String> {
+pub(crate) fn read_token(file: &Path) -> Option<String> {
     let token = fs::read_to_string(file).ok()?;
     let token = token.trim();
     is_token(token).then(|| token.to_owned())
@@ -693,7 +693,7 @@ fn read_token(file: &Path) -> Option<String> {
 
 /// Keeps the token where the next launch finds it, written whole or not at
 /// all. Losing it costs nothing but a new one.
-fn keep_token(file: &Path, token: &str) {
+pub(crate) fn keep_token(file: &Path, token: &str) {
     let written = file
         .parent()
         .map_or(Ok(()), fs::create_dir_all)
