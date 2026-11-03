@@ -18,11 +18,18 @@
 //! `ELLA_TELEMETRY_EXPORT=1` writes each batch to `telemetry/export/`, for a
 //! tester to hand over, and nothing leaves over a network.
 //!
+//! Sending, only finished talks leave: the turns of a talk that has not
+//! ended are copied out of the log to `upload/held/<generation>.jsonl`, and
+//! go in the batch made once its end is written. Nothing ends a talk but its
+//! end; the queue's cap (`cap_bytes`, `cap_age`) holds for held turns too.
+//! Each generation is named by the state that keeps it, as a batch is, so a
+//! crash at any point holds the same turns again. Exporting holds nothing.
+//!
 //! A new install starts at the end of the log: what was there before the
 //! queue first ran stays on the laptop.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write as _},
     path::{Path, PathBuf},
@@ -47,8 +54,9 @@ use crate::{
 };
 
 /// When the queue looks at the log, and how much it sends at a time. The app
-/// uses `Config::default()`, fixed; tests make their own, shorter ones.
-/// There is no setting or environment variable for any of it.
+/// uses `Config::default()`, fixed, holding talks only when it sends; tests
+/// make their own, shorter ones. There is no setting or environment variable
+/// for any of it.
 ///
 /// Two clocks, kept apart: `idle` says when the queue may work at all (no
 /// turn for 2 minutes), and says nothing of talks; `talk_quiet` says when a
@@ -80,6 +88,8 @@ pub struct Config {
     pub backoff_max: Duration,
     /// The most batches one look sends.
     pub batches_per_run: usize,
+    /// Only finished talks leave: a talk's turns are held until its end.
+    pub finished_talks_only: bool,
 }
 
 impl Default for Config {
@@ -97,6 +107,7 @@ impl Default for Config {
             backoff_min: Duration::from_secs(60),
             backoff_max: Duration::from_secs(6 * 60 * 60),
             batches_per_run: 20,
+            finished_talks_only: false,
         }
     }
 }
@@ -279,6 +290,12 @@ pub struct State {
     pub health: Health,
     pub next_attempt_at: Option<DateTime<Utc>>,
     pub backoff_s: u64,
+    /// The turns held for talks not ended: `upload/held/<held>.jsonl`, 0
+    /// for none, and how many. A state from before talks were held has none.
+    #[serde(default)]
+    pub held: u64,
+    #[serde(default)]
+    pub held_events: u64,
 }
 
 /// How far into the log the queue has read: every line before `offset` is in
@@ -309,6 +326,10 @@ pub struct Pending {
     pub start: u64,
     pub end: u64,
     pub unreadable: u64,
+    /// The held turns before it was made, kept until it is acknowledged:
+    /// to make it again with the turns it took from them.
+    #[serde(default)]
+    pub held_from: u64,
 }
 
 /// What the queue lost, counted since the install began and never reset. A
@@ -379,6 +400,59 @@ impl Queue {
         self.outbox().join(format!("{batch_id}.jsonl"))
     }
 
+    fn held_dir(&self) -> PathBuf {
+        self.dir.join("held")
+    }
+
+    fn held_file(&self, generation: u64) -> PathBuf {
+        self.held_dir().join(format!("{generation}.jsonl"))
+    }
+
+    /// The lines of held generation `generation`, each ending "\n"; none
+    /// for 0.
+    fn read_held(&self, generation: u64) -> io::Result<Vec<Vec<u8>>> {
+        if generation == 0 {
+            return Ok(Vec::new());
+        }
+        let data = fs::read(self.held_file(generation))?;
+        Ok(data.split_inclusive(|byte| *byte == b'\n').map(<[u8]>::to_vec).collect())
+    }
+
+    /// The turns the state holds. Should their file be lost, they are, and
+    /// are counted as `write_failed`: events the app could not keep to send.
+    fn held_lines(&self, state: &mut State) -> io::Result<Vec<Vec<u8>>> {
+        match self.read_held(state.held) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                eprintln!("[TELEMETRY] the held turns were lost; {} events counted as dropped", state.held_events);
+                state.health.dropped_total.write_failed += state.held_events;
+                state.held = 0;
+                state.held_events = 0;
+                Ok(Vec::new())
+            }
+            read => read,
+        }
+    }
+
+    /// Writes `lines` as a new held generation, for the state to name once
+    /// it is saved: none (0) for no lines. Its number is new to every
+    /// generation the state names, the batch waiting's included.
+    fn write_held(&self, state: &State, lines: &[Vec<u8>]) -> io::Result<u64> {
+        if lines.is_empty() {
+            return Ok(0);
+        }
+        let generation = state.held.max(state.pending.as_ref().map_or(0, |pending| pending.held_from)) + 1;
+        fs::create_dir_all(self.held_dir())?;
+        write_atomically(&self.held_file(generation), &lines.concat())?;
+        Ok(generation)
+    }
+
+    /// Lets go of held generation `generation`, once no state names it.
+    fn drop_held(&self, generation: u64) {
+        if generation != 0 {
+            let _ = fs::remove_file(self.held_file(generation));
+        }
+    }
+
     /// One look at the log: send the batch waiting, or make and send new
     /// ones once they are due. `write_failures`, the events the log could
     /// not take since the last look, are counted when this returns `Ok`
@@ -396,8 +470,9 @@ impl Queue {
         state.health.dropped_total.write_failed += write_failures;
         self.check_log(&mut state)?;
         self.cap(&mut state, now)?;
-        self.clear_orphans(&state);
         self.save(&state)?;
+        // Only once the state names what it keeps.
+        self.clear_orphans(&state);
 
         let mut outcome = Outcome::default();
         if let Err(error) = self.send_due(&mut state, now, &mut outcome) {
@@ -476,6 +551,8 @@ impl Queue {
             health: Health::default(),
             next_attempt_at: None,
             backoff_s: 0,
+            held: 0,
+            held_events: 0,
         })
     }
 
@@ -532,6 +609,7 @@ impl Queue {
     /// Drops the oldest lines waiting while more than `cap_bytes` waits, or
     /// while they are older than `cap_age`, and counts them.
     fn cap(&self, state: &mut State, now: DateTime<Utc>) -> io::Result<()> {
+        self.cap_held(state, now)?;
         let Some(file) = self.open_log()? else { return Ok(()) };
         let len = file.metadata()?.len();
         if len.saturating_sub(state.cursor.offset) <= self.config.cap_bytes
@@ -558,6 +636,42 @@ impl Queue {
         Ok(())
     }
 
+    /// The cap holds for held turns too, which wait before the log does:
+    /// those older than `cap_age` are dropped, then the oldest until they
+    /// and the log after the cursor fit in `cap_bytes`; counted as
+    /// `queue_full`. Not while a batch waits that was made from them: it is
+    /// capped at the next look after.
+    fn cap_held(&self, state: &mut State, now: DateTime<Utc>) -> io::Result<()> {
+        if state.held == 0 || state.pending.is_some() {
+            return Ok(());
+        }
+        let held = self.held_lines(state)?;
+        let waiting = self.log_len()?.saturating_sub(state.cursor.offset);
+        let cutoff = micros(now - self.config.cap_age);
+        let mut kept: Vec<_> =
+            held.iter().filter(|line| !event_of(line).as_ref().and_then(time_of).is_some_and(|at| at < cutoff)).collect();
+        let mut bytes: u64 = kept.iter().map(|line| line.len() as u64).sum();
+        let mut first = 0;
+        while first < kept.len() && bytes + waiting > self.config.cap_bytes {
+            bytes -= kept[first].len() as u64;
+            first += 1;
+        }
+        kept.drain(..first);
+        let dropped = (held.len() - kept.len()) as u64;
+        if dropped == 0 {
+            return Ok(());
+        }
+        eprintln!("[TELEMETRY] the queue was full: {dropped} of its oldest held turns dropped");
+        let kept: Vec<_> = kept.into_iter().cloned().collect();
+        let old = state.held;
+        state.held = self.write_held(state, &kept)?;
+        state.held_events = kept.len() as u64;
+        state.health.dropped_total.queue_full += dropped;
+        self.save(state)?;
+        self.drop_held(old);
+        Ok(())
+    }
+
     fn oldest_waiting(&self, state: &State) -> io::Result<Option<i64>> {
         let Some(file) = self.open_log()? else { return Ok(None) };
         let mut lines = Lines::new(file, state.cursor.offset)?;
@@ -569,15 +683,20 @@ impl Queue {
         Ok(None)
     }
 
-    /// Outbox files that are no batch waiting: made by a look that stopped
-    /// before it kept its state, or sent and acknowledged already.
+    /// Outbox files that are no batch waiting, and held generations the
+    /// state does not name: made by a look that stopped before it kept its
+    /// state, or done with already.
     fn clear_orphans(&self, state: &State) {
         let waiting = state.pending.as_ref().map(|pending| format!("{}.jsonl", pending.batch_id));
-        let Ok(entries) = fs::read_dir(self.outbox()) else { return };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if entry.path().is_file() && waiting.as_deref() != name.to_str() {
-                let _ = fs::remove_file(entry.path());
+        let held = [Some(state.held), state.pending.as_ref().map(|pending| pending.held_from)]
+            .map(|generation| generation.map(|generation| format!("{generation}.jsonl")));
+        for (dir, kept) in [(self.outbox(), vec![waiting]), (self.held_dir(), held.to_vec())] {
+            let Ok(entries) = fs::read_dir(dir) else { continue };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if entry.path().is_file() && !kept.iter().flatten().any(|kept| Some(kept.as_str()) == name.to_str()) {
+                    let _ = fs::remove_file(entry.path());
+                }
             }
         }
     }
@@ -620,15 +739,62 @@ impl Queue {
         Ok(over >= self.config.due_talks)
     }
 
+    /// The talks whose end is written in the log after `offset`: a turn
+    /// saying so, or the talk's recap.
+    fn ended_talks(&self, offset: u64) -> io::Result<HashSet<String>> {
+        let mut ended = HashSet::new();
+        let Some(file) = self.open_log()? else { return Ok(ended) };
+        let mut lines = Lines::new(file, offset)?;
+        while let Some(line) = lines.next_line()? {
+            let Some(event) = line.event() else { continue };
+            let over = match event.get("event").and_then(Value::as_str) {
+                Some("ella_turn_latency") => event.get("talk_over") == Some(&Value::Bool(true)),
+                Some("ella_assessment") => true,
+                _ => false,
+            };
+            if let (true, Some(talk)) = (over, talk_of(&event)) {
+                ended.insert(talk.to_owned());
+            }
+        }
+        Ok(ended)
+    }
+
     /// Makes a batch of the lines after the cursor, freezes it in the outbox,
     /// and keeps it as the batch waiting, the cursor after its lines. False
     /// when no whole line waits.
+    ///
+    /// With `finished_talks_only`, a turn of a talk whose end is not written
+    /// is held instead: copied to a new held generation, out of the batch,
+    /// and the cursor goes past it, so the talks after it are not held up.
+    /// The held turns of a talk whose end is now written go with the batch.
+    /// Without, the held turns, if any, all go, and none are held.
     fn prepare(&self, state: &mut State, now: DateTime<Utc>) -> io::Result<bool> {
         let Some(file) = self.open_log()? else { return Ok(false) };
-        let mut lines = Lines::new(file, state.cursor.offset)?;
+        let held = self.held_lines(state)?;
+        let holding = self.config.finished_talks_only;
+        let ended = if holding { self.ended_talks(state.cursor.offset)? } else { HashSet::new() };
+        let waits = |raw: &Map<String, Value>| holding && talk_of(raw).is_some_and(|talk| !ended.contains(talk));
         let mut sanitizer = Sanitizer::default();
         let mut events = Vec::new();
-        let mut ids = std::collections::HashSet::new();
+        let mut ids = HashSet::new();
+        let mut keep = |raw: &Map<String, Value>| {
+            if let Some(event) = sanitizer.event(raw) {
+                // One event twice in a log is sent once.
+                if ids.insert(event["event_id"].as_str().unwrap_or_default().to_owned()) {
+                    events.push(event);
+                }
+            }
+        };
+        let mut still_held = Vec::new();
+        for line in &held {
+            match event_of(line) {
+                Some(raw) if waits(&raw) => still_held.push(line.clone()),
+                Some(raw) => keep(&raw),
+                None => {}
+            }
+        }
+        let released = held.len() - still_held.len();
+        let mut lines = Lines::new(file, state.cursor.offset)?;
         let (start, mut end, mut read, mut unreadable) = (state.cursor.offset, state.cursor.offset, 0, 0);
         while read < self.config.batch_bytes {
             let Some(line) = lines.next_line()? else { break };
@@ -638,19 +804,21 @@ impl Queue {
                 continue;
             }
             match line.event() {
-                Some(raw) => {
-                    if let Some(event) = sanitizer.event(&raw) {
-                        // One event twice in a log is sent once.
-                        if ids.insert(event["event_id"].as_str().unwrap_or_default().to_owned()) {
-                            events.push(event);
-                        }
-                    }
-                }
+                Some(raw) if waits(&raw) => still_held.push(line.bytes.clone().unwrap_or_default()),
+                Some(raw) => keep(&raw),
                 None => unreadable += 1,
             }
         }
-        if end == start {
+        if end == start && released == 0 {
             return Ok(false);
+        }
+        // The held turns first, then the state that names them, as for the
+        // batch: a look that stops between leaves a generation no state
+        // names, cleared at the next look, and the same turns to hold again.
+        let held_from = state.held;
+        if released > 0 || still_held.len() + released > held.len() {
+            state.held = self.write_held(state, &still_held)?;
+            state.held_events = still_held.len() as u64;
         }
         state.health.dropped_total.unreadable_line += unreadable;
         policy::oldest_first(&mut events);
@@ -662,6 +830,9 @@ impl Queue {
             // Nothing to say: the cursor moves on, and no batch is made.
             state.cursor.offset = end;
             self.save(state)?;
+            if state.held != held_from {
+                self.drop_held(held_from);
+            }
             return Ok(true);
         }
         let (first_event_at, last_event_at) = policy::span_of(&events);
@@ -705,6 +876,7 @@ impl Queue {
             start,
             end,
             unreadable,
+            held_from,
         });
         state.cursor.offset = end;
         self.save(state)?;
@@ -737,21 +909,33 @@ impl Queue {
             // `write_failed`: events the app could not keep to send.
             let lines_kept = state.cursor.offset == pending.end
                 && state.health.log_resets_total == pending.log_resets_total;
+            // The held generation no state will name once this one is kept.
+            let mut done_with = 0;
             if lines_kept {
                 eprintln!("[TELEMETRY] the batch waiting was lost; making it again from the log");
                 state.cursor.offset = pending.start;
+                // And from the turns held before it, which it took some of.
+                if state.held != pending.held_from {
+                    done_with = state.held;
+                    state.held = pending.held_from;
+                    state.held_events = self.read_held(pending.held_from).map_or(0, |lines| lines.len() as u64);
+                }
                 // Counted again when its lines are read again.
                 let unreadable = &mut state.health.dropped_total.unreadable_line;
                 *unreadable = unreadable.saturating_sub(pending.unreadable);
             } else {
                 eprintln!("[TELEMETRY] the batch waiting was lost with its lines; {} events counted as dropped", pending.events);
                 state.health.dropped_total.write_failed += pending.events;
+                if state.held != pending.held_from {
+                    done_with = pending.held_from;
+                }
             }
             state.pending = None;
             state.backoff_s = 0;
             state.next_attempt_at = None;
             let _ = fs::remove_file(&path);
             self.save(state)?;
+            self.drop_held(done_with);
             return Ok(Sent::Lost);
         };
 
@@ -788,6 +972,9 @@ impl Queue {
                 state.next_attempt_at = None;
                 self.save(state)?;
                 let _ = fs::remove_file(&path);
+                if state.held != pending.held_from {
+                    self.drop_held(pending.held_from);
+                }
                 Ok(Sent::Stored)
             }
             Err(SendError::Refused(why)) => {
@@ -799,10 +986,13 @@ impl Queue {
                 // what it refused.
                 eprintln!("[TELEMETRY] batch {batch_id} was refused ({why}); put aside");
                 self.put_aside(&path, &batch_id);
-                state.pending = None;
+                let pending = state.pending.take().expect("a batch is waiting");
                 state.backoff_s = 0;
                 state.next_attempt_at = None;
                 self.save(state)?;
+                if state.held != pending.held_from {
+                    self.drop_held(pending.held_from);
+                }
                 Ok(Sent::Refused)
             }
             Err(error) => {
@@ -903,11 +1093,20 @@ impl Line {
 
     /// The event the line holds, or None for one that is no JSON object.
     fn event(&self) -> Option<Map<String, Value>> {
-        let bytes = self.bytes.as_deref()?;
-        // The log's first line may start with a byte-order mark.
-        let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
-        serde_json::from_slice::<Map<String, Value>>(bytes.trim_ascii()).ok()
+        event_of(self.bytes.as_deref()?)
     }
+}
+
+/// The event a line of the log holds, or None for one that is no JSON object.
+fn event_of(bytes: &[u8]) -> Option<Map<String, Value>> {
+    // The log's first line may start with a byte-order mark.
+    let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+    serde_json::from_slice::<Map<String, Value>>(bytes.trim_ascii()).ok()
+}
+
+/// The talk `event` is part of.
+fn talk_of(event: &Map<String, Value>) -> Option<&str> {
+    event.get("session_id").and_then(Value::as_str)
 }
 
 /// The log's whole lines from an offset; a last line still being written
@@ -1096,7 +1295,9 @@ pub fn start(telemetry_dir: PathBuf) {
         } else {
             Box::new(ExportTransport { dir: telemetry_dir.join("export") })
         };
-        let queue = Queue::new(&telemetry_dir, Config::default(), transport);
+        // Only finished talks are sent; an export is as it always was.
+        let config = Config { finished_talks_only: sending(), ..Config::default() };
+        let queue = Queue::new(&telemetry_dir, config, transport);
         work(&queue, &receiver);
     });
     if let Err(error) = spawned {
@@ -2188,6 +2389,299 @@ mod tests {
         }
         let state = laptop.state();
         assert_eq!((state.batch_seq_acked, state.pending), (1, None), "acknowledged once");
+    }
+
+    // Only finished talks, when sending.
+
+    /// A talk of two turns and its recap, from `when`.
+    fn finished_talk(talk: &str, when: DateTime<Utc>) -> Vec<String> {
+        vec![turn(talk, when, false), turn(talk, when + TimeDelta::seconds(20), true), recap(talk, when + TimeDelta::seconds(30))]
+    }
+
+    /// A config that holds talks, as sending does, with a batch due at each
+    /// talk over.
+    fn holding() -> Config {
+        Config { finished_talks_only: true, due_talks: 1, ..Config::default() }
+    }
+
+    impl Laptop {
+        fn send(&self, now: DateTime<Utc>) -> Outcome {
+            self.queue(holding()).run(now, 0).unwrap()
+        }
+
+        /// The held turns' talks (`session_id`), as the state names them.
+        fn held(&self) -> Vec<String> {
+            let state = self.state();
+            if state.held == 0 {
+                return Vec::new();
+            }
+            let data = fs::read(self.dir.path().join(format!("upload/held/{}.jsonl", state.held))).unwrap();
+            let talks: Vec<String> = data
+                .split_inclusive(|byte| *byte == b'\n')
+                .map(|line| event_of(line).unwrap()["session_id"].as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(state.held_events, talks.len() as u64);
+            talks
+        }
+
+        fn held_files(&self) -> Vec<String> {
+            let mut names: Vec<_> = fs::read_dir(self.dir.path().join("upload/held"))
+                .map(|entries| entries.flatten().map(|entry| entry.file_name().into_string().unwrap()).collect())
+                .unwrap_or_default();
+            names.sort();
+            names
+        }
+    }
+
+    /// Each batch's talks, by their hashed `talk_id`, and its events.
+    fn talks_and_events(batches: &[(Value, Vec<Value>)]) -> Vec<(usize, usize)> {
+        batches
+            .iter()
+            .map(|(_, events)| {
+                let talks: std::collections::BTreeSet<_> = events.iter().filter_map(|event| event["talk_id"].as_str()).collect();
+                (talks.len(), events.len())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_talk_still_going_is_held_and_the_talks_after_it_are_not() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&finished_talk("before", t0()));
+        laptop.write(&[turn("going", t0() + TimeDelta::minutes(5), false)]);
+        laptop.write(&[launch(t0() + TimeDelta::minutes(6))]);
+        laptop.write(&finished_talk("after", t0() + TimeDelta::minutes(7)));
+        assert_eq!(laptop.send(t0() + TimeDelta::minutes(10)).sent, 1);
+        let batches = laptop.fake.batches();
+        assert_eq!(talks_and_events(&batches), [(2, 7)], "both finished talks and the launch, not the turn going");
+        assert_eq!(batches[0].0["talks"], 2);
+        assert_eq!(batches[0].0["policy_excluded_count"], 0, "held, not left out");
+        assert_eq!(laptop.held(), ["going"]);
+        assert_eq!(laptop.state().cursor.offset, fs::metadata(laptop.log()).unwrap().len(), "the cursor is past it");
+    }
+
+    #[test]
+    fn a_held_talk_goes_whole_once_it_ends_after_a_restart() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&[turn("going", t0(), false), turn("going", t0() + TimeDelta::minutes(1), false)]);
+        laptop.write(&finished_talk("other", t0() + TimeDelta::minutes(2)));
+        laptop.send(t0() + TimeDelta::minutes(5));
+        assert_eq!(laptop.held(), ["going", "going"]);
+        // Days later, after other batches, and another launch of the app:
+        // each `send` is a new queue, from what is on the disk.
+        laptop.write(&finished_talk("another", t0() + TimeDelta::days(1)));
+        laptop.send(t0() + TimeDelta::days(1) + TimeDelta::minutes(5));
+        assert_eq!(laptop.held(), ["going", "going"]);
+        laptop.write(&[turn("going", t0() + TimeDelta::days(2), true), recap("going", t0() + TimeDelta::days(2) + TimeDelta::seconds(10))]);
+        assert_eq!(laptop.send(t0() + TimeDelta::days(2) + TimeDelta::minutes(5)).sent, 1);
+
+        let batches = laptop.fake.batches();
+        let (envelope, events) = batches.last().unwrap();
+        assert_eq!(events.len(), 4, "its two held turns, its last and its recap");
+        assert_eq!(envelope["talks"], 1);
+        assert_eq!(envelope["first_event_at"], events[0]["timestamp"], "oldest first");
+        assert_eq!(envelope["first_event_at"].as_str().unwrap()[..16], t0().to_rfc3339()[..16]);
+        assert!(laptop.held().is_empty());
+        assert!(laptop.held_files().is_empty(), "nothing left behind");
+        assert_eq!(laptop.state().health.dropped_total.sum(), 0);
+    }
+
+    #[test]
+    fn a_talk_never_ended_is_held_and_never_sent_nor_dropped() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&[turn("crashed", t0(), false)]);
+        for day in [0, 10, 30, 90] {
+            let when = t0() + TimeDelta::days(day) + TimeDelta::minutes(1);
+            laptop.write(&finished_talk(&format!("day-{day}"), when));
+            assert_eq!(laptop.send(when + TimeDelta::minutes(5)).sent, 1, "day {day}: the others are not held up");
+        }
+        assert_eq!(laptop.held(), ["crashed"]);
+        assert_eq!(laptop.state().health.dropped_total.sum(), 0);
+        let batches = laptop.fake.batches();
+        assert!(batches.iter().all(|(envelope, events)| events.len() == 3 && envelope["dropped_event_count"] == 0));
+    }
+
+    #[test]
+    fn held_turns_past_the_cap_are_dropped_and_counted() {
+        // By age: past 180 days.
+        let laptop = Laptop::new().installed();
+        laptop.write(&[turn("crashed", t0(), false), turn("crashed", t0() + TimeDelta::minutes(1), false)]);
+        // Quiet half an hour, a batch is due, and they are held.
+        laptop.send(t0() + TimeDelta::minutes(40));
+        assert_eq!(laptop.held().len(), 2);
+        let later = t0() + TimeDelta::days(181);
+        laptop.write(&finished_talk("later", later));
+        assert_eq!(laptop.send(later + TimeDelta::minutes(5)).sent, 1);
+        assert!(laptop.held().is_empty());
+        assert!(laptop.held_files().is_empty());
+        let (envelope, events) = laptop.fake.batches().pop().unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(envelope["dropped_by_reason"]["queue_full"], 2);
+
+        // By size: the held turns and the log after the cursor past `cap_bytes`.
+        let laptop = Laptop::new().installed();
+        laptop.write(&[turn("a", t0(), false), turn("b", t0() + TimeDelta::minutes(1), false)]);
+        laptop.send(t0() + TimeDelta::minutes(40));
+        assert_eq!(laptop.held(), ["a", "b"]);
+        let one_turn = turn("a", t0(), false).len() as u64 + 1;
+        let config = Config { cap_bytes: one_turn + 10, ..holding() };
+        laptop.queue(config).run(t0() + TimeDelta::minutes(45), 0).unwrap();
+        assert_eq!(laptop.held(), ["b"], "the oldest went");
+        assert_eq!(laptop.state().health.dropped_total.queue_full, 1);
+    }
+
+    #[test]
+    fn a_look_stopped_before_its_state_was_kept_holds_the_same_turns_and_makes_the_same_batch() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&[turn("going", t0(), false)]);
+        laptop.write(&finished_talk("other", t0() + TimeDelta::minutes(1)));
+        laptop.send(t0() + TimeDelta::minutes(5));
+        let before = laptop.state();
+        laptop.write(&[turn("going", t0() + TimeDelta::minutes(20), true)]);
+        laptop.write(&[turn("new", t0() + TimeDelta::minutes(21), false)]);
+        let now = t0() + TimeDelta::minutes(25);
+        let queue = laptop.queue(holding());
+        let mut state = queue.load(now).unwrap();
+        assert!(queue.prepare(&mut state, now).unwrap());
+        let made = state.pending.unwrap().batch_id;
+        // As if the look had stopped before it kept its state: a batch and a
+        // held generation no state names.
+        queue.save(&before).unwrap();
+        assert_eq!(laptop.held_files().len(), 2);
+
+        assert_eq!(laptop.send(now + TimeDelta::minutes(1)).sent, 1);
+        assert_eq!(laptop.fake.ids().last().unwrap(), &made, "the same turns, the same batch");
+        assert_eq!(laptop.fake.batches().last().unwrap().1.len(), 2);
+        assert_eq!(laptop.held(), ["new"]);
+        assert_eq!(laptop.held_files(), [format!("{}.jsonl", laptop.state().held)]);
+        assert_eq!(laptop.state().health.dropped_total.sum(), 0);
+    }
+
+    #[test]
+    fn a_lost_outbox_file_is_made_again_with_the_held_turns_it_took() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&[turn("going", t0(), false)]);
+        laptop.send(t0() + TimeDelta::minutes(40));
+        assert_eq!(laptop.held(), ["going"]);
+        laptop.write(&[turn("going", t0() + TimeDelta::minutes(50), true)]);
+        laptop.fake.answer(Err(SendError::Unreachable));
+        laptop.send(t0() + TimeDelta::minutes(55));
+        let lost = laptop.state().pending.unwrap();
+        assert!(laptop.held().is_empty(), "taken by the batch waiting");
+        fs::remove_file(laptop.dir.path().join(format!("upload/outbox/{}.jsonl", lost.batch_id))).unwrap();
+
+        assert_eq!(laptop.send(t0() + TimeDelta::hours(1)).sent, 1);
+        let (envelope, events) = laptop.fake.batches().pop().unwrap();
+        assert_eq!(events.len(), 2, "the held turn and the last");
+        assert_eq!(envelope["dropped_event_count"], 0, "nothing counted lost");
+        assert!(laptop.held_files().is_empty());
+    }
+
+    #[test]
+    fn a_lost_held_file_counts_its_turns_as_dropped() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&[turn("going", t0(), false), turn("going", t0() + TimeDelta::minutes(1), false)]);
+        laptop.send(t0() + TimeDelta::minutes(40));
+        assert_eq!(laptop.held().len(), 2);
+        fs::remove_dir_all(laptop.dir.path().join("upload/held")).unwrap();
+        laptop.write(&finished_talk("other", t0() + TimeDelta::minutes(50)));
+        laptop.send(t0() + TimeDelta::minutes(55));
+        let (envelope, _) = laptop.fake.batches().pop().unwrap();
+        assert_eq!(envelope["dropped_by_reason"]["write_failed"], 2);
+        assert_eq!(laptop.state().held, 0);
+    }
+
+    #[test]
+    fn a_refused_batch_takes_its_held_turns_aside_and_the_next_has_its_number() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&[turn("going", t0(), false)]);
+        laptop.send(t0() + TimeDelta::minutes(40));
+        assert_eq!(laptop.held(), ["going"]);
+        laptop.write(&[turn("going", t0() + TimeDelta::minutes(50), true)]);
+        laptop.fake.answer(Err(SendError::Refused("hash_mismatch".into())));
+        laptop.send(t0() + TimeDelta::minutes(55));
+        let refused = laptop.fake.ids()[0].clone();
+        let aside = fs::read(laptop.dir.path().join(format!("upload/refused/{refused}.jsonl"))).unwrap();
+        assert_eq!(parse(&aside).1.len(), 2, "with the held turn");
+        assert!(laptop.held_files().is_empty());
+        let state = laptop.state();
+        assert_eq!((state.pending, state.batch_seq_acked, state.held), (None, 0, 0));
+
+        laptop.write(&finished_talk("next", t0() + TimeDelta::hours(1)));
+        laptop.send(t0() + TimeDelta::hours(2));
+        assert_eq!(laptop.fake.batches().pop().unwrap().0["batch_seq"], 1);
+    }
+
+    #[test]
+    fn a_state_from_before_talks_were_held_loads_with_its_batch_and_nothing_held() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&three_talks(t0()));
+        laptop.fake.answer(Err(SendError::Unreachable));
+        laptop.run(t0() + TimeDelta::hours(1));
+        let state = laptop.state();
+        let waiting = state.pending.clone().unwrap();
+        // The state file as a build before this one wrote it: no `held`,
+        // `held_events` or `held_from`.
+        let mut old = serde_json::to_value(&state).unwrap();
+        for field in ["held", "held_events"] {
+            old.as_object_mut().unwrap().remove(field).unwrap();
+        }
+        old["pending"].as_object_mut().unwrap().remove("held_from").unwrap();
+        let keys: Vec<_> = old.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(
+            keys,
+            ["backoff_s", "batch_seq_acked", "cursor", "health", "install_id", "next_attempt_at", "pending", "state_version"]
+        );
+        fs::write(laptop.dir.path().join("upload/state.json"), serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+
+        assert_eq!(laptop.send(t0() + TimeDelta::hours(2)).sent, 1);
+        assert_eq!(laptop.fake.ids(), [waiting.batch_id.clone(), waiting.batch_id]);
+        let after = laptop.state();
+        assert_eq!((after.install_id, after.batch_seq_acked, after.held), (state.install_id, 1, 0));
+    }
+
+    #[test]
+    fn an_export_holds_nothing() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&[turn("going", t0(), false)]);
+        laptop.write(&finished_talk("done", t0() + TimeDelta::minutes(1)));
+        let config = Config { due_talks: 1, ..Config::default() };
+        assert!(!config.finished_talks_only, "the default is the export's");
+        assert_eq!(laptop.queue(config).run(t0() + TimeDelta::minutes(5), 0).unwrap().sent, 1);
+        assert_eq!(laptop.fake.batches()[0].1.len(), 4, "the turn going goes too, as it always has");
+        assert!(laptop.held().is_empty());
+        assert!(!laptop.dir.path().join("upload/held").exists());
+    }
+
+    #[test]
+    fn turns_held_while_sending_go_with_the_first_export_after() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&[turn("going", t0(), false)]);
+        laptop.send(t0() + TimeDelta::minutes(40));
+        assert_eq!(laptop.held(), ["going"]);
+        laptop.write(&[launch(t0() + TimeDelta::minutes(50))]);
+        let export = Config { due_talks: 1, due_bytes: 1, ..Config::default() };
+        assert_eq!(laptop.queue(export).run(t0() + TimeDelta::minutes(55), 0).unwrap().sent, 1);
+        assert_eq!(laptop.fake.batches().pop().unwrap().1.len(), 2, "the held turn and the launch");
+        assert!(laptop.held().is_empty());
+        assert!(laptop.held_files().is_empty());
+    }
+
+    #[test]
+    fn a_finished_talk_reaches_the_relay_and_one_still_going_waits_for_its_end() {
+        let relay = Relay::start();
+        let laptop = Laptop::new().installed();
+        laptop.write(&finished_talk("finished", t0()));
+        laptop.write(&[turn("going", t0() + TimeDelta::minutes(2), false)]);
+        let queue = Queue::new(laptop.dir.path(), holding(), Box::new(relay.transport(&laptop)));
+        assert_eq!(queue.run(t0() + TimeDelta::minutes(5), 0).unwrap().sent, 1);
+        let (envelope, events) = parse(&relay.batches()[0].body);
+        assert_eq!((envelope["talks"].as_u64(), events.len()), (Some(1), 3));
+
+        laptop.write(&[turn("going", t0() + TimeDelta::minutes(30), true)]);
+        assert_eq!(queue.run(t0() + TimeDelta::minutes(35), 0).unwrap().sent, 1);
+        let (envelope, events) = parse(&relay.batches()[1].body);
+        assert_eq!((envelope["talks"].as_u64(), envelope["batch_seq"].as_u64(), events.len()), (Some(1), Some(2), 2));
     }
 
     /// A real log, batched as the app would: `ELLA_SMOKE_LOG=<copy of a
