@@ -23,7 +23,7 @@ use crate::{
         audio::{pause_cut_index, quietest_cut_index, trim_to_speech, VadOutput},
         database::{AssessmentWrite, CurriculumReader, Database, LessonMark},
         engines::{
-            question_was_answered_with_response, trailing_question, GeneratedReply, NextRecap, NextTalk, SpeechSegment, SpeechSink, TutorEngine,
+            question_was_answered, trailing_question, GeneratedReply, NextRecap, NextTalk, SpeechSegment, SpeechSink, TutorEngine,
             FREE_TOPIC_TURNS,
         },
         lesson_prompt::{self, LessonAsk},
@@ -1463,14 +1463,7 @@ impl AppService {
                 .rev()
                 .find(|message| message.speaker == Speaker::Ella)
                 .and_then(|message| trailing_question(&message.content))
-                .filter(|question| {
-                    let censored_response = safety::censor(clean);
-                    !question_was_answered_with_response(
-                        question,
-                        &request.messages,
-                        &censored_response,
-                    )
-                });
+                .filter(|question| !question_was_answered(question, &request.messages));
             trace.stage("llm:skipped", "learner turn flagged by the content filter");
             trace.note("flagged");
             GeneratedReply::plain(safety::redirect_reply(question), 0.0, 0.0)
@@ -3940,7 +3933,7 @@ mod curriculum_flow_tests {
     }
 
     #[test]
-    fn safety_redirect_does_not_repeat_a_question_answered_by_the_flagged_response() {
+    fn safety_redirect_repeats_the_question_after_flagged_responses() {
         const QUESTION: &str = "What makes Goa especially special for you?";
 
         let reply_calls = Arc::new(Mutex::new(0));
@@ -3968,19 +3961,18 @@ mod curriculum_flow_tests {
             "ELLA should ask the scripted question"
         );
 
-        // The flagged response contains a substantive answer to that question.
-        let flagged = service
-            .send_text_turn(
-                &session.id,
-                "Goa is special because of its calm beaches, peaceful atmosphere and delicious food. sh1t",
-            )
-            .unwrap();
-
-        assert_eq!(
-            flagged.ella_message.content,
-            "That's not something I talk about. Let's carry on.",
-            "the safety redirect should not repeat a question the learner has answered"
-        );
+        for response in [
+            "Goa is special because of its calm beaches, peaceful atmosphere and delicious food. sh1t",
+            "fuck off",
+            "I don't want to answer this shit",
+        ] {
+            let flagged = service.send_text_turn(&session.id, response).unwrap();
+            assert_eq!(
+                flagged.ella_message.content,
+                format!("That's not something I talk about. {QUESTION}"),
+                "a flagged response must not be treated as an answer: {response:?}"
+            );
+        }
 
         assert_eq!(
             *reply_calls.lock().unwrap(),

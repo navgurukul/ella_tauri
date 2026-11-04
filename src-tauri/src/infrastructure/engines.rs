@@ -2210,6 +2210,12 @@ fn asked_before<'a>(question: &str, earlier: &'a [String]) -> Option<&'a String>
         if before.len() < 2 {
             return false;
         }
+        // A shorter question may be the missing half of a compound question
+        // rather than a repeat (for example, "where did you buy it?" after
+        // "what did you eat, and where did you buy it?").
+        if asking.len() < before.len() && has_multiple_question_clauses(previous) {
+            return false;
+        }
         let shared = asking.intersection(&before).count();
         // One question's words wholly inside the other's. This is the shape the
         // repeat actually takes: the street-food run asked "What did you think
@@ -2223,6 +2229,21 @@ fn asked_before<'a>(question: &str, earlier: &'a [String]) -> Option<&'a String>
         // Or three quarters in common, for a repeat that swaps a word rather
         // than adding one.
         union > 0 && shared * 4 >= union * 3
+    })
+}
+
+fn has_multiple_question_clauses(question: &str) -> bool {
+    let lower = question.to_lowercase();
+    lower.split_once(',').is_some_and(|(_, rest)| {
+        let clause = rest.trim_start();
+        let clause = clause
+            .strip_prefix("and ")
+            .or_else(|| clause.strip_prefix("or "));
+        clause.is_some_and(|clause| {
+            ["what ", "where ", "when ", "who ", "why ", "how ", "which "]
+                .iter()
+                .any(|word| clause.starts_with(word))
+        })
     })
 }
 
@@ -2258,28 +2279,6 @@ pub(crate) fn question_was_answered(question: &str, messages: &[Message]) -> boo
         .enumerate()
         .any(|(index, message)| {
             index > question_index && message.speaker == Speaker::Learner
-        })
-}
-
-/// Whether the latest matching question was answered in history or by the
-/// current learner response. The current response is considered only when
-/// it retains at least two content words after safety censorship.
-pub(crate) fn question_was_answered_with_response(
-    question: &str,
-    messages: &[Message],
-    current_response: &str,
-) -> bool {
-    if question_was_answered(question, messages) {
-        return true;
-    }
-
-    content_words(current_response).len() >= 2
-        && messages.iter().any(|message| {
-            message.speaker == Speaker::Ella
-                && sentences(&message.content)
-                    .into_iter()
-                    .filter(|sentence| sentence.ends_with('?'))
-                    .any(|earlier| asked_before(question, &[earlier.to_owned()]).is_some())
         })
 }
 
@@ -4187,7 +4186,7 @@ const TALK_BUDGET: Budget = Budget {
 
 /// A repeated-question correction should be briefer than a normal talk reply.
 const TALK_REWRITE_BUDGET: Budget = Budget {
-    local: 32,
+    local: 50,
     cloud: CLOUD_REPLY_TOKENS,
 };
 
@@ -5193,7 +5192,7 @@ impl TutorEngine for LocalEngine {
                 let retry_text = match without_repeated_questions(&retry_text, &asked) {
                     Some(kept) => {
                         eprintln!("[LATENCY]     llm> the rewrite repeated a question - removed it");
-                        telemetry::note("rewrite_repeat_removed");
+                        telemetry::note("rewrite_repeat_dropped");
                         kept
                     }
                     None => retry_text,
@@ -5211,7 +5210,6 @@ impl TutorEngine for LocalEngine {
                         pending: None,
                     });
                 }
-                telemetry::note("rewrite_unusable");
                 telemetry::note("rewrite_empty");
             }
             // A question asked again ahead of a new one is dropped without
@@ -7758,82 +7756,6 @@ mod ledger_tests {
     }
 
     #[test]
-    fn a_substantive_current_response_marks_the_matching_question_as_answered() {
-        let messages = vec![
-            question_history_message(
-                Speaker::Ella,
-                "What makes Goa especially special for you?",
-                1,
-            ),
-        ];
-
-        // Represents the learner's response after safety censorship.
-        assert!(question_was_answered_with_response(
-            "What makes Goa especially special for you?",
-            &messages,
-            "calm beaches holidays food",
-        ));
-    }
-
-    #[test]
-    fn current_response_word_count_is_a_heuristic_not_a_relevance_check() {
-        let messages = vec![
-            question_history_message(
-                Speaker::Ella,
-                "What makes Goa especially special for you?",
-                1,
-            ),
-        ];
-
-        // The threshold counts content words, not semantic relevance.
-        // This unrelated response deliberately documents that limitation.
-        assert!(question_was_answered_with_response(
-            "What makes Goa especially special for you?",
-            &messages,
-            "I prefer cricket today",
-        ));
-    }
-
-    #[test]
-    fn a_one_word_flagged_response_does_not_mark_the_question_as_answered() {
-        let messages = vec![
-            question_history_message(
-                Speaker::Ella,
-                "What makes Goa especially special for you?",
-                1,
-            ),
-        ];
-
-        assert!(!question_was_answered_with_response(
-            "What makes Goa especially special for you?",
-            &messages,
-            "sh1t",
-        ));
-    }
-
-    #[test]
-    fn an_answer_already_in_history_remains_answered_with_a_short_current_response() {
-        let messages = vec![
-            question_history_message(
-                Speaker::Ella,
-                "What makes Goa especially special for you?",
-                1,
-            ),
-            question_history_message(
-                Speaker::Learner,
-                "I love the peaceful beaches and local food.",
-                2,
-            ),
-        ];
-
-        assert!(question_was_answered_with_response(
-            "What makes Goa especially special for you?",
-            &messages,
-            "sh1t",
-        ));
-    }
-
-    #[test]
     fn the_same_question_at_three_different_widths_is_one_question() {
         // Straight from a street-food bench run, which asked all three in a row
         // and got past a plain three-quarters overlap test at 0.67.
@@ -7863,6 +7785,12 @@ mod ledger_tests {
             repeated_question("What did you eat on Sunday?", &asked).is_none(),
             "sharing only the question word is not a repeat"
         );
+    }
+
+    #[test]
+    fn a_missing_half_of_a_compound_question_is_not_a_repeat() {
+        let asked = vec!["What did you eat, and where did you buy it?".to_owned()];
+        assert!(repeated_question("Where did you buy it?", &asked).is_none());
     }
 
 
@@ -9827,6 +9755,7 @@ mod errand_tests {
         let requests = fake.completions();
         let rewrite = requests.last().expect("the retry request");
         assert_eq!(rewrite.body["max_tokens"], TALK_REWRITE_BUDGET.local);
+        assert_eq!(TALK_REWRITE_BUDGET.local, 50);
         assert!(
             prompt_text(&rewrite.body).contains("at most 25 words"),
             "the retry prompt asks for a concise response"
@@ -9907,14 +9836,14 @@ mod errand_tests {
             json!([
                 "no_audio_ahead",
                 "repeated_question",
-                "rewrite_repeat_removed",
+                "rewrite_repeat_dropped",
                 "rewrite_used"
             ])
         );
     }
 
     #[test]
-    fn an_unusable_rewrite_is_distinguished_from_a_cleaned_rewrite_that_was_used() {
+    fn an_empty_rewrite_falls_back_to_the_first_attempt() {
         let fake = FakeLlama::scripted(
             pace(5, 5, 4),
             &["Where did you find it?", "Where did you find it?"],
@@ -9931,8 +9860,7 @@ mod errand_tests {
             json!([
                 "no_audio_ahead",
                 "repeated_question",
-                "rewrite_repeat_removed",
-                "rewrite_unusable",
+                "rewrite_repeat_dropped",
                 "rewrite_empty"
             ])
         );

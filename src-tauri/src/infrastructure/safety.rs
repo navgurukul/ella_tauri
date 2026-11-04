@@ -28,40 +28,38 @@
 //! ("that price is a rip-off!"), which only reaches its milder `MEAN` level.
 use rustrict::{CensorStr, Type};
 
-/// Whether this is a narrowly recognizable complaint about repeated questions.
-pub fn is_repetition_complaint(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    let mentions_repeat = lower.contains("repeated question")
-        || lower.contains("repeat question")
-        || lower.contains("asking me again");
-    let mentions_answer = lower.contains("already answered")
-        || lower.contains("answered this question")
-        || lower.contains("answered that question");
+fn sentence_spans(text: &str) -> Vec<&str> {
+    let mut spans = Vec::new();
+    let mut start = 0;
 
-    mentions_repeat && mentions_answer
+    for (index, character) in text.char_indices() {
+        let end = index + character.len_utf8();
+        let next_is_whitespace = text[end..].chars().next().map_or(true, char::is_whitespace);
+        if matches!(character, '.' | '?' | '!' | '\n') && next_is_whitespace {
+            let span = text[start..end].trim();
+            if !span.is_empty() {
+                spans.push(span);
+            }
+            start = end;
+        }
+    }
+
+    let span = text[start..].trim();
+    if !span.is_empty() {
+        spans.push(span);
+    }
+
+    spans
 }
 
 /// Whether `text` trips rustrict's general-audience profanity/vulgarity
-/// threshold, except for a narrowly recognized, independently benign
-/// complaint about repeated questions.
+/// threshold. Sentence boundaries keep neighboring words from combining into
+/// a false positive, while punctuation inside a word remains visible to the
+/// censor (for example, `sh!t`).
 pub fn flagged(text: &str) -> bool {
-    let is_flagged = text.is(Type::INAPPROPRIATE);
-
-    if !is_repetition_complaint(text) {
-        return is_flagged;
-    }
-
-    // A repetition complaint must not exempt a separate inappropriate sentence.
-    let sentences: Vec<&str> = text
-        .split(['.', '?', '!', '\n'])
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect();
-
-    !sentences.is_empty()
-        && sentences
-            .iter()
-            .any(|sentence| sentence.is(Type::INAPPROPRIATE))
+    sentence_spans(text)
+        .into_iter()
+        .any(|sentence| sentence.is(Type::INAPPROPRIATE))
 }
 
 /// A censored copy of `text` with anything rustrict recognizes as profane,
@@ -228,14 +226,14 @@ mod tests {
     #[test]
     fn repetition_complaint_is_not_flagged_as_inappropriate() {
         let complaint = "You are asking me repeated question, right? It is I have already answered this question previously. Mmhmm";
-        assert!(is_repetition_complaint(complaint));
         assert!(!flagged(complaint));
     }
 
     #[test]
-    fn repetition_complaint_does_not_exempt_an_unsafe_sentence() {
-        let mixed = "You are asking me repeated question, right? It is I have already answered this question previously. You are a fucking idiot.";
-        assert!(is_repetition_complaint(mixed));
-        assert!(flagged(mixed));
+    fn punctuation_inside_a_word_does_not_bypass_the_filter_in_a_complaint() {
+        let complaint = "You are asking me repeated question, right? It is I have already answered this question previously.";
+        for profanity in ["sh!t", "b!tch", "f?ck"] {
+            assert!(flagged(&format!("{complaint} You are a {profanity}.")), "{profanity}");
+        }
     }
 }

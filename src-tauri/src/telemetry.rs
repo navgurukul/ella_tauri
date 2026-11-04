@@ -396,14 +396,14 @@ struct TurnDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     warm_up: Option<WarmUpReport>,
     /// What happened to the reply on the way, in order: `flagged`,
-    /// `no_audio_ahead`, `repeated_question`, `rewrite_repeat_removed`,
-    /// `rewrite_used`, `rewrite_unusable`, `rewrite_empty`, `repeat_dropped`,
+    /// `no_audio_ahead`, `repeated_question`, `rewrite_repeat_dropped`,
+    /// `rewrite_used`, `rewrite_empty`, `repeat_dropped`,
     /// `took_offer`,
     /// `said_before_dropped`, `ledger_break`, `ledger_break_twice`,
     /// `audio_ahead_dropped`, `piper_broke`.
-    /// `rewrite_repeat_removed` means a duplicate question was stripped;
+    /// `rewrite_repeat_dropped` means a duplicate question was stripped;
     /// `rewrite_used` means the remaining rewrite was returned, while
-    /// `rewrite_unusable` means filtering left nothing and the first attempt
+    /// `rewrite_empty` means filtering left nothing and the first attempt
     /// was kept.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     notes: Vec<&'static str>,
