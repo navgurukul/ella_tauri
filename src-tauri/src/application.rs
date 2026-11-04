@@ -23,7 +23,7 @@ use crate::{
         audio::{pause_cut_index, quietest_cut_index, trim_to_speech, VadOutput},
         database::{AssessmentWrite, CurriculumReader, Database, LessonMark},
         engines::{
-            question_was_answered, trailing_question, GeneratedReply, NextRecap, NextTalk, SpeechSegment, SpeechSink, TutorEngine,
+            trailing_question, GeneratedReply, NextRecap, NextTalk, SpeechSegment, SpeechSink, TutorEngine,
             FREE_TOPIC_TURNS,
         },
         lesson_prompt::{self, LessonAsk},
@@ -1455,15 +1455,14 @@ impl AppService {
             // Skip the model entirely: a live session showed it does not
             // reliably self-correct once one turn slips into a soft,
             // validating register, so a flagged turn must never reach it.
-            // If the latest question remains unanswered, hand it back so the
-            // redirect does not make the learner's dodge appear successful.
+            // Re-ask the most recent Ella question on every flagged turn.
+            // The learner's current response is not in session history yet.
             let question = request
                 .messages
                 .iter()
                 .rev()
                 .find(|message| message.speaker == Speaker::Ella)
-                .and_then(|message| trailing_question(&message.content))
-                .filter(|question| !question_was_answered(question, &request.messages));
+                .and_then(|message| trailing_question(&message.content));
             trace.stage("llm:skipped", "learner turn flagged by the content filter");
             trace.note("flagged");
             GeneratedReply::plain(safety::redirect_reply(question), 0.0, 0.0)
@@ -3799,8 +3798,8 @@ mod curriculum_flow_tests {
     }
 
     struct ScriptedTalkEngine {
-    replies: Mutex<std::collections::VecDeque<String>>,
-    reply_calls: Arc<Mutex<usize>>,
+        replies: Mutex<std::collections::VecDeque<String>>,
+        reply_calls: Arc<Mutex<usize>>,
     }
 
     impl TutorEngine for ScriptedTalkEngine {
@@ -3963,6 +3962,7 @@ mod curriculum_flow_tests {
 
         for response in [
             "Goa is special because of its calm beaches, peaceful atmosphere and delicious food. sh1t",
+            "this app is sh1t boring",
             "fuck off",
             "I don't want to answer this shit",
         ] {

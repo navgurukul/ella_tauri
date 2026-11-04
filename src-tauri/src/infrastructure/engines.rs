@@ -2143,17 +2143,6 @@ fn content_words(sentence: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Normalize equivalent question words for repeat comparison only.
-/// Learner-facing text is never rewritten.
-fn question_comparison_words(sentence: &str) -> BTreeSet<String> {
-    content_words(sentence)
-        .into_iter()
-        .map(|word| match word.as_str() {
-            "special" | "unique" | "distinctive" => "distinctive".to_owned(),
-            _ => word,
-        })
-        .collect()
-}
 /// The reply's sentences, each with the mark that ends it. A mark ends a
 /// sentence only where a space or the end of the reply follows it, so
 /// "Rs 2.5" and "Wait..." stay whole.
@@ -2187,12 +2176,35 @@ fn sentences(reply: &str) -> Vec<&str> {
 /// did you find it? What kind of food does this place serve?" Both were put
 /// to the learner, so both are asked.
 fn asked_questions(messages: &[Message]) -> Vec<String> {
+    question_occurrences(messages)
+        .iter()
+        .map(|(_, _, question)| question.clone())
+        .collect()
+}
+
+fn answered_questions(messages: &[Message], current_response: Option<&str>) -> Vec<String> {
+    asked_questions(messages)
+        .into_iter()
+        .filter(|question| {
+            question_was_answered_with_response(question, messages, current_response)
+        })
+        .collect()
+}
+
+fn question_occurrences(messages: &[Message]) -> Vec<(usize, usize, String)> {
     messages
         .iter()
-        .filter(|message| message.speaker == Speaker::Ella)
-        .flat_map(|message| sentences(&message.content))
-        .filter(|sentence| sentence.ends_with('?'))
-        .map(str::to_owned)
+        .enumerate()
+        .filter(|(_, message)| message.speaker == Speaker::Ella)
+        .flat_map(|(message_index, message)| {
+            sentences(&message.content)
+                .into_iter()
+                .filter(|sentence| sentence.ends_with('?'))
+                .enumerate()
+                .map(move |(question_index, question)| {
+                    (message_index, question_index, question.to_owned())
+                })
+        })
         .collect()
 }
 
@@ -2200,13 +2212,13 @@ fn asked_questions(messages: &[Message]) -> Vec<String> {
 /// not strings, because the repeat comes back reworded — "How long will the
 /// trip take?" then "How long will the trip to the airport take?"
 fn asked_before<'a>(question: &str, earlier: &'a [String]) -> Option<&'a String> {
-    let asking = question_comparison_words(question);
+    let asking = content_words(question);
     // One content word is too little to call: "Really?" is not a repeat.
     if asking.len() < 2 {
         return None;
     }
     earlier.iter().find(|previous| {
-        let before = question_comparison_words(previous);
+        let before = content_words(previous);
         if before.len() < 2 {
             return false;
         }
@@ -2247,39 +2259,48 @@ fn has_multiple_question_clauses(question: &str) -> bool {
     })
 }
 
-/// Whether the latest matching earlier question was followed by a learner response.
-/// Uses the same content-word matching rules as repeat detection.
+/// Whether a learner response followed the matching question. When Ella asked
+/// several questions in one turn, each learner response answers them in order.
 ///
 /// `messages` must contain history before the current ELLA reply.
 pub(crate) fn question_was_answered(question: &str, messages: &[Message]) -> bool {
-    let mut latest_matching_question_index: Option<usize> = None;
+    question_was_answered_with_response(question, messages, None)
+}
 
-    for (index, message) in messages.iter().enumerate() {
-        if message.speaker != Speaker::Ella {
-            continue;
-        }
-
-        let questions: Vec<String> = sentences(&message.content)
-            .into_iter()
-            .filter(|sentence| sentence.ends_with('?'))
-            .map(str::to_owned)
-            .collect();
-
-        if asked_before(question, &questions).is_some() {
-            latest_matching_question_index = Some(index);
-        }
-    }
-
-    let Some(question_index) = latest_matching_question_index else {
+fn question_was_answered_with_response(
+    question: &str,
+    messages: &[Message],
+    current_response: Option<&str>,
+) -> bool {
+    let Some((message_index, question_index)) = question_occurrences(messages)
+        .iter()
+        .filter_map(|(message_index, question_index, earlier)| {
+            asked_before(question, std::slice::from_ref(earlier))
+                .map(|_| (*message_index, *question_index))
+        })
+        .last()
+    else {
         return false;
     };
 
-    messages
+    let responses = messages
         .iter()
-        .enumerate()
-        .any(|(index, message)| {
-            index > question_index && message.speaker == Speaker::Learner
+        .skip(message_index + 1)
+        .take_while(|message| message.speaker != Speaker::Ella)
+        .filter(|message| message.speaker == Speaker::Learner)
+        .map(|message| sentences(&message.content).len().max(1))
+        .sum::<usize>();
+
+    let current_responses = current_response
+        .filter(|_| {
+            messages
+                .iter()
+                .skip(message_index + 1)
+                .all(|message| message.speaker != Speaker::Ella)
         })
+        .map_or(0, |response| sentences(response).len().max(1));
+
+    responses + current_responses > question_index
 }
 
 /// `Some(earlier)` when this reply closes on a question Ella has already asked.
@@ -5160,11 +5181,10 @@ impl TutorEngine for LocalEngine {
         }
 
         // Free conversation: no ledger to enforce, but a question Ella has
-        // already asked is its own failure. The cab transcript locked up on one
-        // for four turns, so it is caught here and asked again rather than
-        // spoken.
+        // already asked and the learner has answered is its own failure. An
+        // unanswered question may be rephrased when the learner dodges it.
         let Some(ledger) = request.chore.as_ref().and_then(|c| c.ledger.as_ref()) else {
-            let asked = asked_questions(&request.messages);
+            let asked = answered_questions(&request.messages, Some(&request.learner_text));
             if let Some(already) = repeated_question(&text, &asked) {
                 eprintln!("[LATENCY]     llm> repeated question: {already:?} - regenerating once");
                 telemetry::note("repeated_question");
@@ -6814,7 +6834,7 @@ mod tests {
     use super::*;
     use crate::domain::Focus;
 
-    fn history_message(speaker: Speaker, content: &str, turn: u32) -> Message {
+    pub(super) fn history_message(speaker: Speaker, content: &str, turn: u32) -> Message {
         Message {
             id: format!("{speaker:?}-{turn}"),
             speaker,
@@ -7095,6 +7115,7 @@ mod tests {
 #[cfg(test)]
 mod ledger_tests {
     use super::*;
+    use super::tests::history_message;
     use crate::domain::{find_chore, WinCondition};
 
     fn market_spec() -> LedgerSpec {
@@ -7690,37 +7711,10 @@ mod ledger_tests {
         );
     }
 
-    fn question_history_message(
-        speaker: Speaker,
-        content: &str,
-        turn: u32,
-    ) -> Message {
-        Message {
-            id: format!("{speaker:?}-{turn}"),
-            speaker,
-            content: content.into(),
-            turn,
-            created_at: "2026-10-01T12:00:00Z".into(),
-        }
-    }
-
-    #[test]
-    fn a_question_followed_by_a_learner_message_is_marked_as_answered() {
-        let messages = vec![
-            question_history_message(Speaker::Ella, "How does your phone look when it stops working?", 1),
-            question_history_message(Speaker::Learner, "The screen becomes blank.", 2),
-        ];
-
-        assert!(question_was_answered(
-            "How does your phone look when it stops working?",
-            &messages
-        ));
-    }
-
     #[test]
     fn a_question_without_a_following_learner_message_is_unanswered() {
         let messages = vec![
-            question_history_message(Speaker::Ella, "How does your phone look when it stops working?", 1),
+            history_message(Speaker::Ella, "How does your phone look when it stops working?", 1),
         ];
 
         assert!(!question_was_answered(
@@ -7730,11 +7724,69 @@ mod ledger_tests {
     }
 
     #[test]
+    fn one_learner_response_answers_only_the_first_of_two_questions() {
+        let messages = vec![
+            history_message(
+                Speaker::Ella,
+                "Where did you find it? What did it cost?",
+                1,
+            ),
+            history_message(Speaker::Learner, "At the station.", 2),
+        ];
+
+        assert!(question_was_answered("Where did you find it?", &messages));
+        assert!(!question_was_answered("What did it cost?", &messages));
+        assert_eq!(
+            answered_questions(&messages, None),
+            ["Where did you find it?"]
+        );
+
+        let mut both_answered = messages;
+        both_answered.push(history_message(
+            Speaker::Learner,
+            "It cost twenty rupees.",
+            3,
+        ));
+        assert!(question_was_answered(
+            "What did it cost?",
+            &both_answered
+        ));
+    }
+
+    #[test]
+    fn the_current_response_answers_only_the_first_of_two_questions() {
+        let messages = vec![history_message(
+            Speaker::Ella,
+            "Where did you find it? What did it cost?",
+            1,
+        )];
+        let answered = answered_questions(&messages, Some("At the station."));
+
+        assert_eq!(answered, ["Where did you find it?"]);
+    }
+
+    #[test]
+    fn an_unanswered_question_can_be_rephrased_without_triggering_the_repeat_guard() {
+        let messages = vec![history_message(
+            Speaker::Ella,
+            "What did you eat at the stall?",
+            1,
+        )];
+        let answered = answered_questions(&messages, None);
+
+        assert!(answered.is_empty());
+        assert_eq!(
+            without_repeated_questions("I understand. What did you eat?", &answered),
+            None
+        );
+    }
+
+    #[test]
     fn a_reasked_question_is_unanswered_until_the_learner_responds_again() {
         let messages = vec![
-            question_history_message(Speaker::Ella, "How does your phone look when it stops working?", 1),
-            question_history_message(Speaker::Learner, "The screen becomes blank.", 2),
-            question_history_message(Speaker::Ella, "How does your phone look when it stops working?", 3),
+            history_message(Speaker::Ella, "How does your phone look when it stops working?", 1),
+            history_message(Speaker::Learner, "The screen becomes blank.", 2),
+            history_message(Speaker::Ella, "How does your phone look when it stops working?", 3),
         ];
 
         assert!(!question_was_answered(
@@ -7743,7 +7795,7 @@ mod ledger_tests {
         ));
 
         let mut answered_again = messages;
-        answered_again.push(question_history_message(
+        answered_again.push(history_message(
             Speaker::Learner,
             "It looks completely dark.",
             4,
@@ -7795,76 +7847,9 @@ mod ledger_tests {
 
 
     #[test]
-    fn special_and_unique_are_treated_as_equivalent_question_wording() {
-        let asked_special = vec![
-            "What makes the academic year special there?".to_owned(),
-        ];
-        let asked_unique = vec![
-            "What makes the academic year unique there?".to_owned(),
-        ];
-
-        assert!(repeated_question(
-            "What makes the academic year unique there?",
-            &asked_special,
-        ).is_some());
-
-        assert!(repeated_question(
-            "What makes the academic year special there?",
-            &asked_unique,
-        ).is_some());
-    }
-
-    #[test]
-    fn an_answer_to_a_special_question_matches_its_unique_rewording() {
-        let messages = vec![
-            question_history_message(
-                Speaker::Ella,
-                "What makes the academic year special there?",
-                1,
-            ),
-            question_history_message(
-                Speaker::Learner,
-                "The teachers have extensive experience.",
-                2,
-            ),
-        ];
-
-        assert!(question_was_answered(
-            "What makes the academic year unique there?",
-            &messages,
-        ));
-    }
-
-    #[test]
-    fn synonym_normalization_does_not_match_different_academic_questions() {
-        let asked = vec![
-            "What makes the academic year special there?".to_owned(),
-        ];
-
-        assert!(repeated_question(
-            "What extracurricular activities are available?",
-            &asked,
-        ).is_none());
-
-        assert!(repeated_question(
-            "How do experienced teachers help students?",
-            &asked,
-        ).is_none());
-    }
-
-    #[test]
-    fn rewrite_cleanup_removes_a_synonym_reworded_repeat() {
-        let asked = vec![
-            "What makes the academic year special there?".to_owned(),
-        ];
-
-        assert_eq!(
-            without_repeated_questions(
-                "That sounds interesting. What makes the academic year unique there?",
-                &asked,
-            ),
-            Some("That sounds interesting.".to_owned()),
-        );
+    fn special_and_unique_are_not_collapsed_for_repeat_matching() {
+        let asked = vec!["What makes the academic year special there?".to_owned()];
+        assert!(repeated_question("What makes it unique?", &asked).is_none());
     }
     #[test]
     fn a_reply_splits_into_sentences_only_where_a_space_follows_the_mark() {
