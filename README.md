@@ -633,7 +633,8 @@ from slow code:
   was evaluated
 - `notes`, what happened to the reply on the way (`flagged`,
   `repeated_question`, `repeat_dropped`, `ledger_break`, `audio_ahead_dropped`,
-  `aim_told` and the like, and `answer_trimmed` for a spoken answer over 800
+  `aim_told` and the like, `talk_left` from the upload queue for a turn of a
+  talk left unfinished, and `answer_trimmed` for a spoken answer over 800
   characters, kept to its last whole sentence that fits rather than refused;
   the mic asks the learner to wrap up 45 s after it first hears them), and
   `tts_path`: `overlapped`, `on_clock` or `failed`
@@ -989,8 +990,13 @@ the relay waits at most 10 s to connect and 30 s in all.
   yet ended are copied to `upload/held/<generation>.jsonl` and wait there,
   and the cursor goes past them, so the talks after it are not held up.
   Once the talk's end is written, its held turns go in the next batch with
-  the rest of it. Nothing ends a talk but its end: one cut short by a crash
-  or a force-quit stays held, never sent, until the cap below drops it. Each
+  the rest of it. A talk with no end and no turn for 12 hours was left: the
+  learner went elsewhere, or the app was closed, force-quit or crashed. Its
+  turns then go, at the next look (the next launch, if the app was closed),
+  each with the note `talk_left`, so the team can tell a talk left from one
+  finished without anything new about the learner; `notes` already takes
+  the token, so `policy_version` stays. A talk taken up again after that is
+  held again until its end, and its new turns go without the note. Each
   held generation is named by the state that keeps it, as the batch being
   sent is, so a crash holds the same turns again. An export holds nothing,
   as before; turns held while sending go with the first export after.
