@@ -20,8 +20,11 @@
 //!
 //! Sending, only finished talks leave: the turns of a talk that has not
 //! ended are copied out of the log to `upload/held/<generation>.jsonl`, and
-//! go in the batch made once its end is written. Nothing ends a talk but its
-//! end; the queue's cap (`cap_bytes`, `cap_age`) holds for held turns too.
+//! go in the batch made once its end is written. A talk with no end and no
+//! turn for `talk_left` was left (the learner went elsewhere, or the app was
+//! closed or crashed): its turns go then, each with the note `talk_left`, so
+//! a talk left is told from one finished. The queue's cap (`cap_bytes`,
+//! `cap_age`) holds for held turns too.
 //! Each generation is named by the state that keeps it, as a batch is, so a
 //! crash at any point holds the same turns again. Exporting holds nothing.
 //!
@@ -58,10 +61,11 @@ use crate::{
 /// make their own, shorter ones. There is no setting or environment variable
 /// for any of it.
 ///
-/// Two clocks, kept apart: `idle` says when the queue may work at all (no
+/// Three clocks, kept apart: `idle` says when the queue may work at all (no
 /// turn for 2 minutes), and says nothing of talks; `talk_quiet` says when a
-/// talk with no end recorded counts as over, for `due_talks`. A pause in a
-/// talk longer than `idle` lets the queue look, never ends the talk.
+/// talk with no end recorded counts as over, for `due_talks`; `talk_left`,
+/// when sending, when such a talk was left, and its held turns go. A pause
+/// in a talk shorter than `talk_left` never ends it.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// The most of the log one batch is made from. A longer line goes alone.
@@ -88,8 +92,11 @@ pub struct Config {
     pub backoff_max: Duration,
     /// The most batches one look sends.
     pub batches_per_run: usize,
-    /// Only finished talks leave: a talk's turns are held until its end.
+    /// Only finished talks leave: a talk's turns are held until its end,
     pub finished_talks_only: bool,
+    /// or until it has had no turn for this long: then it was left, and its
+    /// turns leave noted `talk_left`.
+    pub talk_left: TimeDelta,
 }
 
 impl Default for Config {
@@ -108,6 +115,10 @@ impl Default for Config {
             backoff_max: Duration::from_secs(6 * 60 * 60),
             batches_per_run: 20,
             finished_talks_only: false,
+            // Longer than a school day's break, so a talk taken up again the
+            // same day is one talk; one taken up the next is a talk left, then
+            // a talk that came back.
+            talk_left: TimeDelta::hours(12),
         }
     }
 }
@@ -119,6 +130,9 @@ const MAX_LINE: usize = 1024 * 1024;
 const HEAD: u64 = 256;
 /// Batches a transport refused, kept for a person to look at.
 const REFUSED_KEPT: usize = 10;
+/// The note on each turn of a talk sent because it was left, not ended: a
+/// token the policy already takes in `notes`, so no `policy_version` moves.
+const TALK_LEFT: &str = "talk_left";
 
 // Where a batch goes.
 
@@ -702,8 +716,18 @@ impl Queue {
     }
 
     /// Whether what waits is worth a batch: `due_talks` talks over, the
-    /// oldest event `due_age` old, or `due_bytes` of the log.
+    /// oldest event `due_age` old, `due_bytes` of the log, or, when sending,
+    /// a talk left.
     fn due(&self, state: &State, now: DateTime<Utc>) -> io::Result<bool> {
+        if self.config.finished_talks_only {
+            let held = match self.read_held(state.held) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+                read => read?,
+            };
+            if !self.left_talks(&held, &self.talks_after(state.cursor.offset)?, now).is_empty() {
+                return Ok(true);
+            }
+        }
         let Some(file) = self.open_log()? else { return Ok(false) };
         let len = file.metadata()?.len();
         if len.saturating_sub(state.cursor.offset) >= self.config.due_bytes {
@@ -739,24 +763,28 @@ impl Queue {
         Ok(over >= self.config.due_talks)
     }
 
-    /// The talks whose end is written in the log after `offset`: a turn
-    /// saying so, or the talk's recap.
-    fn ended_talks(&self, offset: u64) -> io::Result<HashSet<String>> {
-        let mut ended = HashSet::new();
-        let Some(file) = self.open_log()? else { return Ok(ended) };
+    /// The talks in the log after `offset`: those whose end is written (a
+    /// turn saying so, or the talk's recap), and each one's latest turn.
+    fn talks_after(&self, offset: u64) -> io::Result<Talks> {
+        let mut talks = Talks::default();
+        let Some(file) = self.open_log()? else { return Ok(talks) };
         let mut lines = Lines::new(file, offset)?;
         while let Some(line) = lines.next_line()? {
             let Some(event) = line.event() else { continue };
-            let over = match event.get("event").and_then(Value::as_str) {
-                Some("ella_turn_latency") => event.get("talk_over") == Some(&Value::Bool(true)),
-                Some("ella_assessment") => true,
-                _ => false,
-            };
-            if let (true, Some(talk)) = (over, talk_of(&event)) {
-                ended.insert(talk.to_owned());
-            }
+            talks.see(&event);
         }
-        Ok(ended)
+        Ok(talks)
+    }
+
+    /// The talks left: no end written, and no turn of theirs, held or in
+    /// the log after the cursor, for `talk_left`.
+    fn left_talks(&self, held: &[Vec<u8>], talks: &Talks, now: DateTime<Utc>) -> HashSet<String> {
+        let mut last = talks.last.clone();
+        for event in held.iter().filter_map(|line| event_of(line)) {
+            latest(&mut last, &event);
+        }
+        let cutoff = micros(now - self.config.talk_left);
+        last.into_iter().filter(|(talk, at)| *at <= cutoff && !talks.ended.contains(talk)).map(|(talk, _)| talk).collect()
     }
 
     /// Makes a batch of the lines after the cursor, freezes it in the outbox,
@@ -772,12 +800,28 @@ impl Queue {
         let Some(file) = self.open_log()? else { return Ok(false) };
         let held = self.held_lines(state)?;
         let holding = self.config.finished_talks_only;
-        let ended = if holding { self.ended_talks(state.cursor.offset)? } else { HashSet::new() };
-        let waits = |raw: &Map<String, Value>| holding && talk_of(raw).is_some_and(|talk| !ended.contains(talk));
+        let (ended, left) = if holding {
+            let talks = self.talks_after(state.cursor.offset)?;
+            let left = self.left_talks(&held, &talks, now);
+            (talks.ended, left)
+        } else {
+            (HashSet::new(), HashSet::new())
+        };
+        let is_left = |raw: &Map<String, Value>| talk_of(raw).is_some_and(|talk| left.contains(talk));
+        let waits = |raw: &Map<String, Value>| {
+            holding && talk_of(raw).is_some_and(|talk| !ended.contains(talk)) && !is_left(raw)
+        };
         let mut sanitizer = Sanitizer::default();
         let mut events = Vec::new();
         let mut ids = HashSet::new();
         let mut keep = |raw: &Map<String, Value>| {
+            let noted;
+            let raw = if is_left(raw) {
+                noted = noted_left(raw);
+                &noted
+            } else {
+                raw
+            };
             if let Some(event) = sanitizer.event(raw) {
                 // One event twice in a log is sent once.
                 if ids.insert(event["event_id"].as_str().unwrap_or_default().to_owned()) {
@@ -1107,6 +1151,57 @@ fn event_of(bytes: &[u8]) -> Option<Map<String, Value>> {
 /// The talk `event` is part of.
 fn talk_of(event: &Map<String, Value>) -> Option<&str> {
     event.get("session_id").and_then(Value::as_str)
+}
+
+/// What the log after the cursor says of its talks.
+#[derive(Default)]
+struct Talks {
+    /// The talks whose end is written: a turn saying so, or the recap.
+    ended: HashSet<String>,
+    /// Each talk's latest turn with a time that can be read.
+    last: HashMap<String, i64>,
+}
+
+impl Talks {
+    fn see(&mut self, event: &Map<String, Value>) {
+        let Some(talk) = talk_of(event) else { return };
+        match event.get("event").and_then(Value::as_str) {
+            Some("ella_turn_latency") => {
+                if event.get("talk_over") == Some(&Value::Bool(true)) {
+                    self.ended.insert(talk.to_owned());
+                }
+                latest(&mut self.last, event);
+            }
+            Some("ella_assessment") => {
+                self.ended.insert(talk.to_owned());
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Keeps `event`'s time as its talk's latest, if it is later.
+fn latest(last: &mut HashMap<String, i64>, event: &Map<String, Value>) {
+    if let (Some(talk), Some(at)) = (talk_of(event), time_of(event)) {
+        let latest = last.entry(talk.to_owned()).or_insert(at);
+        *latest = (*latest).max(at);
+    }
+}
+
+/// A turn of a talk that was left, with `talk_left` among its notes. The
+/// event is otherwise as written: its `event_id`, made from its launch, time,
+/// name and interaction, is the same.
+fn noted_left(raw: &Map<String, Value>) -> Map<String, Value> {
+    let mut noted = raw.clone();
+    let mut notes = match noted.remove("notes") {
+        Some(Value::Array(notes)) => notes,
+        _ => Vec::new(),
+    };
+    if !notes.iter().any(|note| note.as_str() == Some(TALK_LEFT)) {
+        notes.push(Value::String(TALK_LEFT.into()));
+    }
+    noted.insert("notes".into(), Value::Array(notes));
+    noted
 }
 
 /// The log's whole lines from an offset; a last line still being written
@@ -2467,17 +2562,20 @@ mod tests {
         laptop.write(&finished_talk("other", t0() + TimeDelta::minutes(2)));
         laptop.send(t0() + TimeDelta::minutes(5));
         assert_eq!(laptop.held(), ["going", "going"]);
-        // Days later, after other batches, and another launch of the app:
-        // each `send` is a new queue, from what is on the disk.
-        laptop.write(&finished_talk("another", t0() + TimeDelta::days(1)));
-        laptop.send(t0() + TimeDelta::days(1) + TimeDelta::minutes(5));
+        // Hours later, within `talk_left`, after other batches, and another
+        // launch of the app: each `send` is a new queue, from what is on the
+        // disk. (A talk taken up again after `talk_left` was left: see below.)
+        laptop.write(&finished_talk("another", t0() + TimeDelta::hours(4)));
+        laptop.send(t0() + TimeDelta::hours(4) + TimeDelta::minutes(5));
         assert_eq!(laptop.held(), ["going", "going"]);
-        laptop.write(&[turn("going", t0() + TimeDelta::days(2), true), recap("going", t0() + TimeDelta::days(2) + TimeDelta::seconds(10))]);
-        assert_eq!(laptop.send(t0() + TimeDelta::days(2) + TimeDelta::minutes(5)).sent, 1);
+        let back = t0() + TimeDelta::hours(8);
+        laptop.write(&[turn("going", back, true), recap("going", back + TimeDelta::seconds(10))]);
+        assert_eq!(laptop.send(back + TimeDelta::minutes(5)).sent, 1);
 
         let batches = laptop.fake.batches();
         let (envelope, events) = batches.last().unwrap();
         assert_eq!(events.len(), 4, "its two held turns, its last and its recap");
+        assert!(events.iter().all(|event| !noted_left(event)), "ended, not left");
         assert_eq!(envelope["talks"], 1);
         assert_eq!(envelope["first_event_at"], events[0]["timestamp"], "oldest first");
         assert_eq!(envelope["first_event_at"].as_str().unwrap()[..16], t0().to_rfc3339()[..16]);
@@ -2486,19 +2584,183 @@ mod tests {
         assert_eq!(laptop.state().health.dropped_total.sum(), 0);
     }
 
+    /// Whether a sent event carries the note `talk_left`.
+    fn noted_left(event: &Value) -> bool {
+        event["notes"].as_array().is_some_and(|notes| notes.iter().any(|note| note == TALK_LEFT))
+    }
+
     #[test]
-    fn a_talk_never_ended_is_held_and_never_sent_nor_dropped() {
+    fn a_talk_never_ended_is_held_until_it_was_left_and_then_goes_noted() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&[turn("crashed", t0(), false), turn("crashed", t0() + TimeDelta::minutes(1), false)]);
+        let when = t0() + TimeDelta::minutes(2);
+        laptop.write(&finished_talk("same-day", when));
+        assert_eq!(laptop.send(when + TimeDelta::minutes(5)).sent, 1, "the others are not held up");
+        assert_eq!(laptop.held(), ["crashed", "crashed"]);
+        // Quiet, but not yet for `talk_left`: still held, and nothing is due.
+        assert_eq!(laptop.send(t0() + TimeDelta::hours(11)).sent, 0);
+        assert_eq!(laptop.held(), ["crashed", "crashed"]);
+
+        // Past it, the talk left is due by itself: no other talk is needed.
+        assert_eq!(laptop.send(t0() + TimeDelta::hours(13)).sent, 1);
+        let batches = laptop.fake.batches();
+        assert!(batches[0].1.iter().all(|event| !noted_left(event)), "a finished talk has no such note");
+        let (envelope, events) = batches.last().unwrap();
+        assert_eq!(events.len(), 2, "both its turns, oldest first");
+        assert!(events.iter().all(noted_left));
+        assert!(events.iter().all(|event| event["talk_over"] == false));
+        assert_eq!((envelope["talks"].as_u64(), envelope["batch_seq"].as_u64()), (Some(1), Some(2)));
+        assert!(laptop.held().is_empty());
+        assert!(laptop.held_files().is_empty(), "nothing left behind");
+        assert_eq!(laptop.state().health.dropped_total.sum(), 0, "sent, not dropped");
+    }
+
+    #[test]
+    fn a_talk_left_keeps_its_notes_and_its_event_ids() {
+        let laptop = Laptop::new().installed();
+        let mut first: Value = serde_json::from_str(&turn("left", t0(), false)).unwrap();
+        first["notes"] = serde_json::json!(["flagged"]);
+        laptop.write(&[first.to_string()]);
+        laptop.send(t0() + TimeDelta::minutes(40));
+        assert_eq!(laptop.held(), ["left"]);
+        assert_eq!(laptop.send(t0() + TimeDelta::hours(13)).sent, 1);
+        let (_, events) = laptop.fake.batches().pop().unwrap();
+        assert_eq!(events[0]["notes"], serde_json::json!(["flagged", TALK_LEFT]));
+        // The note changes nothing the event's id is made from.
+        let unnoted = Sanitizer::default().event(first.as_object().unwrap()).unwrap();
+        assert_eq!(events[0]["event_id"], unnoted["event_id"]);
+    }
+
+    #[test]
+    fn a_talk_left_while_the_app_was_closed_goes_at_the_next_launch() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&[turn("closed", t0(), false)]);
+        laptop.send(t0() + TimeDelta::minutes(40));
+        assert_eq!(laptop.held(), ["closed"]);
+        // Never looked at again until days later: a new queue, from the disk,
+        // with nothing new in the log.
+        assert_eq!(laptop.send(t0() + TimeDelta::days(3)).sent, 1);
+        let (_, events) = laptop.fake.batches().pop().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(noted_left(&events[0]));
+
+        // A talk whose turns never reached a look at all: still in the log
+        // after the cursor, and as left once quiet.
         let laptop = Laptop::new().installed();
         laptop.write(&[turn("crashed", t0(), false)]);
-        for day in [0, 10, 30, 90] {
-            let when = t0() + TimeDelta::days(day) + TimeDelta::minutes(1);
-            laptop.write(&finished_talk(&format!("day-{day}"), when));
-            assert_eq!(laptop.send(when + TimeDelta::minutes(5)).sent, 1, "day {day}: the others are not held up");
-        }
-        assert_eq!(laptop.held(), ["crashed"]);
-        assert_eq!(laptop.state().health.dropped_total.sum(), 0);
+        assert_eq!(laptop.send(t0() + TimeDelta::days(1)).sent, 1);
+        let (_, events) = laptop.fake.batches().pop().unwrap();
+        assert!(noted_left(&events[0]));
+        assert!(laptop.held().is_empty());
+    }
+
+    #[test]
+    fn a_talk_left_does_not_hold_up_the_talks_after_it_and_one_going_is_still_held() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&[turn("left", t0(), false)]);
+        laptop.send(t0() + TimeDelta::minutes(40));
+        let later = t0() + TimeDelta::hours(13);
+        laptop.write(&finished_talk("done", later));
+        laptop.write(&[turn("going", later + TimeDelta::minutes(1), false)]);
+        assert_eq!(laptop.send(later + TimeDelta::minutes(5)).sent, 1);
+        let (envelope, events) = laptop.fake.batches().pop().unwrap();
+        assert_eq!(envelope["talks"], 2, "the talk left and the talk done, in one batch");
+        let left: Vec<_> = events.iter().filter(|event| noted_left(event)).collect();
+        assert_eq!((left.len(), events.len()), (1, 4));
+        assert_eq!(laptop.held(), ["going"], "a talk going is still held");
+    }
+
+    #[test]
+    fn a_talk_taken_up_again_after_it_was_left_sends_only_its_new_turns_once_it_ends() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&[turn("back", t0(), false)]);
+        laptop.send(t0() + TimeDelta::minutes(40));
+        assert_eq!(laptop.send(t0() + TimeDelta::hours(13)).sent, 1);
+        // The next day the learner takes it up again: held until its end, then
+        // sent without the note, and the turn sent already is not sent again.
+        let next = t0() + TimeDelta::days(1);
+        laptop.write(&[turn("back", next, false)]);
+        assert_eq!(laptop.send(next + TimeDelta::minutes(40)).sent, 0);
+        assert_eq!(laptop.held(), ["back"]);
+        laptop.write(&[turn("back", next + TimeDelta::hours(1), true)]);
+        assert_eq!(laptop.send(next + TimeDelta::hours(1) + TimeDelta::minutes(5)).sent, 1);
         let batches = laptop.fake.batches();
-        assert!(batches.iter().all(|(envelope, events)| events.len() == 3 && envelope["dropped_event_count"] == 0));
+        let (_, events) = batches.last().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| !noted_left(event)));
+        let ids: HashSet<_> = batches.iter().flat_map(|(_, events)| events.iter().map(|e| e["event_id"].clone())).collect();
+        assert_eq!(ids.len(), 3, "each turn sent once");
+    }
+
+    #[test]
+    fn a_batch_with_a_talk_left_is_sent_again_the_same_and_made_again_the_same() {
+        // Not answered: tried again later, the same bytes.
+        let laptop = Laptop::new().installed();
+        laptop.write(&[turn("left", t0(), false)]);
+        laptop.send(t0() + TimeDelta::minutes(40));
+        laptop.fake.answer(Err(SendError::Unreachable));
+        assert_eq!(laptop.send(t0() + TimeDelta::hours(13)).sent, 0);
+        assert!(laptop.held().is_empty(), "taken by the batch waiting");
+        assert_eq!(laptop.send(t0() + TimeDelta::hours(14)).sent, 1);
+        let ids = laptop.fake.ids();
+        assert_eq!((ids.len(), &ids[0]), (2, &ids[1]));
+        let sent = laptop.fake.sent.lock().unwrap().clone();
+        let (first, second) = (parse(&sent[0].1), parse(&sent[1].1));
+        assert_eq!(first.1, second.1, "the same events, the note included");
+        assert_eq!(laptop.state().batch_seq_acked, 1);
+
+        // A look stopped before its state was kept: made again later, the
+        // same batch, though the clock has moved on.
+        let laptop = Laptop::new().installed();
+        laptop.write(&[turn("left", t0(), false)]);
+        laptop.send(t0() + TimeDelta::minutes(40));
+        let before = laptop.state();
+        let queue = laptop.queue(holding());
+        let now = t0() + TimeDelta::hours(13);
+        let mut state = queue.load(now).unwrap();
+        assert!(queue.prepare(&mut state, now).unwrap());
+        let made = state.pending.unwrap().batch_id;
+        queue.save(&before).unwrap();
+        assert_eq!(laptop.send(now + TimeDelta::hours(2)).sent, 1);
+        assert_eq!(laptop.fake.ids(), [made]);
+        assert!(laptop.held_files().is_empty());
+    }
+
+    #[test]
+    fn a_batch_with_a_talk_left_passes_the_scripts_validator() {
+        // As ingest checks it: the note is a token the policy takes already,
+        // so the batch keeps `policy_version` as it is.
+        let laptop = Laptop::new().installed();
+        let out = laptop.dir.path().join("checked");
+        let queue = Queue::new(laptop.dir.path(), holding(), Box::new(ExportTransport { dir: out.clone() }));
+        laptop.write(&[turn("left", t0(), false), turn("left", t0() + TimeDelta::minutes(1), false)]);
+        laptop.write(&finished_talk("done", t0() + TimeDelta::minutes(2)));
+        assert_eq!(queue.run(t0() + TimeDelta::hours(13), 0).unwrap().sent, 1);
+        let files: Vec<_> = fs::read_dir(&out).unwrap().flatten().map(|entry| entry.path()).collect();
+        let (envelope, events) = parse(&fs::read(&files[0]).unwrap());
+        assert_eq!(envelope["policy_version"], policy::policy().version);
+        assert_eq!(events.iter().filter(|event| noted_left(event)).count(), 2);
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/latency-sanitize.py");
+        match std::process::Command::new("python3").arg(script).arg("--validate").args(&files).output() {
+            Ok(output) => assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            Err(error) => eprintln!("python3 not found ({error}): the batch was not checked by the scripts"),
+        }
+    }
+
+    #[test]
+    fn an_export_notes_no_talk_left() {
+        let laptop = Laptop::new().installed();
+        laptop.write(&[turn("going", t0(), false)]);
+        let config = Config { due_talks: 1, ..Config::default() };
+        assert_eq!(laptop.queue(config).run(t0() + TimeDelta::days(4), 0).unwrap().sent, 1);
+        let (_, events) = laptop.fake.batches().pop().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(!noted_left(&events[0]), "an export holds nothing, so leaves nothing");
     }
 
     #[test]
