@@ -236,6 +236,108 @@ def usage(week_events, all_events=(), week=None):
     }
 
 
+# The note the app puts on a talk's turns when it sends a talk that was
+# left: no end, and no turn for 12 hours (#45, telemetry_queue.rs).
+TALK_LEFT = "talk_left"
+# The first released version known to send `talk_left`. Until one is, every
+# build sending is 0.1.27 whether it has #45 or not, so a talk with no note
+# may be one a build without #45 left, and the share of talks completed or
+# left cannot be told: the rates stay unavailable while this is None.
+TALK_LEFT_SINCE = None
+
+COMPLETED, LEFT, RESUMED, UNRESOLVED = "completed", "left", "resumed", "unresolved"
+
+
+def version_key(text):
+    """`0.1.28` as (0, 1, 28), or None for what is no such version."""
+    parts = text.split(".") if isinstance(text, str) else []
+    return tuple(int(part) for part in parts) if parts and all(part.isdigit() for part in parts) else None
+
+
+def ended(event):
+    """Whether `event` ends its talk, as the queue holds a talk until: a turn
+    that says the talk is over, or its recap. The queue's 30-minute check is
+    no end, and nothing here counts one."""
+    if event.get("event") == RECAP:
+        return True
+    return event.get("event") == TURN and event.get("talk_over") is True
+
+
+def noted_left(event):
+    notes = event.get("notes")
+    return event.get("event") == TURN and isinstance(notes, list) and TALK_LEFT in notes
+
+
+def state_of(rows):
+    end = any(ended(e) for e in rows)
+    left = any(noted_left(e) for e in rows)
+    if left:
+        return RESUMED if end else LEFT
+    return COMPLETED if end else UNRESOLVED
+
+
+def talk_lifecycle(week_events, all_events=(), since=TALK_LEFT_SINCE):
+    """How the week's talks ended, from the app's own signals only: the
+    talks with a turn this week (as `usage` counts them), each judged on
+    every event of it read, of any week, so a recap that came later counts.
+
+    - `completed`: it has an end and was never noted left;
+    - `left`: noted `talk_left` (no end and no turn for 12 hours), no end;
+    - `resumed`: noted left, then an end came;
+    - `unresolved`: no end and no note: a build's own export, a build from
+      before #45, or a talk a build without #45 left.
+
+    Builds from before #45 never note a talk left, so `left` and `resumed`
+    are floors. Rates are given only over talks wholly of builds at or after
+    `since`, and are unavailable while it is None."""
+    talks = {e["talk_id"] for e in week_events if e.get("event") == TURN and isinstance(e.get("talk_id"), str)}
+    rows = {talk: [] for talk in talks}
+    # Without every event read, a talk is judged on the week's alone.
+    for event in all_events or week_events:
+        if event.get("talk_id") in rows:
+            rows[event["talk_id"]].append(event)
+    states = {talk: state_of(events) for talk, events in rows.items()}
+    counts = Counter(states.values())
+    floor = "a floor: builds from before #45 never note a talk left"
+
+    shown = {
+        "talks": metric(len(states), DERIVED, "talks with a turn this week, as usage counts them"),
+        COMPLETED: metric(counts[COMPLETED], DERIVED, "an end (the talk over, or its recap) and no left note"),
+        LEFT: metric(counts[LEFT], HISTORICALLY_LIMITED, f"noted {TALK_LEFT}, no end; {floor}"),
+        RESUMED: metric(counts[RESUMED], HISTORICALLY_LIMITED, f"noted {TALK_LEFT}, then an end; {floor}"),
+        UNRESOLVED: metric(
+            counts[UNRESOLVED],
+            DERIVED,
+            "no end and no note: an export, a build from before #45, or a talk such a build left",
+        ),
+    }
+    if since is None:
+        why = "until a released version is known to send talk_left (#45): builds with and without it share a version"
+        shown["completion_rate"] = unavailable(why)
+        shown["left_rate"] = unavailable(why)
+        return shown
+
+    floor_key = version_key(since)
+    covered = [
+        talk
+        for talk, events in rows.items()
+        if all((version_key(e.get("app_version")) or ()) >= floor_key for e in events)
+    ]
+    of_covered = Counter(states[talk] for talk in covered)
+    note = f"over the {len(covered)} talks wholly of builds {since} or later"
+    shown["completion_rate"] = metric(
+        round((of_covered[COMPLETED] + of_covered[RESUMED]) / len(covered), 4) if covered else None,
+        DERIVED,
+        note + "; completed or resumed",
+    )
+    shown["left_rate"] = metric(
+        round((of_covered[LEFT] + of_covered[RESUMED]) / len(covered), 4) if covered else None,
+        DERIVED,
+        note + "; ever noted left",
+    )
+    return shown
+
+
 def analyse(week_events, all_events=(), ledger=None, week=None):
     """The week's analytics, a section each, in `SECTIONS` order.
     `week_events` are the week's sanitized events; `all_events` every event
@@ -243,4 +345,5 @@ def analyse(week_events, all_events=(), ledger=None, week=None):
     the batch record, for collection, when given."""
     shown = {section: {} for section in SECTIONS}
     shown["usage"] = usage(week_events, all_events, week)
+    shown["talk_lifecycle"] = talk_lifecycle(week_events, all_events)
     return shown

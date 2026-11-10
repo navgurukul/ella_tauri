@@ -332,5 +332,93 @@ class Usage(unittest.TestCase):
         self.assertEqual(shown["new_installs"]["status"], analytics.UNAVAILABLE)
 
 
+def recap(at, talk, **extra):
+    return clean(at, event="ella_assessment", talk=talk, talk_type=None, kind="talk", **extra)
+
+
+class TalkLifecycle(unittest.TestCase):
+    def lifecycle(self, week_events, all_events=(), since=None):
+        return analytics.talk_lifecycle(week_events, all_events, since)
+
+    def counts(self, *args, **kwargs):
+        shown = self.lifecycle(*args, **kwargs)
+        return {k: shown[k]["value"] for k in ("talks", "completed", "left", "resumed", "unresolved")}
+
+    def test_no_talks_is_all_zero_and_no_rate(self):
+        shown = self.lifecycle([])
+        self.assertEqual(self.counts([]), {"talks": 0, "completed": 0, "left": 0, "resumed": 0, "unresolved": 0})
+        self.assertEqual(shown["completion_rate"]["status"], analytics.UNAVAILABLE)
+
+    def test_each_way_a_talk_ends_is_counted(self):
+        events = [
+            clean("2026-11-02T06:00:00Z", talk="over", talk_over=True),
+            clean("2026-11-02T07:00:00Z", talk="recapped"),
+            recap("2026-11-02T07:05:00Z", "recapped"),
+            clean("2026-11-02T08:00:00Z", talk="left", notes=["talk_left"]),
+            clean("2026-11-02T09:00:00Z", talk="resumed", notes=["no_audio_ahead", "talk_left"]),
+            clean("2026-11-03T09:00:00Z", talk="resumed", talk_over=True),
+            clean("2026-11-02T10:00:00Z", talk="open"),
+        ]
+        self.assertEqual(
+            self.counts(events), {"talks": 5, "completed": 2, "left": 1, "resumed": 1, "unresolved": 1}
+        )
+
+    def test_the_talks_are_the_ones_usage_counts(self):
+        events = [clean("2026-11-02T06:00:00Z", talk="t1"), clean("2026-11-02T06:00:00Z", talk="t2", install=INSTALL_B)]
+        usage = analytics.usage(events, events, "2026-W45")
+        self.assertEqual(self.lifecycle(events)["talks"]["value"], usage["talks"]["value"])
+
+    def test_an_end_from_a_later_week_counts(self):
+        turn_ = clean("2026-11-08T18:00:00Z", talk="late")  # Sunday night, IST
+        later = recap("2026-11-08T18:40:00Z", "late")  # Monday, the week after
+        self.assertEqual(self.counts([turn_], [turn_, later])["completed"], 1)
+        self.assertEqual(self.counts([turn_], [turn_])["unresolved"], 1)
+
+    def test_a_recap_alone_is_no_talk_of_the_week(self):
+        self.assertEqual(self.counts([recap("2026-11-02T06:00:00Z", "no-turns")])["talks"], 0)
+
+    def test_talk_over_false_or_a_note_of_another_kind_is_no_end(self):
+        events = [
+            clean("2026-11-02T06:00:00Z", talk="t", talk_over=False, notes=["flagged"]),
+        ]
+        self.assertEqual(self.counts(events)["unresolved"], 1)
+
+    def test_left_and_resumed_are_floors_and_rates_wait_for_a_release(self):
+        shown = self.lifecycle([clean("2026-11-02T06:00:00Z", talk_over=True)])
+        self.assertEqual(shown["left"]["status"], analytics.HISTORICALLY_LIMITED)
+        self.assertEqual(shown["resumed"]["status"], analytics.HISTORICALLY_LIMITED)
+        self.assertEqual(shown["completed"]["status"], analytics.DERIVED)
+        for rate in ("completion_rate", "left_rate"):
+            self.assertEqual(shown[rate]["status"], analytics.UNAVAILABLE)
+            self.assertIn("#45", shown[rate]["note"])
+        self.assertIsNone(analytics.TALK_LEFT_SINCE, "no release is yet known to send talk_left")
+
+    def test_once_a_release_is_known_rates_count_only_its_talks(self):
+        events = [
+            clean("2026-11-02T06:00:00Z", talk="old", app_version="0.1.27"),  # unresolved, old build
+            clean("2026-11-02T07:00:00Z", talk="done", app_version="0.1.28", talk_over=True),
+            clean("2026-11-02T08:00:00Z", talk="gone", app_version="0.1.28", notes=["talk_left"]),
+            clean("2026-11-02T09:00:00Z", talk="back", app_version="0.1.28", notes=["talk_left"]),
+            clean("2026-11-03T09:00:00Z", talk="back", app_version="0.1.29", talk_over=True),
+            clean("2026-11-02T10:00:00Z", talk="mixed", app_version="0.1.27"),
+            clean("2026-11-02T10:01:00Z", talk="mixed", app_version="0.1.28", talk_over=True),
+        ]
+        shown = self.lifecycle(events, since="0.1.28")
+        self.assertEqual(shown["completion_rate"]["value"], round(2 / 3, 4))
+        self.assertEqual(shown["left_rate"]["value"], round(2 / 3, 4))
+        self.assertIn("3 talks", shown["completion_rate"]["note"])
+
+    def test_versions_compare_as_numbers(self):
+        self.assertGreater(analytics.version_key("0.1.10"), analytics.version_key("0.1.9"))
+        self.assertIsNone(analytics.version_key("other"))
+        self.assertIsNone(analytics.version_key(None))
+
+    def test_no_talk_is_named(self):
+        events = [clean("2026-11-02T06:00:00Z", talk="Asha's talk", notes=["talk_left"])]
+        shown = json.dumps(self.lifecycle(events))
+        self.assertNotIn("Asha", shown)
+        self.assertNotIn(sanitize.short_hash("Asha's talk"), shown)
+
+
 if __name__ == "__main__":
     unittest.main()
