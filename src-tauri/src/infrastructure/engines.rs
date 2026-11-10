@@ -2222,12 +2222,6 @@ fn asked_before<'a>(question: &str, earlier: &'a [String]) -> Option<&'a String>
         if before.len() < 2 {
             return false;
         }
-        // A shorter question may be the missing half of a compound question
-        // rather than a repeat (for example, "where did you buy it?" after
-        // "what did you eat, and where did you buy it?").
-        if asking.len() < before.len() && has_multiple_question_clauses(previous) {
-            return false;
-        }
         let shared = asking.intersection(&before).count();
         // One question's words wholly inside the other's. This is the shape the
         // repeat actually takes: the street-food run asked "What did you think
@@ -2244,26 +2238,13 @@ fn asked_before<'a>(question: &str, earlier: &'a [String]) -> Option<&'a String>
     })
 }
 
-fn has_multiple_question_clauses(question: &str) -> bool {
-    let lower = question.to_lowercase();
-    lower.split_once(',').is_some_and(|(_, rest)| {
-        let clause = rest.trim_start();
-        let clause = clause
-            .strip_prefix("and ")
-            .or_else(|| clause.strip_prefix("or "));
-        clause.is_some_and(|clause| {
-            ["what ", "where ", "when ", "who ", "why ", "how ", "which "]
-                .iter()
-                .any(|word| clause.starts_with(word))
-        })
-    })
-}
-
 /// Whether a learner response followed the matching question. When Ella asked
-/// several questions in one turn, each learner response answers them in order.
+/// several questions in one turn, each learner response is matched in order
+/// and only counts when it is relevant to that question.
 ///
 /// `messages` must contain history before the current ELLA reply.
-pub(crate) fn question_was_answered(question: &str, messages: &[Message]) -> bool {
+#[cfg(test)]
+fn question_was_answered(question: &str, messages: &[Message]) -> bool {
     question_was_answered_with_response(question, messages, None)
 }
 
@@ -2283,24 +2264,52 @@ fn question_was_answered_with_response(
         return false;
     };
 
-    let responses = messages
+    let mut responses: Vec<String> = messages
         .iter()
         .skip(message_index + 1)
         .take_while(|message| message.speaker != Speaker::Ella)
         .filter(|message| message.speaker == Speaker::Learner)
-        .map(|message| sentences(&message.content).len().max(1))
-        .sum::<usize>();
+        .flat_map(|message| {
+            let parts = sentences(&message.content);
+            if parts.is_empty() {
+                vec![message.content.as_str()]
+            } else {
+                parts
+            }
+        })
+        .map(str::to_owned)
+        .collect();
 
-    let current_responses = current_response
+    current_response
         .filter(|_| {
             messages
                 .iter()
                 .skip(message_index + 1)
                 .all(|message| message.speaker != Speaker::Ella)
         })
-        .map_or(0, |response| sentences(response).len().max(1));
+        .into_iter()
+        .flat_map(sentences)
+        .for_each(|response| responses.push(response.to_owned()));
 
-    responses + current_responses > question_index
+    responses
+        .get(question_index)
+        .is_some_and(|response| answer_is_relevant(question, response))
+}
+
+fn answer_is_relevant(question: &str, response: &str) -> bool {
+    let question_words = content_words(question);
+    let response_words = content_words(response);
+    let short_answer = response.split_whitespace().count() <= 4;
+    let location_answer = question
+        .trim_start()
+        .to_lowercase()
+        .starts_with("where ")
+        && response
+            .to_lowercase()
+            .split(|character: char| !character.is_alphanumeric())
+            .any(|word| ["at", "in", "near", "from", "to", "on"].contains(&word));
+
+    !question_words.is_disjoint(&response_words) || short_answer || location_answer
 }
 
 /// `Some(earlier)` when this reply closes on a question Ella has already asked.
@@ -4205,12 +4214,6 @@ const TALK_BUDGET: Budget = Budget {
     cloud: CLOUD_REPLY_TOKENS,
 };
 
-/// A repeated-question correction should be briefer than a normal talk reply.
-const TALK_REWRITE_BUDGET: Budget = Budget {
-    local: 50,
-    cloud: CLOUD_REPLY_TOKENS,
-};
-
 /// A lesson's: its mark, a reaction of at most twenty words and a question,
 /// or an opening or a goodbye of five short sentences.
 const LESSON_BUDGET: Budget = Budget {
@@ -5203,7 +5206,7 @@ impl TutorEngine for LocalEngine {
                     Some(&corrective),
                     None,
                     None,
-                    TALK_REWRITE_BUDGET,
+                    TALK_BUDGET,
                 )?;
                 let (retry_text, _) = take_signal(&second.text);
                 // Once only. Whatever the second asks again is dropped rather
@@ -7772,12 +7775,26 @@ mod ledger_tests {
             "What did you eat at the stall?",
             1,
         )];
-        let answered = answered_questions(&messages, None);
+        let answered = answered_questions(&messages, Some("The weather is nice today."));
 
         assert!(answered.is_empty());
         assert_eq!(
             without_repeated_questions("I understand. What did you eat?", &answered),
             None
+        );
+    }
+
+    #[test]
+    fn a_relevant_current_reply_answers_its_question() {
+        let messages = vec![history_message(
+            Speaker::Ella,
+            "What did you eat at the stall?",
+            1,
+        )];
+
+        assert_eq!(
+            answered_questions(&messages, Some("I ate the spicy corn at the stall.")),
+            ["What did you eat at the stall?"]
         );
     }
 
@@ -7840,9 +7857,9 @@ mod ledger_tests {
     }
 
     #[test]
-    fn a_missing_half_of_a_compound_question_is_not_a_repeat() {
+    fn a_narrower_reask_of_an_answered_compound_question_is_a_repeat() {
         let asked = vec!["What did you eat, and where did you buy it?".to_owned()];
-        assert!(repeated_question("Where did you buy it?", &asked).is_none());
+        assert!(repeated_question("What did you eat?", &asked).is_some());
     }
 
 
@@ -9739,8 +9756,7 @@ mod errand_tests {
         assert_eq!(talk_turns(&fake), 2, "written twice, never three times");
         let requests = fake.completions();
         let rewrite = requests.last().expect("the retry request");
-        assert_eq!(rewrite.body["max_tokens"], TALK_REWRITE_BUDGET.local);
-        assert_eq!(TALK_REWRITE_BUDGET.local, 50);
+        assert_eq!(rewrite.body["max_tokens"], TALK_BUDGET.local);
         assert!(
             prompt_text(&rewrite.body).contains("at most 25 words"),
             "the retry prompt asks for a concise response"
