@@ -550,11 +550,25 @@ def collection(ledger, week):
     }
 
 
-def reliability(week_events, all_events=(), ledger=None, week=None, reading=None):
+# Where the weekly report keeps collection: its own `collection` key.
+IN_REPORT = "collection"
+
+
+def reliability(week_events, all_events=(), ledger=None, week=None, reading=None, collection_in_report=False):
     """How reliably Ella ran and its telemetry came in: `app`, what the
     app's events say; `collection`, what the batch record says; `reading`,
-    what reading the events left out, when given."""
-    shown = {"app": app_signals(week_events, all_events), "collection": collection(ledger, week)}
+    what reading the events left out, when given. Within the weekly report,
+    whose `collection` is telemetry-health's whole summary already,
+    `collection` here only points to it: one record of collection, not two."""
+    if collection_in_report:
+        kept = {
+            "reported_in": metric(
+                IN_REPORT, DIRECT, "the report's own Collection section: telemetry-health's summary of the batch record"
+            )
+        }
+    else:
+        kept = collection(ledger, week)
+    shown = {"app": app_signals(week_events, all_events), "collection": kept}
     shown["reading"] = (
         {name: metric(value, DIRECT) for name, value in reading.items()}
         if reading is not None
@@ -645,16 +659,29 @@ def profiles(week_events, all_events):
     return by_launch, by_install
 
 
-def small_counts(installs_by_group):
-    """{group: installs}, a group of fewer than MIN_INSTALLS folded into
-    SMALL, so the whole still adds up and no laptop stands alone."""
-    shown, small = Counter(), 0
-    for group, installs in installs_by_group.items():
-        if len(installs) >= MIN_INSTALLS:
-            shown[group] = len(installs)
-        else:
-            small += len(installs)
-    shown = counted(shown)
+def shown_groups(big_enough):
+    """Which groups may be shown by themselves: those `big_enough` says are,
+    unless just one would be left to SMALL, which could then be told from
+    the rest (`x86_64: 3, small groups: 1`, the one being aarch64): then
+    none is, and all are counted in SMALL. Only what is shown changes; every
+    observation is still counted."""
+    kept = {group for group, ok in big_enough.items() if ok}
+    if len(big_enough) - len(kept) == 1:
+        return set()
+    return kept
+
+
+def small_counts(rows_by_group, amount=len):
+    """{group: amount}, a group of fewer than MIN_INSTALLS installs folded
+    into SMALL, so the whole still adds up and no laptop stands alone. A
+    group's rows are its installs, or its events, whose installs are counted."""
+
+    def installs(rows):
+        return {r if isinstance(r, str) else r.get("install_id") for r in rows} - {None}
+
+    kept = shown_groups({group: len(installs(rows)) >= MIN_INSTALLS for group, rows in rows_by_group.items()})
+    shown = counted(Counter({group: amount(rows) for group, rows in rows_by_group.items() if group in kept}))
+    small = sum(amount(rows) for group, rows in rows_by_group.items() if group not in kept)
     if small:
         shown[SMALL] = small
     return shown
@@ -664,15 +691,13 @@ def small_distributions(rows_by_group, field):
     """{group: distribution}, shown only for a group of MIN_INSTALLS
     installs or more with MIN_N measurements or more; the rest are counted
     together in SMALL, their percentiles withheld."""
-    shown, small = {}, 0
-    for group in sorted(rows_by_group, key=str):
-        rows = rows_by_group[group]
-        spread = measured(rows, field)
-        installs = {e.get("install_id") for e in rows} - {None}
-        if len(installs) >= MIN_INSTALLS and spread["sufficient"]:
-            shown[group] = spread
-        else:
-            small += spread["count"]
+    spreads = {group: measured(rows, field) for group, rows in rows_by_group.items()}
+    kept = shown_groups({
+        group: len({e.get("install_id") for e in rows} - {None}) >= MIN_INSTALLS and spreads[group]["sufficient"]
+        for group, rows in rows_by_group.items()
+    })
+    shown = {group: spreads[group] for group in sorted(kept, key=str)}
+    small = sum(spreads[group]["count"] for group in rows_by_group if group not in kept)
     if small:
         shown[SMALL] = {"count": small, "withheld": f"groups of fewer than {MIN_INSTALLS} installs or {MIN_N} measurements"}
     return shown
@@ -702,7 +727,7 @@ def platform(week_events, all_events=()):
         if event.get("install_id"):
             versions.setdefault(event.get("app_version") or UNKNOWN, set()).add(event["install_id"])
     shown["installs_by_app_version"] = metric(
-        small_counts(versions), DERIVED, f"an install counted in each version it ran; small groups in `{SMALL}`"
+        small_counts(versions), DERIVED, f"an install counted in each version it ran; groups of fewer than {MIN_INSTALLS} installs in `{SMALL}`"
     )
 
     is_word, by_cloud = sanitize.report.is_word, sanitize.report.by_cloud
@@ -710,17 +735,8 @@ def platform(week_events, all_events=()):
     turn_versions = {}
     for event in turns:
         turn_versions.setdefault(event.get("app_version") or UNKNOWN, []).append(event)
-    turns_by_version = Counter()
-    small_turns = 0
-    for version, rows in turn_versions.items():
-        if len({e.get("install_id") for e in rows} - {None}) >= MIN_INSTALLS:
-            turns_by_version[version] = len(rows)
-        else:
-            small_turns += len(rows)
-    turns_by_version = counted(turns_by_version)
-    if small_turns:
-        turns_by_version[SMALL] = small_turns
-    shown["turns_by_app_version"] = metric(turns_by_version, DIRECT, f"every turn; small groups in `{SMALL}`")
+    turns_by_version = small_counts(turn_versions)
+    shown["turns_by_app_version"] = metric(turns_by_version, DIRECT, f"every turn; versions run by fewer than {MIN_INSTALLS} installs in `{SMALL}`")
 
     laptop = [
         e
@@ -748,16 +764,117 @@ def platform(week_events, all_events=()):
     return shown
 
 
-def analyse(week_events, all_events=(), ledger=None, week=None, reading=None):
+def analyse(week_events, all_events=(), ledger=None, week=None, reading=None, collection_in_report=False):
     """The week's analytics, a section each, in `SECTIONS` order.
     `week_events` are the week's sanitized events; `all_events` every event
     read, for what came before the week (an install's first day); `ledger`
     the batch record, for collection, when given; `reading` the counts
-    `read` gave."""
+    `read` gave; `collection_in_report`, whether the report this goes in
+    shows collection itself."""
     shown = {section: {} for section in SECTIONS}
     shown["usage"] = usage(week_events, all_events, week)
     shown["talk_lifecycle"] = talk_lifecycle(week_events, all_events)
     shown["latency"] = latency(week_events)
-    shown["reliability"] = reliability(week_events, all_events, ledger, week, reading)
+    shown["reliability"] = reliability(week_events, all_events, ledger, week, reading, collection_in_report)
     shown["platform"] = platform(week_events, all_events)
     return shown
+
+
+# The report, for people.
+
+TITLES = {
+    "usage": "Usage",
+    "talk_lifecycle": "Talk lifecycle",
+    "latency": "Latency (ms)",
+    "reliability": "Reliability",
+    "platform": "Platform and version",
+}
+STATUS_TEXT = {
+    DIRECT: "direct",
+    DERIVED: "derived",
+    HISTORICALLY_LIMITED: "**historically limited**",
+    UNAVAILABLE: "**unavailable**",
+}
+
+
+def cell(text):
+    return str(text).replace("|", "/").replace("\n", " ")
+
+
+def number(value):
+    if isinstance(value, float):
+        return f"{value:,.4g}"
+    return f"{value:,}" if isinstance(value, int) and not isinstance(value, bool) else str(value)
+
+
+def spread_text(spread):
+    """A distribution in a line: how many, and its percentiles only when
+    they are shown and there are enough of them to stand for anything."""
+    if "withheld" in spread:
+        return f"n={spread['count']:,}, withheld ({spread['withheld']})"
+    n = f"n={spread['count']:,}" + (f" of {spread['of']:,}" if spread.get("of", spread["count"]) != spread["count"] else "")
+    if spread["count"] == 0:
+        return n
+    if spread.get("sufficient") is False:
+        return f"{n}, too few to stand for the fleet"
+    return f"{n}; P50 {number(spread['p50'])}, P75 {number(spread['p75'])}, P95 {number(spread['p95'])}"
+
+
+def is_spread(value):
+    return isinstance(value, dict) and "count" in value and ("p50" in value or "withheld" in value)
+
+
+def value_text(name, shown):
+    """A metric's value as the Markdown gives it: an unavailable one says
+    so, never 0; a rate as a share."""
+    value = shown["value"]
+    if shown["status"] == UNAVAILABLE:
+        return "unavailable"
+    if value is None:
+        return "–"
+    if is_spread(value):
+        return spread_text(value)
+    if isinstance(value, dict):
+        if not value:
+            return "none"
+        if all(is_spread(part) for part in value.values()):
+            return "; ".join(f"{group}: {spread_text(part)}" for group, part in value.items())
+        return ", ".join(f"{group} {number(count)}" for group, count in value.items())
+    if isinstance(value, list):
+        return ", ".join(map(str, value)) or "none"
+    if name.endswith("_rate") and isinstance(value, (int, float)):
+        return f"{value:.1%}"
+    return number(value)
+
+
+def table(metrics):
+    lines = ["| | value | how | note |", "|---|---|---|---|"]
+    for name, shown in metrics.items():
+        lines.append(
+            f"| {name} | {cell(value_text(name, shown))} | {STATUS_TEXT[shown['status']]} | {cell(shown.get('note', ''))} |"
+        )
+    return lines
+
+
+def markdown_lines(analytics):
+    """The analytics as Markdown, apart from the rest of the report: each
+    metric with how it was come by, an unavailable one named as such."""
+    lines = [
+        "## Analytics V1",
+        "",
+        "New in report_version 4, and apart from the sections above. Each metric says how it was come by: "
+        "*direct*, a field the telemetry holds; *derived*, worked out from such fields; *historically limited*, "
+        "derived but a floor, as older builds cannot show it all; *unavailable*, what the telemetry cannot say. "
+        f"An install is a laptop's copy of Ella, never a person. Groups of fewer than {MIN_INSTALLS} installs "
+        f"are counted together as `{SMALL}`; fewer than {MIN_N} measurements are too few to stand for the fleet.",
+    ]
+    for section in SECTIONS:
+        lines += ["", f"### {TITLES[section]}", ""]
+        part = analytics[section]
+        if section == "reliability":
+            for group, metrics in part.items():
+                lines += [f"**{group.capitalize()}**", ""] + table(metrics) + [""]
+            lines.pop()
+        else:
+            lines += table(part)
+    return lines

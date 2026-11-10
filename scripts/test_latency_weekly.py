@@ -290,8 +290,95 @@ class Reporting(unittest.TestCase):
             self.assertIn("▲", text)
             saved = json.loads((tmp / "out" / "2026-W43.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["previous_week"], "2026-W42")
-            self.assertEqual(saved["report_version"], 3)
+            self.assertEqual(saved["report_version"], 4)
             self.assertEqual(saved["this"]["latency"]["wait_ms"]["p50"], 1400)
+
+
+class AnalyticsInTheReport(unittest.TestCase):
+    """report_version 4: Analytics V1 under its own key and section, every
+    other key and line as in 3."""
+
+    NOW = weekly.datetime(2026, 10, 27, 6, 0, tzinfo=weekly.timezone.utc)
+    V3_KEYS = [
+        "report_version", "week", "week_start", "week_end", "timezone", "previous_week", "generated_at",
+        "tools_ref", "data_through", "thresholds", "this", "previous", "late_events_previous_week", "flags",
+        "notes", "collection",
+    ]
+
+    def events(self):
+        return week_of_turns("2026-10-13", 30, 1000) + week_of_turns("2026-10-20", 30, 1500, talk="free") + [
+            turn("2026-10-20T07:00:00Z", status="error", error="NO_SPEECH_DETECTED: x"),
+        ]
+
+    def build(self, events=None, ledger=None):
+        return weekly.build(self.events() if events is None else events, "2026-W43", now=self.NOW, ledger=ledger)
+
+    def test_the_analytics_are_one_key_after_the_rest(self):
+        report = self.build()
+        self.assertEqual(report["report_version"], 4)
+        self.assertEqual(list(report), self.V3_KEYS + ["analytics"])
+        self.assertEqual(
+            list(report["analytics"]), ["usage", "talk_lifecycle", "latency", "reliability", "platform"]
+        )
+
+    def test_every_other_key_is_as_it_was(self):
+        report = self.build()
+        before = {key: value for key, value in report.items() if key != "analytics"}
+        # What build gave before the analytics: summarize, flags and notes as they are.
+        this = weekly.summarize([e for e in self.events() if sanitize.week_of(e) == "2026-W43"])
+        self.assertEqual(before["this"], this)
+        self.assertEqual(before["flags"], weekly.flags_of(this, before["previous"]))
+
+    def test_the_markdown_above_the_analytics_is_unchanged(self):
+        report = self.build()
+        text = weekly.markdown(report)
+        without = weekly.markdown({**report, "analytics": None})
+        self.assertTrue(text.startswith(without.rstrip("\n")))
+        self.assertNotIn("## Analytics V1", without)
+        self.assertIn("\n## Analytics V1\n", text)
+        self.assertGreater(text.index("## Analytics V1"), text.index("## Collection"))
+
+    def test_unavailable_and_limited_metrics_are_named_never_zero(self):
+        text = weekly.markdown(self.build())
+        self.assertIn("| completion_rate | unavailable | **unavailable** |", text)
+        self.assertIn("| left | 0 | **historically limited** |", text)
+        self.assertNotIn("| completion_rate | 0", text)
+
+    def test_too_few_measurements_are_said_to_be_too_few(self):
+        events = self.events() + [
+            {"event": "ella_engine", "schema_version": 2, "timestamp": "2026-10-20T05:00:00Z", "app_version": "0.1.25",
+             "launch_id": LAUNCH, "since_launch_ms": 9000, "llm_server": "started"},
+        ]
+        text = weekly.markdown(self.build(events))
+        self.assertIn("| cold_start_ms_started | n=1, too few to stand for the fleet |", text)
+
+    def test_collection_is_shown_once(self):
+        report = self.build(ledger=[])
+        self.assertEqual(
+            {k: v["value"] for k, v in report["analytics"]["reliability"]["collection"].items()},
+            {"reported_in": "collection"},
+        )
+        text = weekly.markdown(report)
+        self.assertEqual(text.count("## Collection"), 1)
+
+    def test_a_fixed_time_gives_the_same_report(self):
+        events = self.events()
+        first, second = self.build(events), self.build(list(reversed(events)))
+        self.assertEqual(json.dumps(first), json.dumps(second))
+        self.assertEqual(weekly.markdown(first), weekly.markdown(second))
+
+    def test_the_analytics_read_a_raw_log_as_it_would_leave(self):
+        report = self.build([turn("2026-10-20T06:00:00Z", transcript="my name is Asha")])
+        reading = {k: v["value"] for k, v in report["analytics"]["reliability"]["reading"].items()}
+        self.assertEqual(reading["unknown_fields_dropped"], 1)
+        text = json.dumps(report["analytics"]) + weekly.markdown(report)
+        self.assertNotIn("Asha", text)
+        self.assertNotIn(LAUNCH, json.dumps(report["analytics"]))
+
+    def test_nothing_this_week_is_an_empty_report_not_a_crash(self):
+        report = self.build([])
+        self.assertEqual(report["analytics"]["usage"]["turns"]["value"], 0)
+        self.assertIn("## Analytics V1", weekly.markdown(report))
 
 
 if __name__ == "__main__":

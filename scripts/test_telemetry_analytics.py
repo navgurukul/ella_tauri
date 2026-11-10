@@ -663,15 +663,18 @@ class Platform(unittest.TestCase):
     def platform(self, week_events, all_events=()):
         return {k: v["value"] for k, v in analytics.analyse(week_events, all_events)["platform"].items()}
 
-    def fleet(self, n_mac=3, n_windows=2, turns_each=12):
+    def fleet(self, n_mac=3, n_windows=1, n_linux=1, turns_each=12):
+        """Macs, then one Windows laptop and one Linux one by default: two
+        small groups, neither of which can be told from the rest."""
+        kinds = ["mac"] * n_mac + ["windows"] * n_windows + ["linux"] * n_linux
         events = []
-        for i, install in enumerate(INSTALLS[: n_mac + n_windows]):
-            windows = i >= n_mac
+        for i, (install, kind) in enumerate(zip(INSTALLS, kinds)):
             events.append(launch_line(
                 "2026-11-02T05:00:00Z", install,
-                os="Windows 11 build 26200.9711 (25H2)" if windows else "macOS 26.6.2",
-                cpu="11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz" if windows else "Apple M1 Pro",
-                arch="x86_64" if windows else "aarch64",
+                os={"mac": "macOS 26.6.2", "windows": "Windows 11 build 26200.9711 (25H2)", "linux": "Linux 6.8"}[kind],
+                cpu={"mac": "Apple M1 Pro", "windows": "11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz",
+                     "linux": "AMD Ryzen 5 5500U"}[kind],
+                arch="aarch64" if kind == "mac" else "x86_64",
             ))
             events += [laptop_turn(f"2026-11-02T06:{t:02d}:{i:02d}Z", install, 1000 + 100 * t) for t in range(turns_each)]
         return events
@@ -698,25 +701,25 @@ class Platform(unittest.TestCase):
             self.assertNotIn(written, text)
 
     def test_a_group_of_fewer_than_three_installs_is_folded_not_dropped(self):
-        shown = self.platform(self.fleet(n_mac=3, n_windows=2))
+        shown = self.platform(self.fleet())
         self.assertEqual(shown["installs_by_os_family"], {"macOS": 3, "small groups": 2})
         self.assertEqual(sum(shown["installs_by_os_family"].values()), 5, "every install is still counted")
         self.assertEqual(shown["installs_by_cpu_class"], {"Apple M-series": 3, "small groups": 2})
         self.assertEqual(shown["installs_by_install_place"], {"applications": 5})
 
     def test_a_groups_wait_is_shown_only_with_enough_installs_and_turns(self):
-        shown = self.platform(self.fleet(n_mac=3, n_windows=2, turns_each=12))
+        shown = self.platform(self.fleet(turns_each=12))
         by_os = shown["wait_ms_laptop_by_os_family"]
         self.assertEqual(list(by_os), ["macOS", "small groups"])
         self.assertEqual(by_os["macOS"]["count"], 36)
         self.assertTrue(by_os["macOS"]["sufficient"])
         self.assertEqual(by_os["small groups"]["count"], 24)
         self.assertNotIn("p50", by_os["small groups"])
-        few = self.platform(self.fleet(n_mac=3, n_windows=0, turns_each=5))["wait_ms_laptop_by_os_family"]
+        few = self.platform(self.fleet(n_windows=0, n_linux=0, turns_each=5))["wait_ms_laptop_by_os_family"]
         self.assertEqual(list(few), ["small groups"], "3 installs but 15 turns: too few")
 
     def test_only_turns_the_laptop_answered_are_timed_by_platform(self):
-        events = self.fleet(n_mac=3, n_windows=0)
+        events = self.fleet(n_windows=0, n_linux=0)
         events.append(clean("2026-11-02T07:00:00Z", install=INSTALLS[0], speech_ms=200,
                             llm_runs=[{"backend": "cloud", "ms": 300}]))
         self.assertEqual(self.platform(events)["wait_ms_laptop_by_os_family"]["macOS"]["count"], 36)
@@ -746,9 +749,28 @@ class Platform(unittest.TestCase):
         for i, install in enumerate(INSTALLS[:4]):
             events.append(clean(f"2026-11-02T06:00:0{i}Z", install=install, app_version="0.1.27"))
         events.append(clean("2026-11-02T07:00:00Z", install=INSTALLS[0], app_version="0.1.28"))
+        events.append(clean("2026-11-02T07:01:00Z", install=INSTALLS[1], app_version="0.1.29"))
         shown = self.platform(events)
-        self.assertEqual(shown["installs_by_app_version"], {"0.1.27": 4, "small groups": 1})
-        self.assertEqual(shown["turns_by_app_version"], {"0.1.27": 4, "small groups": 1})
+        self.assertEqual(shown["installs_by_app_version"], {"0.1.27": 4, "small groups": 2})
+        self.assertEqual(shown["turns_by_app_version"], {"0.1.27": 4, "small groups": 2})
+
+    def test_one_small_group_alone_is_never_left_to_be_told_from_the_rest(self):
+        # 3 x86_64 laptops and 1 aarch64: `x86_64: 3, small groups: 1` would name it.
+        events = self.fleet(n_mac=1, n_windows=3, n_linux=0)
+        shown = self.platform(events)
+        self.assertEqual(shown["installs_by_arch"], {"small groups": 4})
+        self.assertEqual(shown["installs_by_os_family"], {"small groups": 4})
+        by_os = shown["wait_ms_laptop_by_os_family"]
+        self.assertEqual(list(by_os), ["small groups"])
+        self.assertEqual(by_os["small groups"]["count"], 48, "every turn is still counted")
+        two = self.platform(self.fleet(n_mac=3, n_windows=1, n_linux=1))
+        self.assertEqual(two["installs_by_os_family"], {"macOS": 3, "small groups": 2})
+
+    def test_the_rule_on_its_own(self):
+        self.assertEqual(analytics.shown_groups({"a": True, "b": False}), set())
+        self.assertEqual(analytics.shown_groups({"a": True, "b": False, "c": False}), {"a"})
+        self.assertEqual(analytics.shown_groups({"a": True, "b": True}), {"a", "b"})
+        self.assertEqual(analytics.shown_groups({"a": False}), set())
 
     def test_no_install_is_named_and_order_is_fixed(self):
         events = self.fleet()

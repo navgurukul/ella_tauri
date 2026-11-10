@@ -23,6 +23,12 @@ With --ledger, the batch record ingest keeps (scripts/telemetry-health.py),
 the report says how collection went: batches by the week they were received,
 gaps, drops, delivery, and flags of their own.
 
+Analytics V1 (scripts/telemetry-analytics.py) follows, under the JSON's
+`analytics` key and a section of its own: usage, how talks ended, latency,
+reliability and platform, each metric saying how it was come by. It reads
+the same events through the telemetry policy again, and leaves every other
+key as it was.
+
 With --out, writes <week>.md and <week>.json there. Given the folder of past
 reports (--reports, by default --out), the report says how many of last
 week's events arrived after last week's report was written.
@@ -47,11 +53,13 @@ def _sibling(name, module):
 
 sanitize = _sibling("latency-sanitize.py", "latency_sanitize")
 health = _sibling("telemetry-health.py", "telemetry_health")
+analytics = _sibling("telemetry-analytics.py", "telemetry_analytics")
 pct = sanitize.report.pct
 by_cloud = sanitize.report.by_cloud
 IST = sanitize.IST
 
-REPORT_VERSION = 3
+# 4: `analytics` added; every other key as in 3.
+REPORT_VERSION = 4
 
 # What a week must hold, and how far it must move, to be flagged.
 MIN_N = 30
@@ -281,6 +289,7 @@ def build(events, week, previous_report=None, tools_ref=None, now=None, ledger=N
     if previous_report:
         late = last["volume"]["events"] - previous_report["this"]["volume"]["events"]
     stamps = [(sanitize.when(e), e["timestamp"]) for e in events if sanitize.when(e)]
+    clean, reading = analytics.read(events)
     return {
         "report_version": REPORT_VERSION,
         "week": week,
@@ -300,6 +309,9 @@ def build(events, week, previous_report=None, tools_ref=None, now=None, ledger=N
         "flags": flags_of(this, last),
         "notes": notes_of(this, last, late if late and late > 0 else 0),
         "collection": None if ledger is None else health.summary(ledger, week),
+        "analytics": analytics.analyse(
+            [e for e in clean if sanitize.week_of(e) == week], clean, ledger, week, reading, collection_in_report=True
+        ),
     }
 
 
@@ -411,6 +423,8 @@ def markdown(report):
         "Percentiles are nearest-rank.",
     ]
     lines += [""] + health.markdown_lines(collection)[:-1]
+    if report.get("analytics"):
+        lines += [""] + analytics.markdown_lines(report["analytics"])
     return "\n".join(lines) + "\n"
 
 
