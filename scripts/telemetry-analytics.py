@@ -338,6 +338,81 @@ def talk_lifecycle(week_events, all_events=(), since=TALK_LEFT_SINCE):
     return shown
 
 
+ENGINE = "ella_engine"
+UPDATE = "ella_update"
+
+
+def measured(rows, field):
+    """A distribution of `field` over `rows`, and `of`, how many rows there
+    were: a row without the field is not measured, and none is guessed."""
+    get = field if callable(field) else (lambda event: event.get(field))
+    return {**distribution(get(event) for event in rows), "of": len(rows)}
+
+
+def warm_up_ms(event):
+    warm = event.get("warm_up")
+    return warm.get("ms") if isinstance(warm, dict) else None
+
+
+def latency(week_events):
+    """How long things took, by the rules the weekly report's own latency
+    keeps: turns that are voice, succeeded, and are not Word of the day
+    (whose turns are the app's own lines or a short cloud answer); recaps
+    that succeeded, Word of the day's left out; engines that came up without
+    an error. Each is the field the app measured (`direct`), or the same
+    split by who answered or how the engine came up (`derived`). The wait is
+    `speech_ms` only: a turn without it is not measured, never taken from
+    its total."""
+    is_word, by_cloud = sanitize.report.is_word, sanitize.report.by_cloud
+    turns = [
+        e
+        for e in week_events
+        if e.get("event") == TURN and not is_word(e) and e.get("kind", "voice") == "voice" and e.get("status") == "ok"
+    ]
+    cloud = [e for e in turns if by_cloud(e)]
+    laptop = [e for e in turns if not by_cloud(e)]
+    recaps = [e for e in week_events if e.get("event") == RECAP and not is_word(e) and e.get("status") == "ok"]
+    engines = [e for e in week_events if e.get("event") == ENGINE and not e.get("error") and not e.get("error_code")]
+    started = [e for e in engines if e.get("llm_server") == "started"]
+    updates = {}
+    for event in week_events:
+        if event.get("event") == UPDATE and isinstance(event.get("step"), str):
+            updates.setdefault(event["step"], []).append(event)
+
+    split_cloud = "answered by the cloud: the reply the learner heard was the cloud's"
+    split_laptop = "answered on the laptop: its own model, or the app's own line"
+    return {
+        "turns": metric(len(turns), DIRECT, "voice turns that succeeded, Word of the day left out"),
+        "wait_ms": metric(measured(turns, "speech_ms"), DIRECT, "learner stops → Ella speaks"),
+        "wait_ms_laptop": metric(measured(laptop, "speech_ms"), DERIVED, split_laptop),
+        "wait_ms_cloud": metric(measured(cloud, "speech_ms"), DERIVED, split_cloud),
+        "total_ms": metric(measured(turns, "total_ms"), DIRECT, "the whole turn"),
+        "total_ms_laptop": metric(measured(laptop, "total_ms"), DERIVED, split_laptop),
+        "total_ms_cloud": metric(measured(cloud, "total_ms"), DERIVED, split_cloud),
+        "stt_ms": metric(measured(turns, "stt_ms"), DIRECT, "speech to text"),
+        "llm_ttft_ms": metric(measured(turns, "llm_ttft_ms"), DIRECT, "the language model's first token"),
+        "llm_completion_ms": metric(measured(turns, "llm_completion_ms"), DIRECT, "the language model's whole reply"),
+        "tts_first_audio_ms": metric(
+            measured(turns, "tts_first_audio_ms"), DIRECT, "text to speech's first audio; builds that keep it"
+        ),
+        "warm_up_ms": metric(
+            measured(turns, warm_up_ms),
+            DIRECT,
+            "setting up a talk: its instructions into the model, reported by the first reply after",
+        ),
+        "recap_total_ms": metric(measured(recaps, "total_ms"), DIRECT, "recaps that succeeded"),
+        "cold_start_ms": metric(measured(engines, "since_launch_ms"), DIRECT, "launch → engines ready"),
+        "cold_start_ms_started": metric(
+            measured(started, "since_launch_ms"),
+            DERIVED,
+            "launches where Ella started its own model server; one it found running (`external`) loaded nothing",
+        ),
+        "update_ms_by_step": metric(
+            {step: measured(rows, "ms") for step, rows in sorted(updates.items())}, DERIVED, "the updater, by step"
+        ),
+    }
+
+
 def analyse(week_events, all_events=(), ledger=None, week=None):
     """The week's analytics, a section each, in `SECTIONS` order.
     `week_events` are the week's sanitized events; `all_events` every event
@@ -346,4 +421,5 @@ def analyse(week_events, all_events=(), ledger=None, week=None):
     shown = {section: {} for section in SECTIONS}
     shown["usage"] = usage(week_events, all_events, week)
     shown["talk_lifecycle"] = talk_lifecycle(week_events, all_events)
+    shown["latency"] = latency(week_events)
     return shown

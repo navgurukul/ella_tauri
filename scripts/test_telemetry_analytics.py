@@ -333,7 +333,7 @@ class Usage(unittest.TestCase):
 
 
 def recap(at, talk, **extra):
-    return clean(at, event="ella_assessment", talk=talk, talk_type=None, kind="talk", **extra)
+    return clean(at, event="ella_assessment", talk=talk, talk_type=None, **{"kind": "talk", **extra})
 
 
 class TalkLifecycle(unittest.TestCase):
@@ -418,6 +418,117 @@ class TalkLifecycle(unittest.TestCase):
         shown = json.dumps(self.lifecycle(events))
         self.assertNotIn("Asha", shown)
         self.assertNotIn(sanitize.short_hash("Asha's talk"), shown)
+
+
+def engine(at, since, server="started", **extra):
+    return clean(at, event="ella_engine", talk=None, talk_type=None, since_launch_ms=since, llm_server=server, **extra)
+
+
+def cloud_runs():
+    return [{"backend": "cloud", "ttft_ms": 300, "ms": 600}]
+
+
+class Latency(unittest.TestCase):
+    def latency(self, events):
+        return analytics.analyse(events)["latency"]
+
+    def test_nothing_measured_is_a_count_of_zero(self):
+        shown = self.latency([])
+        self.assertEqual(shown["turns"]["value"], 0)
+        self.assertEqual(shown["wait_ms"]["value"], {"count": 0, "p50": None, "p75": None, "p95": None, "excluded": 0, "of": 0})
+        self.assertEqual(shown["update_ms_by_step"]["value"], {})
+
+    def test_only_voice_turns_that_succeeded_are_timed_word_of_the_day_left_out(self):
+        events = [
+            clean("2026-11-02T06:00:00Z", speech_ms=900),
+            clean("2026-11-02T06:01:00Z", speech_ms=5000, status="error", error="NO_SPEECH_DETECTED: x"),
+            clean("2026-11-02T06:02:00Z", speech_ms=5000, kind="text"),
+            clean("2026-11-02T06:03:00Z", speech_ms=5000, talk_type="word"),
+        ]
+        shown = self.latency(events)
+        self.assertEqual(shown["turns"]["value"], 1)
+        self.assertEqual((shown["wait_ms"]["value"]["count"], shown["wait_ms"]["value"]["p50"]), (1, 900))
+
+    def test_a_missing_timing_is_not_measured_and_never_guessed(self):
+        events = [clean("2026-11-02T06:00:00Z", speech_ms=700), clean("2026-11-02T06:01:00Z", total_ms=4000)]
+        events[1].pop("speech_ms", None)
+        wait = self.latency(events)["wait_ms"]["value"]
+        self.assertEqual((wait["count"], wait["of"], wait["p50"]), (1, 2, 700), "the total is not taken for the wait")
+        tts = self.latency(events)["tts_first_audio_ms"]["value"]
+        self.assertEqual((tts["count"], tts["of"]), (0, 2))
+
+    def test_the_split_by_who_answered_is_the_weekly_reports(self):
+        events = [
+            clean("2026-11-02T06:00:00Z", speech_ms=500, total_ms=600, llm_runs=cloud_runs()),
+            clean("2026-11-02T06:01:00Z", speech_ms=4000, total_ms=4200),
+            clean("2026-11-02T06:02:00Z", speech_ms=6000, total_ms=6200),
+        ]
+        shown = self.latency(events)
+        self.assertEqual(shown["wait_ms_cloud"]["value"]["p50"], 500)
+        self.assertEqual(shown["wait_ms_laptop"]["value"]["count"], 2)
+        self.assertEqual(shown["total_ms_cloud"]["status"], analytics.DERIVED)
+        self.assertEqual(shown["total_ms"]["status"], analytics.DIRECT)
+        self.assertEqual(
+            shown["wait_ms_cloud"]["value"]["count"] + shown["wait_ms_laptop"]["value"]["count"],
+            shown["wait_ms"]["value"]["count"],
+        )
+
+    def test_each_stage_is_its_own_field(self):
+        event = clean(
+            "2026-11-02T06:00:00Z", stt_ms=120, llm_ttft_ms=800, llm_completion_ms=1500, tts_first_audio_ms=300,
+            warm_up={"began_ms_before": 9000, "ms": 4000, "evaluated_tokens": 1000},
+        )
+        shown = self.latency([event])
+        for name, value in (("stt_ms", 120), ("llm_ttft_ms", 800), ("llm_completion_ms", 1500),
+                            ("tts_first_audio_ms", 300), ("warm_up_ms", 4000)):
+            self.assertEqual(shown[name]["value"]["p50"], value, name)
+            self.assertEqual(shown[name]["status"], analytics.DIRECT, name)
+
+    def test_recaps_that_succeeded_are_timed_word_of_the_day_left_out(self):
+        events = [
+            recap("2026-11-02T06:00:00Z", "t1", total_ms=5000, status="ok"),
+            recap("2026-11-02T06:01:00Z", "t2", total_ms=9000, status="error", error="x"),
+            recap("2026-11-02T06:02:00Z", "t3", total_ms=100, status="ok", kind="word"),
+        ]
+        recap_ms = self.latency(events)["recap_total_ms"]["value"]
+        self.assertEqual((recap_ms["count"], recap_ms["p50"]), (1, 5000))
+
+    def test_cold_start_keeps_the_weekly_rule_and_shows_ellas_own_server_apart(self):
+        events = [
+            engine("2026-11-02T06:00:00Z", 15000),
+            engine("2026-11-02T07:00:00Z", 2000, server="external"),
+            engine("2026-11-02T08:00:00Z", 99000, error="llama-server did not start"),
+        ]
+        shown = self.latency(events)
+        self.assertEqual(shown["cold_start_ms"]["value"]["count"], 2, "an engine with an error is left out")
+        self.assertEqual(shown["cold_start_ms_started"]["value"]["count"], 1)
+        self.assertEqual(shown["cold_start_ms_started"]["value"]["p50"], 15000)
+
+    def test_update_steps_are_timed_apart(self):
+        events = [
+            clean(f"2026-11-02T06:0{i}:00Z", event="ella_update", talk=None, talk_type=None, step=step, ms=ms)
+            for i, (step, ms) in enumerate((("up_to_date", 900), ("up_to_date", 1100), ("check_failed", 70)))
+        ]
+        by_step = self.latency(events)["update_ms_by_step"]["value"]
+        self.assertEqual(list(by_step), ["check_failed", "up_to_date"])
+        self.assertEqual((by_step["up_to_date"]["count"], by_step["up_to_date"]["p50"]), (2, report.pct([900, 1100], 50)))
+
+    def test_it_agrees_with_the_weekly_report(self):
+        events = [
+            clean(f"2026-11-02T06:{i:02d}:00Z", speech_ms=100 * i + 50, total_ms=100 * i + 90,
+                  **({"llm_runs": cloud_runs()} if i % 3 == 0 else {}))
+            for i in range(40)
+        ] + [engine("2026-11-02T05:00:00Z", 12000), recap("2026-11-02T07:00:00Z", "t", total_ms=4000, status="ok")]
+        mine, theirs = self.latency(events), weekly.summarize(events)["latency"]
+        for key, old in (("wait_ms", "wait_ms"), ("wait_ms_laptop", "wait_ms_local"), ("wait_ms_cloud", "wait_ms_cloud"),
+                         ("total_ms", "total_ms"), ("recap_total_ms", "recap_total_ms"), ("cold_start_ms", "cold_start_ms")):
+            shown = mine[key]["value"]
+            self.assertEqual((shown["count"], shown["p50"], shown["p95"]),
+                             (theirs[old]["n"], theirs[old]["p50"], theirs[old]["p95"]), key)
+
+    def test_the_same_events_in_any_order_give_the_same_latency(self):
+        events = [clean(f"2026-11-02T06:{i:02d}:00Z", speech_ms=(i * 37) % 11 * 100) for i in range(20)]
+        self.assertEqual(json.dumps(self.latency(events)), json.dumps(self.latency(list(reversed(events)))))
 
 
 if __name__ == "__main__":
