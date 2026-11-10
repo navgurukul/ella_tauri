@@ -6,6 +6,7 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -529,6 +530,116 @@ class Latency(unittest.TestCase):
     def test_the_same_events_in_any_order_give_the_same_latency(self):
         events = [clean(f"2026-11-02T06:{i:02d}:00Z", speech_ms=(i * 37) % 11 * 100) for i in range(20)]
         self.assertEqual(json.dumps(self.latency(events)), json.dumps(self.latency(list(reversed(events)))))
+
+
+health_tests = load("test_telemetry_health.py", "test_telemetry_health")
+
+
+class Reliability(unittest.TestCase):
+    def reliability(self, week_events, all_events=(), ledger=None, week=None, reading=None):
+        return analytics.analyse(week_events, all_events, ledger, week, reading)["reliability"]
+
+    def app(self, *args):
+        return {k: v["value"] for k, v in self.reliability(*args)["app"].items()}
+
+    def test_the_sections_and_nothing_given_is_zero_or_unavailable(self):
+        shown = self.reliability([])
+        self.assertEqual(list(shown), ["app", "collection", "reading"])
+        self.assertEqual(self.app([])["system_error_rate"], None)
+        self.assertEqual(shown["collection"]["batch_record"]["status"], analytics.UNAVAILABLE)
+        self.assertEqual(shown["reading"]["counts"]["status"], analytics.UNAVAILABLE)
+
+    def test_no_speech_is_counted_apart_from_system_errors(self):
+        events = [
+            clean("2026-11-02T06:00:00Z"),
+            clean("2026-11-02T06:01:00Z", status="error", error="NO_SPEECH_DETECTED: quiet", failed_at="stt"),
+            clean("2026-11-02T06:02:00Z", status="error", error="engine request failed", failed_at="llm:start"),
+            clean("2026-11-02T06:03:00Z", status="error", error="x", talk_type="word"),
+        ]
+        shown = self.app(events)
+        self.assertEqual((shown["turns"], shown["turn_errors"], shown["no_speech"], shown["system_errors"]), (3, 2, 1, 1))
+        self.assertEqual(shown["system_error_rate"], round(1 / 3, 4))
+        self.assertEqual(shown["system_errors_by_stage"], {"llm:start": 1})
+        self.assertNotIn("NO_SPEECH_DETECTED", shown["system_errors_by_code"])
+
+    def test_it_agrees_with_the_weekly_reports_volume(self):
+        events = [
+            clean("2026-11-02T06:00:00Z", llm_runs=[{"backend": "cloud", "failed": True}, {"ms": 600}]),
+            clean("2026-11-02T06:01:00Z", stt_fallback_from="canary"),
+            clean("2026-11-02T06:02:00Z", status="error", error="NO_SPEECH_DETECTED: x"),
+            clean("2026-11-02T06:03:00Z", status="error", error="boom", failed_at="tts"),
+            recap("2026-11-02T06:05:00Z", "talk-1", status="error", error="x", judges=[{"status": "error"}]),
+        ]
+        mine, theirs = self.app(events), weekly.summarize(events)["volume"]
+        for key, old in (("turns", "turns"), ("turn_errors", "errors"), ("no_speech", "no_speech"),
+                         ("system_errors", "system_errors"), ("system_error_rate", "system_error_rate"),
+                         ("cloud_failed_runs", "cloud_failed_runs"), ("stt_fallbacks", "stt_fallbacks"),
+                         ("recaps", "recaps"), ("recap_errors", "recap_errors"), ("failed_judges", "failed_judges")):
+            self.assertEqual(mine[key], theirs[old], key)
+
+    def test_a_fallback_or_the_cloud_down_is_no_error(self):
+        events = [
+            clean("2026-11-02T06:00:00Z", stt_fallback_from="canary"),
+            clean("2026-11-02T06:01:00Z", event="ella_cloud", talk=None, talk_type=None, up=False, reason="HTTP 503"),
+            clean("2026-11-02T06:02:00Z", event="ella_cloud", talk=None, talk_type=None, up=True),
+        ]
+        shown = self.app(events)
+        self.assertEqual((shown["stt_fallbacks"], shown["cloud_down"], shown["system_errors"]), (1, 1, 0))
+        self.assertEqual(shown["cloud_down_by_reason"], {"http_503": 1})
+
+    def test_engine_and_update_errors_are_counted(self):
+        events = [
+            engine("2026-11-02T06:00:00Z", 9000, server="failed", error="llama-server did not start"),
+            engine("2026-11-02T07:00:00Z", 9000),
+            clean("2026-11-02T08:00:00Z", event="ella_update", talk=None, talk_type=None, step="check_failed", error="x"),
+            clean("2026-11-02T08:01:00Z", event="ella_update", talk=None, talk_type=None, step="up_to_date"),
+        ]
+        shown = self.app(events)
+        self.assertEqual((shown["engine_errors"], shown["update_errors_by_step"]), (1, {"check_failed": 1}))
+
+    def test_a_recap_without_turns_is_a_collection_sign_not_a_talk(self):
+        week = [recap("2026-11-02T06:00:00Z", "lost-turns"), clean("2026-11-02T07:00:00Z", talk="t"),
+                recap("2026-11-02T07:05:00Z", "t"), recap("2026-11-02T08:00:00Z", "earlier")]
+        before = [clean("2026-10-28T06:00:00Z", talk="earlier")]
+        shown = self.reliability(week, before + week)["app"]["recap_only_talks"]
+        self.assertEqual((shown["value"], shown["status"]), (1, analytics.DERIVED))
+        self.assertIn("not counted in talk_lifecycle", shown["note"])
+        self.assertEqual(analytics.analyse(week, before + week)["talk_lifecycle"]["talks"]["value"], 1)
+
+    def test_collection_is_telemetry_healths_own_and_names_no_install(self):
+        record = health_tests.record
+        monday = health_tests.MONDAY
+        ledger = [
+            record(1, monday, dropped_event_count=2, dropped_total=2,
+                   dropped_by_reason={"queue_full": 2, "unreadable_line": 0, "write_failed": 0}),
+            record(3, monday + timedelta(days=1), dropped_total=2, send={"attempts": 4}),
+            record(1, monday, install=health_tests.OTHER_INSTALL, outcome="duplicate"),
+        ]
+        week = health_tests.WEEK
+        h = analytics.health.summary(ledger, week)
+        shown = self.reliability([], (), ledger, week)["collection"]
+        values = {k: v["value"] for k, v in shown.items()}
+        self.assertEqual(values["batches"], h["batches"])
+        self.assertEqual((values["dropped"], values["drop_rate"]), (h["loss"]["dropped"], h["loss"]["drop_rate"]))
+        self.assertEqual(values["sequence_gaps_pending"], len(h["sequence"]["pending_gaps"]))
+        self.assertEqual(values["sequence_gaps_pending"], 1)
+        self.assertEqual(values["upload_attempts"], h["delivery"]["attempts"])
+        self.assertEqual(values["flags"], [f["check"] for f in h["flags"]])
+        self.assertEqual(shown["dropped"]["status"], analytics.DIRECT)
+        self.assertEqual(shown["drop_rate"]["status"], analytics.DERIVED)
+        text = json.dumps(shown)
+        for install in (health_tests.INSTALL, health_tests.OTHER_INSTALL):
+            self.assertNotIn(install[:8], text)
+
+    def test_a_ledger_without_a_week_is_unavailable(self):
+        shown = self.reliability([], (), [], None)["collection"]
+        self.assertEqual(shown["batch_record"]["status"], analytics.UNAVAILABLE)
+
+    def test_what_reading_left_out_is_shown_as_read(self):
+        _, counts = analytics.read([3, {"event": "ella_debug", "timestamp": "2026-11-02T06:00:00Z"}])
+        shown = self.reliability([], reading=counts)["reading"]
+        self.assertEqual({k: v["value"] for k, v in shown.items()}, counts)
+        self.assertEqual((counts["unreadable"], counts["policy_excluded_count"]), (1, 1))
 
 
 if __name__ == "__main__":

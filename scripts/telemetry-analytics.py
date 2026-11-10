@@ -413,13 +413,155 @@ def latency(week_events):
     }
 
 
-def analyse(week_events, all_events=(), ledger=None, week=None):
+CLOUD = "ella_cloud"
+# The learner said nothing Ella could hear: counted apart, as the weekly
+# report counts it, never as a system error.
+NO_SPEECH = "NO_SPEECH_DETECTED"
+
+health = _sibling("telemetry-health.py", "telemetry_health")
+
+
+def error_code(event):
+    """The event's error, as the weekly report reads it: its code, or one
+    made from a raw log's text by the policy's own coder."""
+    return event.get("error_code") or sanitize.error_code(event.get("error"))
+
+
+def has_error(event):
+    return bool(event.get("error_code") or event.get("error"))
+
+
+def rate(part, whole):
+    return round(part / whole, 4) if whole else None
+
+
+def app_signals(week_events, all_events):
+    """What the app's own events say went wrong, or fell back, in the week.
+    A turn's error is a system error unless the learner said nothing
+    (NO_SPEECH_DETECTED), as in the weekly report; a fallback, or the cloud
+    being down, is what the app did about something, not an error of it."""
+    is_word = sanitize.report.is_word
+    turns = [e for e in week_events if e.get("event") == TURN and not is_word(e)]
+    errors = [e for e in turns if e.get("status") != "ok"]
+    no_speech = [e for e in errors if error_code(e) == NO_SPEECH]
+    system = [e for e in errors if error_code(e) != NO_SPEECH]
+    ok = [e for e in turns if e.get("status") == "ok"]
+    recaps = [e for e in week_events if e.get("event") == RECAP and not is_word(e)]
+    engines = [e for e in week_events if e.get("event") == ENGINE]
+    clouds = [e for e in week_events if e.get("event") == CLOUD]
+    updates = [e for e in week_events if e.get("event") == UPDATE]
+
+    # A recap whose talk has no turn among every event read: its turns held,
+    # lost, or from before the queue. Which, the telemetry cannot say, so it
+    # is a sign for collection, not a failure, and never a lifecycle talk.
+    turned = {e.get("talk_id") for e in (all_events or week_events) if e.get("event") == TURN}
+    recap_only = {
+        e["talk_id"] for e in recaps if isinstance(e.get("talk_id"), str) and e["talk_id"] not in turned
+    }
+
+    return {
+        "turns": metric(len(turns), DIRECT, "every turn but Word of the day's, as the weekly report counts"),
+        "turn_errors": metric(len(errors), DIRECT),
+        "no_speech": metric(len(no_speech), DIRECT, "the learner said nothing Ella could hear: no system error"),
+        "system_errors": metric(len(system), DIRECT, "turn errors other than no speech"),
+        "system_error_rate": metric(rate(len(system), len(turns)), DERIVED, "system errors over turns"),
+        "system_errors_by_stage": metric(
+            counted(Counter(e.get("failed_at") or "unknown" for e in system)), DIRECT, "where the turn failed"
+        ),
+        "system_errors_by_code": metric(counted(Counter(error_code(e) or "unknown" for e in system)), DIRECT),
+        "cloud_failed_runs": metric(
+            sum(1 for e in turns for run in e.get("llm_runs") or [] if run.get("backend") == "cloud" and run.get("failed")),
+            DIRECT,
+            "cloud generations that failed; the turn may still have been answered",
+        ),
+        "stt_fallbacks": metric(
+            sum(1 for e in ok if e.get("stt_fallback_from") or e.get("stt_engine") == "whisper-small"),
+            DIRECT,
+            "turns whose speech to text fell back to another engine: a fallback, not an error",
+        ),
+        "recaps": metric(len(recaps), DIRECT, "Word of the day's left out"),
+        "recap_errors": metric(sum(1 for e in recaps if e.get("status") != "ok"), DIRECT),
+        "failed_judges": metric(
+            sum(1 for e in recaps for judge in e.get("judges") or [] if judge.get("status") == "error"), DIRECT
+        ),
+        "recap_only_talks": metric(
+            len(recap_only),
+            DERIVED,
+            "recaps whose talk's turns are not among the events read: held, lost, or from before the queue; "
+            "a sign for collection, not counted in talk_lifecycle",
+        ),
+        "engine_errors": metric(sum(1 for e in engines if has_error(e)), DIRECT, "engines that came up with an error"),
+        "cloud_down": metric(
+            sum(1 for e in clouds if e.get("up") is False),
+            DIRECT,
+            "times the app found the cloud down and answered on the laptop instead",
+        ),
+        "cloud_down_by_reason": metric(
+            counted(Counter(e.get("reason_code") or "unknown" for e in clouds if e.get("up") is False)), DIRECT
+        ),
+        "update_errors_by_step": metric(
+            counted(Counter(e.get("step") or "unknown" for e in updates if has_error(e))), DIRECT
+        ),
+    }
+
+
+def collection(ledger, week):
+    """How collection went, as telemetry-health.py's own summary of the
+    batch record says it, in counts: nothing is worked out again here, and
+    no install is named."""
+    if ledger is None or not week:
+        why = "no batch record (--ledger) given" if ledger is None else "no week given"
+        return {"batch_record": unavailable(why)}
+    h = health.summary(ledger, week)
+    seq, loss, delivery = h["sequence"], h["loss"], h["delivery"]
+    of_record = "the batch record, as telemetry-health reads it"
+    return {
+        "batches": metric(h["batches"], DIRECT, f"batch files received this week, by outcome; {of_record}"),
+        "installs_reporting": metric(h["installs"]["reporting"], DIRECT),
+        "installs_silent": metric(len(h["installs"]["silent"]), DERIVED, "sent in the 28 days before, not this week"),
+        "events_received": metric(h["events_received"], DIRECT),
+        "dropped": metric(loss["dropped"], DIRECT, "events the app dropped before sending, as it counted them"),
+        "dropped_by_reason": metric(loss["dropped_by_reason"], DIRECT),
+        "drop_rate": metric(loss["drop_rate"], DERIVED, "dropped over the app's events received"),
+        "log_resets": metric(loss["log_resets"], DIRECT),
+        "sequence_gaps_pending": metric(
+            len(seq["pending_gaps"]), DERIVED, "seqs not yet received, seen missing less than 7 days ago"
+        ),
+        "sequence_gaps_lost_this_week": metric(
+            len(seq["lost_this_week"]), DERIVED, "gaps open 7 days, taken as lost: probably, not surely"
+        ),
+        "sequence_gaps_lost_total": metric(seq["lost_total"], DERIVED),
+        "sequence_conflicts": metric(len(seq["conflicts"]), DIRECT),
+        "upload_attempts": metric(delivery["attempts"], DIRECT, "the app's batches, by tries to send"),
+        "delivery_delay_ms": metric(delivery["delay_ms"], DERIVED, "a batch's last event → received"),
+        "backlog_after_events_max": metric(delivery["backlog_after_events_max"], DIRECT, "events still queued"),
+        "clock_suspect": metric(len(delivery["clock_suspect"]), DERIVED),
+        "flags": metric([flag["check"] for flag in h["flags"]], DERIVED, "telemetry-health's own flags"),
+    }
+
+
+def reliability(week_events, all_events=(), ledger=None, week=None, reading=None):
+    """How reliably Ella ran and its telemetry came in: `app`, what the
+    app's events say; `collection`, what the batch record says; `reading`,
+    what reading the events left out, when given."""
+    shown = {"app": app_signals(week_events, all_events), "collection": collection(ledger, week)}
+    shown["reading"] = (
+        {name: metric(value, DIRECT) for name, value in reading.items()}
+        if reading is not None
+        else {"counts": unavailable("not given")}
+    )
+    return shown
+
+
+def analyse(week_events, all_events=(), ledger=None, week=None, reading=None):
     """The week's analytics, a section each, in `SECTIONS` order.
     `week_events` are the week's sanitized events; `all_events` every event
     read, for what came before the week (an install's first day); `ledger`
-    the batch record, for collection, when given."""
+    the batch record, for collection, when given; `reading` the counts
+    `read` gave."""
     shown = {section: {} for section in SECTIONS}
     shown["usage"] = usage(week_events, all_events, week)
     shown["talk_lifecycle"] = talk_lifecycle(week_events, all_events)
     shown["latency"] = latency(week_events)
+    shown["reliability"] = reliability(week_events, all_events, ledger, week, reading)
     return shown
