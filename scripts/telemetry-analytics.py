@@ -342,11 +342,20 @@ ENGINE = "ella_engine"
 UPDATE = "ella_update"
 
 
+# Fewer measurements than this are too few to stand for the fleet: as the
+# weekly report's MIN_N, below which it flags nothing.
+MIN_N = 30
+
+
 def measured(rows, field):
-    """A distribution of `field` over `rows`, and `of`, how many rows there
-    were: a row without the field is not measured, and none is guessed."""
+    """A distribution of `field` over `rows`; `of`, how many rows there
+    were (a row without the field is not measured, and none is guessed);
+    and `sufficient`, whether there are MIN_N measurements or more, short
+    of which the numbers are shown but stand for nothing wider."""
     get = field if callable(field) else (lambda event: event.get(field))
-    return {**distribution(get(event) for event in rows), "of": len(rows)}
+    shown = {**distribution(get(event) for event in rows), "of": len(rows)}
+    shown["sufficient"] = shown["count"] >= MIN_N
+    return shown
 
 
 def warm_up_ms(event):
@@ -405,7 +414,8 @@ def latency(week_events):
         "cold_start_ms_started": metric(
             measured(started, "since_launch_ms"),
             DERIVED,
-            "launches where Ella started its own model server; one it found running (`external`) loaded nothing",
+            "launches where Ella started its own model server; one it found running (`external`) loaded nothing"
+            + ("" if len(started) >= MIN_N else f"; {len(started)} launches: too few to stand for the fleet"),
         ),
         "update_ms_by_step": metric(
             {step: measured(rows, "ms") for step, rows in sorted(updates.items())}, DERIVED, "the updater, by step"
@@ -553,6 +563,191 @@ def reliability(week_events, all_events=(), ledger=None, week=None, reading=None
     return shown
 
 
+# A group of fewer installs than this is never shown by itself: it could
+# stand for one laptop. Its observations are kept, in SMALL.
+MIN_INSTALLS = 3
+SMALL = "small groups"
+
+
+def os_family(text):
+    """Windows, macOS or Linux: never the version or build."""
+    first = text.split(" ", 1)[0] if isinstance(text, str) else ""
+    return first if first in ("Windows", "macOS", "Linux") else (UNKNOWN if not text else "other")
+
+
+def cpu_class(text):
+    """The CPU's family, never its model number or speed."""
+    text = text if isinstance(text, str) else ""
+    if "Apple M" in text:
+        return "Apple M-series"
+    if "Core Ultra" in text:
+        return "Intel Core Ultra"
+    for tier in ("i3", "i5", "i7", "i9"):
+        if f"Core(TM) {tier}" in text or f"Core {tier}" in text:
+            return f"Intel Core {tier}"
+    for tier in ("3", "5", "7", "9"):
+        if f"Ryzen {tier}" in text:
+            return f"AMD Ryzen {tier}"
+    if "Celeron" in text or "Pentium" in text:
+        return "Intel Celeron/Pentium"
+    return "other" if text and text != sanitize.OTHER else UNKNOWN
+
+
+def ram_band(mb):
+    if not usable(mb) or mb == 0:
+        return UNKNOWN
+    gb = mb / 1024
+    if gb <= 8.5:
+        return "up to 8 GB"
+    if gb <= 16.5:
+        return "8–16 GB"
+    if gb <= 32.5:
+        return "16–32 GB"
+    return "over 32 GB"
+
+
+def arch_of(text):
+    return text if text in ("aarch64", "x86_64") else (UNKNOWN if not text else "other")
+
+
+def place_of(line):
+    install = line.get("install")
+    place = install.get("place") if isinstance(install, dict) else None
+    return place if isinstance(place, str) and place and place != sanitize.OTHER else UNKNOWN
+
+
+# What a launch line says of its laptop, each as a class, never as written.
+TRAITS = {
+    "os_family": lambda line: os_family(line.get("os")),
+    "arch": lambda line: arch_of(line.get("arch")),
+    "cpu_class": lambda line: cpu_class(line.get("cpu")),
+    "ram_band": lambda line: ram_band(line.get("ram_mb")),
+    "install_place": place_of,
+}
+
+
+def profiles(week_events, all_events):
+    """Each launch's line, by launch; and each install's, its newest line
+    from before its last event of the week: what the laptop was then."""
+    lines = [e for e in (all_events or week_events) if e.get("event") == LAUNCH and sanitize.safe_when(e)]
+    lines.sort(key=lambda e: (sanitize.safe_when(e), e.get("event_id") or ""))
+    by_launch = {e["launch"]: e for e in lines if e.get("launch")}
+    last = {}
+    for event in week_events:
+        install, at = event.get("install_id"), sanitize.safe_when(event)
+        if install and at is not None and (install not in last or at > last[install]):
+            last[install] = at
+    by_install = {}
+    for line in lines:
+        install = line.get("install_id")
+        if install in last and sanitize.safe_when(line) <= last[install]:
+            by_install[install] = line
+    return by_launch, by_install
+
+
+def small_counts(installs_by_group):
+    """{group: installs}, a group of fewer than MIN_INSTALLS folded into
+    SMALL, so the whole still adds up and no laptop stands alone."""
+    shown, small = Counter(), 0
+    for group, installs in installs_by_group.items():
+        if len(installs) >= MIN_INSTALLS:
+            shown[group] = len(installs)
+        else:
+            small += len(installs)
+    shown = counted(shown)
+    if small:
+        shown[SMALL] = small
+    return shown
+
+
+def small_distributions(rows_by_group, field):
+    """{group: distribution}, shown only for a group of MIN_INSTALLS
+    installs or more with MIN_N measurements or more; the rest are counted
+    together in SMALL, their percentiles withheld."""
+    shown, small = {}, 0
+    for group in sorted(rows_by_group, key=str):
+        rows = rows_by_group[group]
+        spread = measured(rows, field)
+        installs = {e.get("install_id") for e in rows} - {None}
+        if len(installs) >= MIN_INSTALLS and spread["sufficient"]:
+            shown[group] = spread
+        else:
+            small += spread["count"]
+    if small:
+        shown[SMALL] = {"count": small, "withheld": f"groups of fewer than {MIN_INSTALLS} installs or {MIN_N} measurements"}
+    return shown
+
+
+def platform(week_events, all_events=()):
+    """What Ella ran on, and how fast the laptop answered on each: the
+    week's installs by the classes of their newest launch line and by the
+    versions they ran, turns by version, and the wait of the turns the
+    laptop answered (only they say how fast it is) by each. A launch line
+    names its laptop's CPU, OS and memory as written; only their classes
+    are shown, and no group of fewer than MIN_INSTALLS installs."""
+    by_launch, by_install = profiles(week_events, all_events)
+    installs = {e["install_id"] for e in week_events if e.get("install_id")}
+    note = f"by the install's newest launch line; groups of fewer than {MIN_INSTALLS} installs in `{SMALL}`"
+
+    shown = {}
+    for trait, of in TRAITS.items():
+        groups = {}
+        for install in sorted(installs):
+            line = by_install.get(install)
+            groups.setdefault(of(line) if line else UNKNOWN, set()).add(install)
+        shown[f"installs_by_{trait}"] = metric(small_counts(groups), DERIVED, note)
+
+    versions = {}
+    for event in week_events:
+        if event.get("install_id"):
+            versions.setdefault(event.get("app_version") or UNKNOWN, set()).add(event["install_id"])
+    shown["installs_by_app_version"] = metric(
+        small_counts(versions), DERIVED, f"an install counted in each version it ran; small groups in `{SMALL}`"
+    )
+
+    is_word, by_cloud = sanitize.report.is_word, sanitize.report.by_cloud
+    turns = [e for e in week_events if e.get("event") == TURN]
+    turn_versions = {}
+    for event in turns:
+        turn_versions.setdefault(event.get("app_version") or UNKNOWN, []).append(event)
+    turns_by_version = Counter()
+    small_turns = 0
+    for version, rows in turn_versions.items():
+        if len({e.get("install_id") for e in rows} - {None}) >= MIN_INSTALLS:
+            turns_by_version[version] = len(rows)
+        else:
+            small_turns += len(rows)
+    turns_by_version = counted(turns_by_version)
+    if small_turns:
+        turns_by_version[SMALL] = small_turns
+    shown["turns_by_app_version"] = metric(turns_by_version, DIRECT, f"every turn; small groups in `{SMALL}`")
+
+    laptop = [
+        e
+        for e in turns
+        if not is_word(e) and e.get("kind", "voice") == "voice" and e.get("status") == "ok" and not by_cloud(e)
+    ]
+
+    def line_of(event):
+        return by_launch.get(event.get("launch")) or by_install.get(event.get("install_id"))
+
+    wait_note = (
+        f"answered on the laptop; shown for groups of {MIN_INSTALLS}+ installs and {MIN_N}+ turns, "
+        f"the rest in `{SMALL}`"
+    )
+    for trait in ("os_family", "cpu_class", "ram_band"):
+        groups = {}
+        for event in laptop:
+            line = line_of(event)
+            groups.setdefault(TRAITS[trait](line) if line else UNKNOWN, []).append(event)
+        shown[f"wait_ms_laptop_by_{trait}"] = metric(small_distributions(groups, "speech_ms"), DERIVED, wait_note)
+    groups = {}
+    for event in laptop:
+        groups.setdefault(event.get("app_version") or UNKNOWN, []).append(event)
+    shown["wait_ms_laptop_by_app_version"] = metric(small_distributions(groups, "speech_ms"), DERIVED, wait_note)
+    return shown
+
+
 def analyse(week_events, all_events=(), ledger=None, week=None, reading=None):
     """The week's analytics, a section each, in `SECTIONS` order.
     `week_events` are the week's sanitized events; `all_events` every event
@@ -564,4 +759,5 @@ def analyse(week_events, all_events=(), ledger=None, week=None, reading=None):
     shown["talk_lifecycle"] = talk_lifecycle(week_events, all_events)
     shown["latency"] = latency(week_events)
     shown["reliability"] = reliability(week_events, all_events, ledger, week, reading)
+    shown["platform"] = platform(week_events, all_events)
     return shown

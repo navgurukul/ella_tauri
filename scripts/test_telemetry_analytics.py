@@ -436,7 +436,7 @@ class Latency(unittest.TestCase):
     def test_nothing_measured_is_a_count_of_zero(self):
         shown = self.latency([])
         self.assertEqual(shown["turns"]["value"], 0)
-        self.assertEqual(shown["wait_ms"]["value"], {"count": 0, "p50": None, "p75": None, "p95": None, "excluded": 0, "of": 0})
+        self.assertEqual(shown["wait_ms"]["value"], {"count": 0, "p50": None, "p75": None, "p95": None, "excluded": 0, "of": 0, "sufficient": False})
         self.assertEqual(shown["update_ms_by_step"]["value"], {})
 
     def test_only_voice_turns_that_succeeded_are_timed_word_of_the_day_left_out(self):
@@ -640,6 +640,129 @@ class Reliability(unittest.TestCase):
         shown = self.reliability([], reading=counts)["reading"]
         self.assertEqual({k: v["value"] for k, v in shown.items()}, counts)
         self.assertEqual((counts["unreadable"], counts["policy_excluded_count"]), (1, 1))
+
+
+def launch_line(at, install, os="macOS 26.6.2", cpu="Apple M1 Pro", ram_mb=16384, arch="aarch64", place="applications",
+                launch=None):
+    raw = {
+        "event": "ella_launch", "schema_version": 2, "timestamp": at, "app_version": "0.1.27",
+        "launch_id": launch or f"launch-{install}", "os": os, "arch": arch, "cpu": cpu, "ram_mb": ram_mb,
+        "cores_physical": 8, "cores_logical": 8, "install": {"bundle": "app", "place": place, "also_at": []},
+    }
+    return analytics.read([{**raw, "install_id": install}])[0][0]
+
+
+def laptop_turn(at, install, speech_ms, launch=None, version="0.1.27"):
+    return clean(at, install=install, speech_ms=speech_ms, launch_id=launch or f"launch-{install}", app_version=version)
+
+
+INSTALLS = [c * 16 for c in "abcdef"]
+
+
+class Platform(unittest.TestCase):
+    def platform(self, week_events, all_events=()):
+        return {k: v["value"] for k, v in analytics.analyse(week_events, all_events)["platform"].items()}
+
+    def fleet(self, n_mac=3, n_windows=2, turns_each=12):
+        events = []
+        for i, install in enumerate(INSTALLS[: n_mac + n_windows]):
+            windows = i >= n_mac
+            events.append(launch_line(
+                "2026-11-02T05:00:00Z", install,
+                os="Windows 11 build 26200.9711 (25H2)" if windows else "macOS 26.6.2",
+                cpu="11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz" if windows else "Apple M1 Pro",
+                arch="x86_64" if windows else "aarch64",
+            ))
+            events += [laptop_turn(f"2026-11-02T06:{t:02d}:{i:02d}Z", install, 1000 + 100 * t) for t in range(turns_each)]
+        return events
+
+    def test_nothing_is_no_groups(self):
+        shown = self.platform([])
+        self.assertEqual(shown["installs_by_os_family"], {})
+        self.assertEqual(shown["wait_ms_laptop_by_os_family"], {})
+
+    def test_classes_never_the_strings_as_written(self):
+        self.assertEqual(analytics.os_family("Windows 11 build 26200.9711 (25H2)"), "Windows")
+        self.assertEqual(analytics.os_family("macOS 26.6.2"), "macOS")
+        self.assertEqual(analytics.os_family("FreeBSD 14"), "other")
+        self.assertEqual(analytics.os_family(None), "unknown")
+        self.assertEqual(analytics.cpu_class("11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz"), "Intel Core i7")
+        self.assertEqual(analytics.cpu_class("Apple M1 Pro"), "Apple M-series")
+        self.assertEqual(analytics.cpu_class("AMD Ryzen 5 5500U with Radeon Graphics"), "AMD Ryzen 5")
+        self.assertEqual(analytics.cpu_class("other"), "unknown", "a value the policy replaced")
+        self.assertEqual(analytics.ram_band(16085), "8–16 GB")
+        self.assertEqual(analytics.ram_band(32768), "16–32 GB")
+        self.assertEqual(analytics.ram_band(-1), "unknown")
+        text = json.dumps(self.platform(self.fleet()))
+        for written in ("26200", "11800H", "2.30GHz", "M1 Pro", "26.6.2", "16384"):
+            self.assertNotIn(written, text)
+
+    def test_a_group_of_fewer_than_three_installs_is_folded_not_dropped(self):
+        shown = self.platform(self.fleet(n_mac=3, n_windows=2))
+        self.assertEqual(shown["installs_by_os_family"], {"macOS": 3, "small groups": 2})
+        self.assertEqual(sum(shown["installs_by_os_family"].values()), 5, "every install is still counted")
+        self.assertEqual(shown["installs_by_cpu_class"], {"Apple M-series": 3, "small groups": 2})
+        self.assertEqual(shown["installs_by_install_place"], {"applications": 5})
+
+    def test_a_groups_wait_is_shown_only_with_enough_installs_and_turns(self):
+        shown = self.platform(self.fleet(n_mac=3, n_windows=2, turns_each=12))
+        by_os = shown["wait_ms_laptop_by_os_family"]
+        self.assertEqual(list(by_os), ["macOS", "small groups"])
+        self.assertEqual(by_os["macOS"]["count"], 36)
+        self.assertTrue(by_os["macOS"]["sufficient"])
+        self.assertEqual(by_os["small groups"]["count"], 24)
+        self.assertNotIn("p50", by_os["small groups"])
+        few = self.platform(self.fleet(n_mac=3, n_windows=0, turns_each=5))["wait_ms_laptop_by_os_family"]
+        self.assertEqual(list(few), ["small groups"], "3 installs but 15 turns: too few")
+
+    def test_only_turns_the_laptop_answered_are_timed_by_platform(self):
+        events = self.fleet(n_mac=3, n_windows=0)
+        events.append(clean("2026-11-02T07:00:00Z", install=INSTALLS[0], speech_ms=200,
+                            llm_runs=[{"backend": "cloud", "ms": 300}]))
+        self.assertEqual(self.platform(events)["wait_ms_laptop_by_os_family"]["macOS"]["count"], 36)
+
+    def test_a_turn_takes_its_own_launchs_laptop(self):
+        events = [launch_line("2026-11-02T05:00:00Z", i, launch=f"l-{i}") for i in INSTALLS[:3]]
+        events.append(launch_line("2026-11-02T05:00:00Z", INSTALLS[3], os="Windows 11", launch="l-win"))
+        # A turn whose install is a Mac's but whose launch line is the Windows one.
+        events += [laptop_turn(f"2026-11-02T06:{t:02d}:00Z", INSTALLS[t % 3], 900, launch="l-win") for t in range(30)]
+        by_os = self.platform(events)["wait_ms_laptop_by_os_family"]
+        self.assertEqual(list(by_os), ["Windows"])
+
+    def test_an_install_is_what_its_newest_line_before_the_week_ended_says(self):
+        old = launch_line("2026-10-20T05:00:00Z", INSTALLS[0], ram_mb=8192, launch="old")
+        new = launch_line("2026-11-02T05:00:00Z", INSTALLS[0], ram_mb=16384, launch="new")
+        later = launch_line("2026-11-20T05:00:00Z", INSTALLS[0], ram_mb=65536, launch="later")
+        week = [new, clean("2026-11-02T06:00:00Z", install=INSTALLS[0])]
+        _, by_install = analytics.profiles(week, [old, later] + week)
+        self.assertEqual(by_install[INSTALLS[0]]["event_id"], new["event_id"])
+
+    def test_an_install_with_no_launch_line_is_unknown(self):
+        events = [clean(f"2026-11-02T06:00:0{i}Z", install=install) for i, install in enumerate(INSTALLS[:3])]
+        self.assertEqual(self.platform(events)["installs_by_os_family"], {"unknown": 3})
+
+    def test_versions_are_counted_by_install_and_by_turn(self):
+        events = []
+        for i, install in enumerate(INSTALLS[:4]):
+            events.append(clean(f"2026-11-02T06:00:0{i}Z", install=install, app_version="0.1.27"))
+        events.append(clean("2026-11-02T07:00:00Z", install=INSTALLS[0], app_version="0.1.28"))
+        shown = self.platform(events)
+        self.assertEqual(shown["installs_by_app_version"], {"0.1.27": 4, "small groups": 1})
+        self.assertEqual(shown["turns_by_app_version"], {"0.1.27": 4, "small groups": 1})
+
+    def test_no_install_is_named_and_order_is_fixed(self):
+        events = self.fleet()
+        text = json.dumps(self.platform(events))
+        for install in INSTALLS:
+            self.assertNotIn(install[:8], text)
+        self.assertEqual(text, json.dumps(self.platform(list(reversed(events)))))
+
+    def test_cold_start_from_three_launches_is_marked_too_few(self):
+        events = [engine(f"2026-11-02T0{i}:00:00Z", 8000 + i) for i in range(3)]
+        shown = analytics.analyse(events)["latency"]["cold_start_ms_started"]
+        self.assertFalse(shown["value"]["sufficient"])
+        self.assertEqual(shown["value"]["count"], 3, "the observations are kept")
+        self.assertIn("too few", shown["note"])
 
 
 if __name__ == "__main__":
