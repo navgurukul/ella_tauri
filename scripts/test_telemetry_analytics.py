@@ -224,5 +224,113 @@ class Reader(unittest.TestCase):
         self.assertEqual(analytics.read([]), ([], {"events_read": 0, "unreadable": 0, **NO_COUNTS}))
 
 
+INSTALL_A, INSTALL_B = "a" * 16, "b" * 16
+
+
+def clean(at, install=INSTALL_A, talk="talk-1", talk_type="free", event="ella_turn_latency", **extra):
+    """A sanitized event of one install's, as the reader gives it."""
+    raw = {**turn(at, session_id=talk, talk=talk_type), **extra}
+    raw["event"] = event
+    if talk_type is None:
+        raw.pop("talk")
+    if talk is None:
+        raw.pop("session_id")
+    events, _ = analytics.read([{**raw, "install_id": install} if install else raw])
+    return events[0]
+
+
+def values(section):
+    return {name: shown["value"] for name, shown in section.items()}
+
+
+class Usage(unittest.TestCase):
+    WEEK = "2026-W45"  # Mon 2 Nov to Sun 8 Nov 2026, IST
+
+    def usage(self, week_events, all_events=None):
+        return analytics.analyse(week_events, week_events if all_events is None else all_events, week=self.WEEK)["usage"]
+
+    def test_nothing_used_is_zero_not_missing(self):
+        shown = values(self.usage([]))
+        self.assertEqual(
+            {k: v for k, v in shown.items() if k != "turns_per_talk"},
+            {
+                "installs": 0, "new_installs": 0, "launches": 0, "launch_lines": 0, "turns": 0,
+                "turns_by_talk_type": {}, "talks": 0, "talks_by_type": {}, "recaps": 0,
+                "active_install_days": 0, "installs_by_active_days": {},
+            },
+        )
+        self.assertEqual(shown["turns_per_talk"]["count"], 0)
+
+    def test_a_week_of_use_is_counted(self):
+        events = [
+            clean("2026-11-02T06:00:00Z", talk="t1"),
+            clean("2026-11-02T06:01:00Z", talk="t1"),
+            clean("2026-11-02T06:02:00Z", talk="t1"),
+            clean("2026-11-03T06:00:00Z", talk="t2", talk_type="lesson"),
+            clean("2026-11-03T06:00:00Z", install=INSTALL_B, talk="t3", talk_type="word"),
+            clean("2026-11-03T06:05:00Z", event="ella_assessment", talk="t3", talk_type=None),
+            clean("2026-11-02T05:59:00Z", event="ella_launch", talk=None, talk_type=None),
+        ]
+        shown = values(self.usage(events))
+        self.assertEqual((shown["installs"], shown["launches"], shown["launch_lines"]), (2, 1, 1))
+        self.assertEqual((shown["turns"], shown["talks"], shown["recaps"]), (5, 3, 1))
+        self.assertEqual(shown["turns_by_talk_type"], {"free": 3, "lesson": 1, "word": 1})
+        self.assertEqual(shown["talks_by_type"], {"free": 1, "lesson": 1, "word": 1})
+        self.assertEqual(
+            {k: shown["turns_per_talk"][k] for k in ("count", "p50", "p95")}, {"count": 3, "p50": 1, "p95": 3}
+        )
+        self.assertEqual(shown["active_install_days"], 3)
+        self.assertEqual(shown["installs_by_active_days"], {"1": 1, "2": 1})
+
+    def test_an_active_day_is_an_ist_day_with_a_turn(self):
+        events = [
+            clean("2026-11-02T18:00:00Z"),  # 23:30 IST, Monday
+            clean("2026-11-02T18:40:00Z"),  # 00:10 IST, Tuesday
+            clean("2026-11-05T06:00:00Z", event="ella_launch", talk=None, talk_type=None),
+        ]
+        shown = values(self.usage(events))
+        self.assertEqual(shown["active_install_days"], 2, "a launch alone is no active day")
+        self.assertEqual(shown["installs_by_active_days"], {"2": 1})
+
+    def test_a_talk_of_an_old_build_has_an_unknown_type_and_says_so(self):
+        shown = self.usage([clean("2026-11-02T06:00:00Z", talk_type=None), clean("2026-11-02T06:01:00Z", talk="t2")])
+        self.assertEqual(shown["talks_by_type"]["value"], {"free": 1, "unknown": 1})
+        self.assertEqual(shown["talks_by_type"]["status"], analytics.HISTORICALLY_LIMITED)
+        self.assertIn("unknown", shown["turns_by_talk_type"]["note"])
+        typed = self.usage([clean("2026-11-02T06:00:00Z")])
+        self.assertEqual(typed["talks_by_type"]["status"], analytics.DERIVED)
+
+    def test_an_install_is_new_only_in_the_week_it_was_first_seen(self):
+        before = clean("2026-10-28T06:00:00Z", install=INSTALL_A)
+        week = [clean("2026-11-02T06:00:00Z", install=INSTALL_A), clean("2026-11-02T06:00:00Z", install=INSTALL_B)]
+        shown = self.usage(week, [before] + week)
+        self.assertEqual(shown["new_installs"]["value"], 1)
+        self.assertEqual(shown["new_installs"]["status"], analytics.HISTORICALLY_LIMITED)
+
+    def test_events_with_no_install_are_not_counted_as_one(self):
+        shown = self.usage([clean("2026-11-02T06:00:00Z", install=None), clean("2026-11-02T06:01:00Z")])
+        self.assertEqual(shown["installs"]["value"], 1)
+        self.assertIn("1 events name no install", shown["installs"]["note"])
+        self.assertEqual(shown["turns"]["value"], 2)
+
+    def test_turns_with_no_talk_are_turns_but_no_talk(self):
+        shown = values(self.usage([clean("2026-11-02T06:00:00Z", talk=None), clean("2026-11-02T06:01:00Z")]))
+        self.assertEqual((shown["turns"], shown["talks"]), (2, 1))
+
+    def test_no_install_or_talk_is_named_in_the_usage(self):
+        events = [clean("2026-11-02T06:00:00Z", talk="Asha's talk"), clean("2026-11-02T06:01:00Z", install=INSTALL_B)]
+        shown = json.dumps(self.usage(events))
+        for named in (INSTALL_A, INSTALL_B, "Asha", sanitize.short_hash("Asha's talk")):
+            self.assertNotIn(named, shown)
+
+    def test_the_same_events_give_the_same_usage(self):
+        events = [clean(f"2026-11-0{d}T06:00:00Z", talk=f"t{d}", talk_type=t) for d, t in ((2, "free"), (3, "lesson"), (4, "free"))]
+        self.assertEqual(json.dumps(self.usage(events)), json.dumps(self.usage(list(reversed(events)))))
+
+    def test_without_a_week_new_installs_are_unavailable(self):
+        shown = analytics.analyse([clean("2026-11-02T06:00:00Z")])["usage"]
+        self.assertEqual(shown["new_installs"]["status"], analytics.UNAVAILABLE)
+
+
 if __name__ == "__main__":
     unittest.main()
