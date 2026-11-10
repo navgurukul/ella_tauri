@@ -104,6 +104,10 @@ def read_all(paths):
     for path in files:
         install_id = None
         for event in sanitize.read_events(path):
+            # A line that is JSON but no event (a number, text, a list) is
+            # skipped, as a line that is no JSON at all already is.
+            if not isinstance(event, dict):
+                continue
             # A line of the batch record, put among the events by mistake:
             # about a batch, never one of its events.
             if "record" in event:

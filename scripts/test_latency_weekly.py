@@ -256,6 +256,11 @@ class Reporting(unittest.TestCase):
         clean_report["volume"].pop("laptops")
         self.assertEqual(raw_report, clean_report)
 
+    def test_a_line_that_is_json_but_no_event_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write(Path(tmp) / "latency.jsonl", week_of_turns("2026-10-20", 2, 1000), tail='3\n"text"\n[1]\nnull\n')
+            self.assertEqual(len(weekly.read_all([path])), 2)
+
     def test_a_batch_is_read_as_its_events_from_its_install(self):
         with tempfile.TemporaryDirectory() as tmp:
             events = [sanitize.Sanitizer().event(e) for e in week_of_turns("2026-10-20", 3, 1000)]

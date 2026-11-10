@@ -88,6 +88,60 @@ def distribution(values):
     }
 
 
+def install_of(raw):
+    """The laptop an event came from, as the weekly report knows it: the
+    `install_id` its batch's envelope gave it, or, for a Stage-1 file, its
+    laptop's label hashed as a manual batch's is. None when it has neither;
+    never the label itself."""
+    install = raw.get("install_id")
+    if isinstance(install, str) and sanitize.PATTERNS["hex16"].fullmatch(install):
+        return install
+    source = raw.get("source")
+    if isinstance(source, str) and sanitize.LABEL.fullmatch(source):
+        return sanitize.short_hash(f"manual:{source}")
+    return None
+
+
+def read(events):
+    """The events as analytics may see them, oldest first, and what reading
+    them left out.
+
+    `events` are as latency-weekly.py's `read_all` gives them: each once, by
+    its `event_id`, with its batch's `install_id`; this adds no counting-once
+    of its own. Each goes through the policy's Sanitizer again, so a laptop's
+    own latency.jsonl is read exactly as it would leave the laptop, and an
+    event already sanitized comes through as it is. Nothing is written:
+    not the files, not a queue, not what is sent.
+
+    The counts: `events_read`, kept; `unreadable`, an item that is no event
+    or broke the Sanitizer; and the Sanitizer's own, `policy_excluded_count`
+    (events the policy leaves behind, or with no time), `values_replaced`
+    and `unknown_fields_dropped`."""
+    sanitizer = sanitize.Sanitizer()
+    kept = []
+    unreadable = 0
+    for raw in events:
+        if not isinstance(raw, dict):
+            unreadable += 1
+            continue
+        try:
+            # The install is the batch's, not a field of the event's: set
+            # aside, so the Sanitizer does not count it as one with no rule.
+            fields = {key: value for key, value in raw.items() if key != "install_id"}
+            event = sanitizer.event(fields)
+        except Exception:  # one odd event is left out, not the report lost
+            unreadable += 1
+            continue
+        if event is None:
+            continue
+        install = install_of(raw)
+        if install:
+            event["install_id"] = install
+        kept.append(event)
+    counts = {"events_read": len(kept), "unreadable": unreadable, **sanitizer.counts()}
+    return sanitize.oldest_first(kept), counts
+
+
 def analyse(week_events, all_events=(), ledger=None, week=None):
     """The week's analytics, a section each, in `SECTIONS` order.
     `week_events` are the week's sanitized events; `all_events` every event
