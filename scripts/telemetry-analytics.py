@@ -563,7 +563,10 @@ def reliability(week_events, all_events=(), ledger=None, week=None, reading=None
     if collection_in_report:
         kept = {
             "reported_in": metric(
-                IN_REPORT, DIRECT, "the report's own Collection section: telemetry-health's summary of the batch record"
+                IN_REPORT,
+                DIRECT,
+                "a pointer, not a copy: the report's own Collection section, telemetry-health's summary of the "
+                "batch record, is the one record of collection",
             )
         }
     else:

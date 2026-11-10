@@ -769,7 +769,8 @@ the build most turns ran) and how many of last week's events came after last
 week's report. Claiming a change still takes the raw samples and a test. The
 JSON's keys stay put; a change to what they mean bumps `report_version`
 (2: laptops are counted by `install_id`, and batches are read; 3: the
-`collection` section, from the batch record).
+`collection` section, from the batch record; 4: the `analytics` key and
+section, [Analytics V1](#analytics-v1), every key of 3 as it was).
 
 Either script also reads a laptop's own file, to see a week locally:
 
@@ -777,7 +778,90 @@ Either script also reads a laptop's own file, to see a week locally:
 npm run telemetry:weekly -- "$HOME/Library/Application Support/org.navgurukul.ella.desktop/telemetry/latency.jsonl" --week 2026-W42
 ```
 
-`npm run test:telemetry` tests both, the policy and the collection health.
+`npm run test:telemetry` tests both, the policy, the collection health and
+the analytics.
+
+#### Analytics V1
+
+Since `report_version` 4 the weekly report also carries Analytics V1
+(`scripts/telemetry-analytics.py`): how Ella was used, how talks ended, how
+fast and how reliably it ran, and on what. There is no command of its own:
+`telemetry:weekly`, and `telemetry:repo report` that runs it, write it, under
+one `analytics` key last in the JSON and a section of its own, "Analytics
+V1", after "Collection" in the Markdown. Every key of `report_version` 3,
+and every line of the Markdown above the new section, is as it was.
+
+It reads only: the same events, each put through the
+[telemetry policy](#the-telemetry-policy-and-batches) again, so a laptop's
+own `latency.jsonl` is counted as it would leave the laptop; never the
+queue, nothing sent, no file written but the report. It adds no event and
+no field to the telemetry.
+
+Every metric says how it was come by (`status`):
+
+- `direct`: a field the telemetry holds, counted or measured as it is;
+- `derived`: worked out from such fields by a rule the script states (talks
+  from turns, days from times, rates, splits);
+- `historically_limited`: derived, but builds or data from before some
+  change cannot show it all, so it is a floor, not the whole;
+- `unavailable`: the telemetry cannot say it. It has no value and a note
+  saying why, and the Markdown says "unavailable", never 0.
+
+The sections:
+
+- **Usage**: installs, and those first seen this week (a floor: a laptop
+  that ran Ella before it sent shows as new); launches; turns and talks by
+  talk type (`free`, `lesson`, `placement`, `word`; `unknown` for builds
+  from before turns named it); turns per talk; recaps; the IST days each
+  install had a turn. An install is a laptop's copy of Ella, never a person.
+- **Talk lifecycle**: the week's talks, judged on every event of each read,
+  of any week. A talk ends as the queue holds it until: a turn with
+  `talk_over`, or its recap (the queue's 30-minute check is no end). It is
+  `completed` (an end, no note), `left` (noted `talk_left`, no end),
+  `resumed` (the note, then an end) or `unresolved` (neither). Left and
+  resumed are floors, as builds from before `talk_left` never note one. The
+  completion and left rates stay unavailable while `TALK_LEFT_SINCE` is
+  `None`: every build sending is 0.1.27, with or without `talk_left`. Set it
+  to the first released version known to send it, and the rates are given
+  over talks wholly of that version or later.
+- **Latency**: the Latency table's own rules (voice turns that succeeded,
+  Word of the day left out), as a count with P50, P75 and P95, and `of`, the
+  rows it was taken over, so a timing a build does not keep shows as fewer
+  measured. Nothing is guessed: the wait is `speech_ms` alone, where the
+  Latency table above takes an old log's total for it. Also the talk's
+  warm-up, cold start where Ella started its own model server
+  (`cold_start_ms_started`) beside the table's own, and the updater by step.
+  Fewer than 30 measurements (`sufficient: false`) are shown in the
+  Markdown as too few, their percentiles kept in the JSON only.
+- **Reliability**: what the app's events say (no speech counted apart from
+  system errors, as above; a fallback, or the cloud found down, is no
+  error; recaps whose talk's turns never came, a sign for collection, never
+  a lifecycle talk); and what reading left out. Collection is the report's
+  own "Collection" section, the one record of it: the analytics'
+  `reliability.collection` is only a pointer to it, `reported_in:
+  "collection"`, never a second copy.
+- **Platform and version**: installs by OS family, architecture, CPU class,
+  RAM band and install place, as their newest launch line from before
+  their last event of the week says; installs and turns by version; and
+  the wait of turns the laptop answered, by each. Only classes are shown,
+  never the OS build, the CPU model or the memory as written.
+
+No group of fewer than 3 installs is shown by itself: its installs or turns
+are counted together as `small groups`, so the whole still adds up. A
+group's wait is shown only with 3 installs and 30 turns or more. When just
+one group would be left to `small groups`, it could be told from the rest
+(`x86_64: 3, small groups: 1` names the one ARM laptop), so the whole
+breakdown is folded. This changes only what is shown; every observation is
+still counted.
+
+Nothing in it names an install, a talk or a launch, or holds what a learner
+said or what Ella was told. The same events and the same generation time give
+the same report, in whatever order the events are read.
+
+Read it with its limits: a talk that spans two weeks counts in each; a
+group shown needs a fleet bigger than the 4 laptops of 2026-W45, all of them
+running from source; and the recap's total has a long tail (P75 of minutes)
+that is the field as recorded, not yet explained.
 
 #### Collection health
 

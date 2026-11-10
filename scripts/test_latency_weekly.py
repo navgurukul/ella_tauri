@@ -381,5 +381,45 @@ class AnalyticsInTheReport(unittest.TestCase):
         self.assertIn("## Analytics V1", weekly.markdown(report))
 
 
+    def test_the_analytics_name_no_one_and_nothing_said(self):
+        """The finished contract's privacy: whatever the events hold, the
+        analytics, JSON and Markdown, hold no learner's words, no prompt, no
+        ID of an install, talk, launch or event, and no hardware as written."""
+        cpu, os_ = "11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz", "Windows 11 build 26200.9711 (25H2)"
+        launch = {"event": "ella_launch", "schema_version": 2, "timestamp": "2026-10-20T05:00:00Z", "app_version": "0.1.27",
+                  "launch_id": LAUNCH, "os": os_, "cpu": cpu, "arch": "x86_64", "ram_mb": 16085,
+                  "cores_physical": 8, "cores_logical": 16, "install": {"bundle": "app", "place": "applications"},
+                  "source": "lab-win-hp-02"}
+        turns = [
+            turn(f"2026-10-20T06:{i:02d}:00Z", session_id="Asha's first talk", talk="free", source="lab-win-hp-02",
+                 transcript="my name is Asha", prompt="You are Ella, a tutor", reply="Hello Asha",
+                 notes=["talk_left"] if i == 0 else None)
+            for i in range(3)
+        ]
+        recap_ = {"event": "ella_assessment", "schema_version": 2, "timestamp": "2026-10-20T07:00:00Z",
+                  "app_version": "0.1.27", "launch_id": LAUNCH, "session_id": "Asha's first talk", "status": "ok",
+                  "kind": "talk", "total_ms": 4000, "source": "lab-win-hp-02", "feedback": "Asha did well"}
+        events = [launch] + turns + [recap_]
+        report = self.build(events)
+        text = json.dumps(report["analytics"], ensure_ascii=False)
+        markdown = weekly.markdown(report)
+        text += markdown[markdown.index("## Analytics V1"):]
+        install = sanitize.short_hash("manual:lab-win-hp-02")
+        secret = [
+            "Asha", "You are Ella", "my name", "lab-win-hp-02", LAUNCH, sanitize.short_hash(LAUNCH),
+            sanitize.short_hash("Asha's first talk"), install, install[:8], cpu, "11800H", "2.30GHz", os_, "26200",
+            "16085",
+        ] + [sanitize.event_id(e) for e in events]
+        for value in secret:
+            self.assertNotIn(value, text)
+
+    def test_the_finished_contract_holds(self):
+        self.assertEqual(weekly.REPORT_VERSION, 4)
+        self.assertIsNone(weekly.analytics.TALK_LEFT_SINCE, "lifecycle rates wait for a release known to send talk_left")
+        pointer = self.build(ledger=[])["analytics"]["reliability"]["collection"]["reported_in"]
+        self.assertEqual(pointer["value"], "collection")
+        self.assertIn("a pointer, not a copy", pointer["note"])
+
+
 if __name__ == "__main__":
     unittest.main()
