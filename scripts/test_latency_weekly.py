@@ -256,6 +256,11 @@ class Reporting(unittest.TestCase):
         clean_report["volume"].pop("laptops")
         self.assertEqual(raw_report, clean_report)
 
+    def test_a_line_that_is_json_but_no_event_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write(Path(tmp) / "latency.jsonl", week_of_turns("2026-10-20", 2, 1000), tail='3\n"text"\n[1]\nnull\n')
+            self.assertEqual(len(weekly.read_all([path])), 2)
+
     def test_a_batch_is_read_as_its_events_from_its_install(self):
         with tempfile.TemporaryDirectory() as tmp:
             events = [sanitize.Sanitizer().event(e) for e in week_of_turns("2026-10-20", 3, 1000)]
@@ -285,8 +290,135 @@ class Reporting(unittest.TestCase):
             self.assertIn("▲", text)
             saved = json.loads((tmp / "out" / "2026-W43.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["previous_week"], "2026-W42")
-            self.assertEqual(saved["report_version"], 3)
+            self.assertEqual(saved["report_version"], 4)
             self.assertEqual(saved["this"]["latency"]["wait_ms"]["p50"], 1400)
+
+
+class AnalyticsInTheReport(unittest.TestCase):
+    """report_version 4: Analytics V1 under its own key and section, every
+    other key and line as in 3."""
+
+    NOW = weekly.datetime(2026, 10, 27, 6, 0, tzinfo=weekly.timezone.utc)
+    V3_KEYS = [
+        "report_version", "week", "week_start", "week_end", "timezone", "previous_week", "generated_at",
+        "tools_ref", "data_through", "thresholds", "this", "previous", "late_events_previous_week", "flags",
+        "notes", "collection",
+    ]
+
+    def events(self):
+        return week_of_turns("2026-10-13", 30, 1000) + week_of_turns("2026-10-20", 30, 1500, talk="free") + [
+            turn("2026-10-20T07:00:00Z", status="error", error="NO_SPEECH_DETECTED: x"),
+        ]
+
+    def build(self, events=None, ledger=None):
+        return weekly.build(self.events() if events is None else events, "2026-W43", now=self.NOW, ledger=ledger)
+
+    def test_the_analytics_are_one_key_after_the_rest(self):
+        report = self.build()
+        self.assertEqual(report["report_version"], 4)
+        self.assertEqual(list(report), self.V3_KEYS + ["analytics"])
+        self.assertEqual(
+            list(report["analytics"]), ["usage", "talk_lifecycle", "latency", "reliability", "platform"]
+        )
+
+    def test_every_other_key_is_as_it_was(self):
+        report = self.build()
+        before = {key: value for key, value in report.items() if key != "analytics"}
+        # What build gave before the analytics: summarize, flags and notes as they are.
+        this = weekly.summarize([e for e in self.events() if sanitize.week_of(e) == "2026-W43"])
+        self.assertEqual(before["this"], this)
+        self.assertEqual(before["flags"], weekly.flags_of(this, before["previous"]))
+
+    def test_the_markdown_above_the_analytics_is_unchanged(self):
+        report = self.build()
+        text = weekly.markdown(report)
+        without = weekly.markdown({**report, "analytics": None})
+        self.assertTrue(text.startswith(without.rstrip("\n")))
+        self.assertNotIn("## Analytics V1", without)
+        self.assertIn("\n## Analytics V1\n", text)
+        self.assertGreater(text.index("## Analytics V1"), text.index("## Collection"))
+
+    def test_unavailable_and_limited_metrics_are_named_never_zero(self):
+        text = weekly.markdown(self.build())
+        self.assertIn("| completion_rate | unavailable | **unavailable** |", text)
+        self.assertIn("| left | 0 | **historically limited** |", text)
+        self.assertNotIn("| completion_rate | 0", text)
+
+    def test_too_few_measurements_are_said_to_be_too_few(self):
+        events = self.events() + [
+            {"event": "ella_engine", "schema_version": 2, "timestamp": "2026-10-20T05:00:00Z", "app_version": "0.1.25",
+             "launch_id": LAUNCH, "since_launch_ms": 9000, "llm_server": "started"},
+        ]
+        text = weekly.markdown(self.build(events))
+        self.assertIn("| cold_start_ms_started | n=1, too few to stand for the fleet |", text)
+
+    def test_collection_is_shown_once(self):
+        report = self.build(ledger=[])
+        self.assertEqual(
+            {k: v["value"] for k, v in report["analytics"]["reliability"]["collection"].items()},
+            {"reported_in": "collection"},
+        )
+        text = weekly.markdown(report)
+        self.assertEqual(text.count("## Collection"), 1)
+
+    def test_a_fixed_time_gives_the_same_report(self):
+        events = self.events()
+        first, second = self.build(events), self.build(list(reversed(events)))
+        self.assertEqual(json.dumps(first), json.dumps(second))
+        self.assertEqual(weekly.markdown(first), weekly.markdown(second))
+
+    def test_the_analytics_read_a_raw_log_as_it_would_leave(self):
+        report = self.build([turn("2026-10-20T06:00:00Z", transcript="my name is Asha")])
+        reading = {k: v["value"] for k, v in report["analytics"]["reliability"]["reading"].items()}
+        self.assertEqual(reading["unknown_fields_dropped"], 1)
+        text = json.dumps(report["analytics"]) + weekly.markdown(report)
+        self.assertNotIn("Asha", text)
+        self.assertNotIn(LAUNCH, json.dumps(report["analytics"]))
+
+    def test_nothing_this_week_is_an_empty_report_not_a_crash(self):
+        report = self.build([])
+        self.assertEqual(report["analytics"]["usage"]["turns"]["value"], 0)
+        self.assertIn("## Analytics V1", weekly.markdown(report))
+
+
+    def test_the_analytics_name_no_one_and_nothing_said(self):
+        """The finished contract's privacy: whatever the events hold, the
+        analytics, JSON and Markdown, hold no learner's words, no prompt, no
+        ID of an install, talk, launch or event, and no hardware as written."""
+        cpu, os_ = "11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz", "Windows 11 build 26200.9711 (25H2)"
+        launch = {"event": "ella_launch", "schema_version": 2, "timestamp": "2026-10-20T05:00:00Z", "app_version": "0.1.27",
+                  "launch_id": LAUNCH, "os": os_, "cpu": cpu, "arch": "x86_64", "ram_mb": 16085,
+                  "cores_physical": 8, "cores_logical": 16, "install": {"bundle": "app", "place": "applications"},
+                  "source": "lab-win-hp-02"}
+        turns = [
+            turn(f"2026-10-20T06:{i:02d}:00Z", session_id="Asha's first talk", talk="free", source="lab-win-hp-02",
+                 transcript="my name is Asha", prompt="You are Ella, a tutor", reply="Hello Asha",
+                 notes=["talk_left"] if i == 0 else None)
+            for i in range(3)
+        ]
+        recap_ = {"event": "ella_assessment", "schema_version": 2, "timestamp": "2026-10-20T07:00:00Z",
+                  "app_version": "0.1.27", "launch_id": LAUNCH, "session_id": "Asha's first talk", "status": "ok",
+                  "kind": "talk", "total_ms": 4000, "source": "lab-win-hp-02", "feedback": "Asha did well"}
+        events = [launch] + turns + [recap_]
+        report = self.build(events)
+        text = json.dumps(report["analytics"], ensure_ascii=False)
+        markdown = weekly.markdown(report)
+        text += markdown[markdown.index("## Analytics V1"):]
+        install = sanitize.short_hash("manual:lab-win-hp-02")
+        secret = [
+            "Asha", "You are Ella", "my name", "lab-win-hp-02", LAUNCH, sanitize.short_hash(LAUNCH),
+            sanitize.short_hash("Asha's first talk"), install, install[:8], cpu, "11800H", "2.30GHz", os_, "26200",
+            "16085",
+        ] + [sanitize.event_id(e) for e in events]
+        for value in secret:
+            self.assertNotIn(value, text)
+
+    def test_the_finished_contract_holds(self):
+        self.assertEqual(weekly.REPORT_VERSION, 4)
+        self.assertIsNone(weekly.analytics.TALK_LEFT_SINCE, "lifecycle rates wait for a release known to send talk_left")
+        pointer = self.build(ledger=[])["analytics"]["reliability"]["collection"]["reported_in"]
+        self.assertEqual(pointer["value"], "collection")
+        self.assertIn("a pointer, not a copy", pointer["note"])
 
 
 if __name__ == "__main__":

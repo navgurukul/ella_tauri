@@ -365,7 +365,7 @@ class TheWeeklyReport(unittest.TestCase):
     def test_collection_is_a_section_of_the_report(self):
         events = [dict(e, install_id=INSTALL) for e in clean_events()]
         without = weekly.build(events, WEEK)
-        self.assertEqual(without["report_version"], 3)
+        self.assertEqual(without["report_version"], 4)
         self.assertIsNone(without["collection"])
         self.assertIn("No batch record given", weekly.markdown(without))
 
