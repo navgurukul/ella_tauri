@@ -1,0 +1,978 @@
+{
+  "report_version": 4,
+  "week": "2026-W02",
+  "week_start": "2026-01-05T00:00:00+05:30",
+  "week_end": "2026-01-12T00:00:00+05:30",
+  "timezone": "Asia/Kolkata (UTC+05:30)",
+  "previous_week": "2026-W01",
+  "generated_at": "2026-01-12T06:00:00+00:00",
+  "tools_ref": "synthetic-fixture",
+  "data_through": "2026-01-10T09:34:00.000000Z",
+  "thresholds": {
+    "min_n": 30,
+    "min_pct": 0.15,
+    "min_ms": 200,
+    "min_error_rise": 0.02
+  },
+  "this": {
+    "volume": {
+      "events": 136,
+      "turns": 74,
+      "voice_turns": 74,
+      "ok_turns": 72,
+      "errors": 2,
+      "no_speech": 1,
+      "system_errors": 1,
+      "system_error_rate": 0.0135,
+      "no_speech_rate": 0.0135,
+      "system_errors_by_stage": {
+        "llm:start": 1
+      },
+      "top_error_codes": {
+        "engine_request": 1,
+        "NO_SPEECH_DETECTED": 1
+      },
+      "talks": 16,
+      "launches": 11,
+      "laptops": 6,
+      "app_versions": {
+        "9.9.1-synthetic": 52,
+        "9.9.0-synthetic": 22
+      },
+      "cloud_turns": 25,
+      "cloud_share": 0.3472,
+      "cloud_failed_runs": 0,
+      "stt_fallbacks": 0,
+      "recaps": 16,
+      "recap_errors": 1,
+      "failed_judges": 1,
+      "word_turns": 2
+    },
+    "latency": {
+      "wait_ms": {
+        "n": 72,
+        "p50": 4900,
+        "p95": 6500,
+        "p99": 6500
+      },
+      "wait_ms_local": {
+        "n": 47,
+        "p50": 5700,
+        "p95": 6500,
+        "p99": 6500
+      },
+      "wait_ms_cloud": {
+        "n": 25,
+        "p50": 1980,
+        "p95": 2220,
+        "p99": 2220
+      },
+      "total_ms": {
+        "n": 72,
+        "p50": 5200,
+        "p95": 6800,
+        "p99": 6800
+      },
+      "total_ms_local": {
+        "n": 47,
+        "p50": 6000,
+        "p95": 6800,
+        "p99": 6800
+      },
+      "total_ms_cloud": {
+        "n": 25,
+        "p50": 2280,
+        "p95": 2520,
+        "p99": 2520
+      },
+      "stt_ms": {
+        "n": 72,
+        "p50": 180,
+        "p95": 200,
+        "p99": 210
+      },
+      "llm_ttft_ms": {
+        "n": 72,
+        "p50": 2450,
+        "p95": 3250,
+        "p99": 3250
+      },
+      "llm_completion_ms": {
+        "n": 72,
+        "p50": 4700,
+        "p95": 6300,
+        "p99": 6300
+      },
+      "tts_first_audio_ms": {
+        "n": 70,
+        "p50": 265,
+        "p95": 280,
+        "p99": 280
+      },
+      "recap_total_ms": {
+        "n": 15,
+        "p50": 5200,
+        "p95": 5200,
+        "p99": 5200
+      },
+      "cold_start_ms": {
+        "n": 9,
+        "p50": 9000,
+        "p95": 9000,
+        "p99": 9000
+      }
+    }
+  },
+  "previous": {
+    "volume": {
+      "events": 89,
+      "turns": 59,
+      "voice_turns": 59,
+      "ok_turns": 59,
+      "errors": 0,
+      "no_speech": 0,
+      "system_errors": 0,
+      "system_error_rate": 0.0,
+      "no_speech_rate": 0.0,
+      "system_errors_by_stage": {},
+      "top_error_codes": {},
+      "talks": 11,
+      "launches": 5,
+      "laptops": 5,
+      "app_versions": {
+        "9.9.1-synthetic": 37,
+        "9.9.0-synthetic": 22
+      },
+      "cloud_turns": 27,
+      "cloud_share": 0.4576,
+      "cloud_failed_runs": 0,
+      "stt_fallbacks": 0,
+      "recaps": 10,
+      "recap_errors": 0,
+      "failed_judges": 0,
+      "word_turns": 0
+    },
+    "latency": {
+      "wait_ms": {
+        "n": 59,
+        "p50": 3400,
+        "p95": 5000,
+        "p99": 5000
+      },
+      "wait_ms_local": {
+        "n": 32,
+        "p50": 4200,
+        "p95": 5000,
+        "p99": 5000
+      },
+      "wait_ms_cloud": {
+        "n": 27,
+        "p50": 1480,
+        "p95": 1720,
+        "p99": 1720
+      },
+      "total_ms": {
+        "n": 59,
+        "p50": 3700,
+        "p95": 5300,
+        "p99": 5300
+      },
+      "total_ms_local": {
+        "n": 32,
+        "p50": 4500,
+        "p95": 5300,
+        "p99": 5300
+      },
+      "total_ms_cloud": {
+        "n": 27,
+        "p50": 1780,
+        "p95": 2020,
+        "p99": 2020
+      },
+      "stt_ms": {
+        "n": 59,
+        "p50": 180,
+        "p95": 210,
+        "p99": 210
+      },
+      "llm_ttft_ms": {
+        "n": 59,
+        "p50": 1700,
+        "p95": 2500,
+        "p99": 2500
+      },
+      "llm_completion_ms": {
+        "n": 59,
+        "p50": 3200,
+        "p95": 4800,
+        "p99": 4800
+      },
+      "tts_first_audio_ms": {
+        "n": 59,
+        "p50": 265,
+        "p95": 280,
+        "p99": 280
+      },
+      "recap_total_ms": {
+        "n": 10,
+        "p50": 5200,
+        "p95": 5200,
+        "p99": 5200
+      },
+      "cold_start_ms": {
+        "n": 5,
+        "p50": 9000,
+        "p95": 9000,
+        "p99": 9000
+      }
+    }
+  },
+  "late_events_previous_week": 0,
+  "flags": [
+    {
+      "kpi": "wait_ms",
+      "stat": "p50",
+      "this": 4900,
+      "previous": 3400,
+      "delta_ms": 1500,
+      "delta_pct": 0.4412
+    },
+    {
+      "kpi": "wait_ms",
+      "stat": "p95",
+      "this": 6500,
+      "previous": 5000,
+      "delta_ms": 1500,
+      "delta_pct": 0.3
+    },
+    {
+      "kpi": "wait_ms_local",
+      "stat": "p50",
+      "this": 5700,
+      "previous": 4200,
+      "delta_ms": 1500,
+      "delta_pct": 0.3571
+    },
+    {
+      "kpi": "wait_ms_local",
+      "stat": "p95",
+      "this": 6500,
+      "previous": 5000,
+      "delta_ms": 1500,
+      "delta_pct": 0.3
+    },
+    {
+      "kpi": "total_ms",
+      "stat": "p50",
+      "this": 5200,
+      "previous": 3700,
+      "delta_ms": 1500,
+      "delta_pct": 0.4054
+    },
+    {
+      "kpi": "total_ms",
+      "stat": "p95",
+      "this": 6800,
+      "previous": 5300,
+      "delta_ms": 1500,
+      "delta_pct": 0.283
+    },
+    {
+      "kpi": "total_ms_local",
+      "stat": "p50",
+      "this": 6000,
+      "previous": 4500,
+      "delta_ms": 1500,
+      "delta_pct": 0.3333
+    },
+    {
+      "kpi": "total_ms_local",
+      "stat": "p95",
+      "this": 6800,
+      "previous": 5300,
+      "delta_ms": 1500,
+      "delta_pct": 0.283
+    },
+    {
+      "kpi": "llm_ttft_ms",
+      "stat": "p50",
+      "this": 2450,
+      "previous": 1700,
+      "delta_ms": 750,
+      "delta_pct": 0.4412
+    },
+    {
+      "kpi": "llm_ttft_ms",
+      "stat": "p95",
+      "this": 3250,
+      "previous": 2500,
+      "delta_ms": 750,
+      "delta_pct": 0.3
+    },
+    {
+      "kpi": "llm_completion_ms",
+      "stat": "p50",
+      "this": 4700,
+      "previous": 3200,
+      "delta_ms": 1500,
+      "delta_pct": 0.4688
+    },
+    {
+      "kpi": "llm_completion_ms",
+      "stat": "p95",
+      "this": 6300,
+      "previous": 4800,
+      "delta_ms": 1500,
+      "delta_pct": 0.3125
+    }
+  ],
+  "notes": [],
+  "collection": {
+    "health_version": 1,
+    "week": "2026-W02",
+    "batch_files": 11,
+    "batches": {
+      "new": 8,
+      "duplicate": 1,
+      "seq_conflict": 0,
+      "manual": 1,
+      "refused": 1
+    },
+    "refused_problems": {
+      "envelope.batch_id: not the hash of the body and events": 1
+    },
+    "installs": {
+      "reporting": 6,
+      "silent": []
+    },
+    "events_received": 136,
+    "events_new": 136,
+    "sequence": {
+      "pending_gaps": [
+        {
+          "install": "291dcb9e",
+          "batch_seq": 2,
+          "seen": "2026-01-11T08:00:00+00:00"
+        }
+      ],
+      "lost_this_week": [],
+      "lost_total": 0,
+      "conflicts": []
+    },
+    "loss": {
+      "dropped": 3,
+      "dropped_by_reason": {
+        "queue_full": 3,
+        "unreadable_line": 0,
+        "write_failed": 0
+      },
+      "drop_rate": 0.0234,
+      "log_resets": 0,
+      "policy_excluded": 0,
+      "values_replaced": 0,
+      "unknown_fields_dropped": 0,
+      "unmeasured_batches": 1
+    },
+    "delivery": {
+      "delay_ms": {
+        "n": 8,
+        "p50": 152820000,
+        "p95": 271530000
+      },
+      "attempts": {
+        "1": 7,
+        "3+": 1
+      },
+      "oldest_queued_age_ms": {
+        "n": 8,
+        "p50": 3600000,
+        "p95": 3600000
+      },
+      "backlog_after_events_max": 0,
+      "clock_suspect": []
+    },
+    "app_versions": {
+      "9.9.1-synthetic": 6,
+      "9.9.0-synthetic": 2,
+      "unknown": 1
+    },
+    "consistency": [],
+    "flags": [
+      {
+        "check": "refused",
+        "count": 1
+      },
+      {
+        "check": "dropped",
+        "count": 3,
+        "drop_rate": 0.0234
+      }
+    ]
+  },
+  "analytics": {
+    "usage": {
+      "installs": {
+        "value": 6,
+        "status": "derived",
+        "note": "a laptop's copy of Ella, never a person"
+      },
+      "new_installs": {
+        "value": 1,
+        "status": "historically_limited",
+        "note": "first seen in the telemetry this week; a laptop that ran Ella before it sent shows as new"
+      },
+      "launches": {
+        "value": 11,
+        "status": "derived",
+        "note": "launches with any event this week"
+      },
+      "launch_lines": {
+        "value": 9,
+        "status": "direct"
+      },
+      "turns": {
+        "value": 76,
+        "status": "direct",
+        "note": "every turn, Word of the day and errors included"
+      },
+      "turns_by_talk_type": {
+        "value": {
+          "free": 54,
+          "lesson": 15,
+          "placement": 5,
+          "word": 2
+        },
+        "status": "derived"
+      },
+      "talks": {
+        "value": 17,
+        "status": "derived",
+        "note": "talks with a turn this week; one that spans two weeks is counted in each"
+      },
+      "talks_by_type": {
+        "value": {
+          "free": 12,
+          "lesson": 3,
+          "placement": 1,
+          "word": 1
+        },
+        "status": "derived"
+      },
+      "turns_per_talk": {
+        "value": {
+          "count": 17,
+          "p50": 4,
+          "p75": 5,
+          "p95": 6,
+          "excluded": 0
+        },
+        "status": "derived"
+      },
+      "recaps": {
+        "value": 17,
+        "status": "direct"
+      },
+      "active_install_days": {
+        "value": 15,
+        "status": "derived",
+        "note": "IST days an install had a turn"
+      },
+      "installs_by_active_days": {
+        "value": {
+          "1": 2,
+          "2": 1,
+          "3": 1,
+          "4": 2
+        },
+        "status": "derived",
+        "note": "days active: installs"
+      }
+    },
+    "talk_lifecycle": {
+      "talks": {
+        "value": 17,
+        "status": "derived",
+        "note": "talks with a turn this week, as usage counts them"
+      },
+      "completed": {
+        "value": 14,
+        "status": "derived",
+        "note": "an end (the talk over, or its recap) and no left note"
+      },
+      "left": {
+        "value": 1,
+        "status": "historically_limited",
+        "note": "noted talk_left, no end; a floor: builds from before #45 never note a talk left"
+      },
+      "resumed": {
+        "value": 1,
+        "status": "historically_limited",
+        "note": "noted talk_left, then an end; a floor: builds from before #45 never note a talk left"
+      },
+      "unresolved": {
+        "value": 1,
+        "status": "derived",
+        "note": "no end and no note: an export, a build from before #45, or a talk such a build left"
+      },
+      "completion_rate": {
+        "value": null,
+        "status": "unavailable",
+        "note": "until a released version is known to send talk_left (#45): builds with and without it share a version"
+      },
+      "left_rate": {
+        "value": null,
+        "status": "unavailable",
+        "note": "until a released version is known to send talk_left (#45): builds with and without it share a version"
+      }
+    },
+    "latency": {
+      "turns": {
+        "value": 72,
+        "status": "direct",
+        "note": "voice turns that succeeded, Word of the day left out"
+      },
+      "wait_ms": {
+        "value": {
+          "count": 72,
+          "p50": 4900,
+          "p75": 5700,
+          "p95": 6500,
+          "excluded": 0,
+          "of": 72,
+          "sufficient": true
+        },
+        "status": "direct",
+        "note": "learner stops \u2192 Ella speaks"
+      },
+      "wait_ms_laptop": {
+        "value": {
+          "count": 47,
+          "p50": 5700,
+          "p75": 5700,
+          "p95": 6500,
+          "excluded": 0,
+          "of": 47,
+          "sufficient": true
+        },
+        "status": "derived",
+        "note": "answered on the laptop: its own model, or the app's own line"
+      },
+      "wait_ms_cloud": {
+        "value": {
+          "count": 25,
+          "p50": 1980,
+          "p75": 1980,
+          "p95": 2220,
+          "excluded": 0,
+          "of": 25,
+          "sufficient": false
+        },
+        "status": "derived",
+        "note": "answered by the cloud: the reply the learner heard was the cloud's"
+      },
+      "total_ms": {
+        "value": {
+          "count": 72,
+          "p50": 5200,
+          "p75": 6000,
+          "p95": 6800,
+          "excluded": 0,
+          "of": 72,
+          "sufficient": true
+        },
+        "status": "direct",
+        "note": "the whole turn"
+      },
+      "total_ms_laptop": {
+        "value": {
+          "count": 47,
+          "p50": 6000,
+          "p75": 6000,
+          "p95": 6800,
+          "excluded": 0,
+          "of": 47,
+          "sufficient": true
+        },
+        "status": "derived",
+        "note": "answered on the laptop: its own model, or the app's own line"
+      },
+      "total_ms_cloud": {
+        "value": {
+          "count": 25,
+          "p50": 2280,
+          "p75": 2280,
+          "p95": 2520,
+          "excluded": 0,
+          "of": 25,
+          "sufficient": false
+        },
+        "status": "derived",
+        "note": "answered by the cloud: the reply the learner heard was the cloud's"
+      },
+      "stt_ms": {
+        "value": {
+          "count": 72,
+          "p50": 180,
+          "p75": 190,
+          "p95": 200,
+          "excluded": 0,
+          "of": 72,
+          "sufficient": true
+        },
+        "status": "direct",
+        "note": "speech to text"
+      },
+      "llm_ttft_ms": {
+        "value": {
+          "count": 72,
+          "p50": 2450,
+          "p75": 2850,
+          "p95": 3250,
+          "excluded": 0,
+          "of": 72,
+          "sufficient": true
+        },
+        "status": "direct",
+        "note": "the language model's first token"
+      },
+      "llm_completion_ms": {
+        "value": {
+          "count": 72,
+          "p50": 4700,
+          "p75": 5500,
+          "p95": 6300,
+          "excluded": 0,
+          "of": 72,
+          "sufficient": true
+        },
+        "status": "direct",
+        "note": "the language model's whole reply"
+      },
+      "tts_first_audio_ms": {
+        "value": {
+          "count": 70,
+          "p50": 265,
+          "p75": 270,
+          "p95": 280,
+          "excluded": 0,
+          "of": 72,
+          "sufficient": true
+        },
+        "status": "direct",
+        "note": "text to speech's first audio; builds that keep it"
+      },
+      "warm_up_ms": {
+        "value": {
+          "count": 16,
+          "p50": 4400,
+          "p75": 4500,
+          "p95": 4600,
+          "excluded": 0,
+          "of": 72,
+          "sufficient": false
+        },
+        "status": "direct",
+        "note": "setting up a talk: its instructions into the model, reported by the first reply after"
+      },
+      "recap_total_ms": {
+        "value": {
+          "count": 15,
+          "p50": 5200,
+          "p75": 5200,
+          "p95": 5200,
+          "excluded": 0,
+          "of": 15,
+          "sufficient": false
+        },
+        "status": "direct",
+        "note": "recaps that succeeded"
+      },
+      "cold_start_ms": {
+        "value": {
+          "count": 9,
+          "p50": 9000,
+          "p75": 9000,
+          "p95": 9000,
+          "excluded": 0,
+          "of": 9,
+          "sufficient": false
+        },
+        "status": "direct",
+        "note": "launch \u2192 engines ready"
+      },
+      "cold_start_ms_started": {
+        "value": {
+          "count": 8,
+          "p50": 9000,
+          "p75": 9000,
+          "p95": 9000,
+          "excluded": 0,
+          "of": 8,
+          "sufficient": false
+        },
+        "status": "derived",
+        "note": "launches where Ella started its own model server; one it found running (`external`) loaded nothing; 8 launches: too few to stand for the fleet"
+      },
+      "update_ms_by_step": {
+        "value": {
+          "check_failed": {
+            "count": 1,
+            "p50": 80,
+            "p75": 80,
+            "p95": 80,
+            "excluded": 0,
+            "of": 1,
+            "sufficient": false
+          },
+          "up_to_date": {
+            "count": 9,
+            "p50": 900,
+            "p75": 900,
+            "p95": 900,
+            "excluded": 0,
+            "of": 9,
+            "sufficient": false
+          }
+        },
+        "status": "derived",
+        "note": "the updater, by step"
+      }
+    },
+    "reliability": {
+      "app": {
+        "turns": {
+          "value": 74,
+          "status": "direct",
+          "note": "every turn but Word of the day's, as the weekly report counts"
+        },
+        "turn_errors": {
+          "value": 2,
+          "status": "direct"
+        },
+        "no_speech": {
+          "value": 1,
+          "status": "direct",
+          "note": "the learner said nothing Ella could hear: no system error"
+        },
+        "system_errors": {
+          "value": 1,
+          "status": "direct",
+          "note": "turn errors other than no speech"
+        },
+        "system_error_rate": {
+          "value": 0.0135,
+          "status": "derived",
+          "note": "system errors over turns"
+        },
+        "system_errors_by_stage": {
+          "value": {
+            "llm:start": 1
+          },
+          "status": "direct",
+          "note": "where the turn failed"
+        },
+        "system_errors_by_code": {
+          "value": {
+            "engine_request": 1
+          },
+          "status": "direct"
+        },
+        "cloud_failed_runs": {
+          "value": 0,
+          "status": "direct",
+          "note": "cloud generations that failed; the turn may still have been answered"
+        },
+        "stt_fallbacks": {
+          "value": 0,
+          "status": "direct",
+          "note": "turns whose speech to text fell back to another engine: a fallback, not an error"
+        },
+        "recaps": {
+          "value": 16,
+          "status": "direct",
+          "note": "Word of the day's left out"
+        },
+        "recap_errors": {
+          "value": 1,
+          "status": "direct"
+        },
+        "failed_judges": {
+          "value": 1,
+          "status": "direct"
+        },
+        "recap_only_talks": {
+          "value": 1,
+          "status": "derived",
+          "note": "recaps whose talk's turns are not among the events read: held, lost, or from before the queue; a sign for collection, not counted in talk_lifecycle"
+        },
+        "engine_errors": {
+          "value": 0,
+          "status": "direct",
+          "note": "engines that came up with an error"
+        },
+        "cloud_down": {
+          "value": 3,
+          "status": "direct",
+          "note": "times the app found the cloud down and answered on the laptop instead"
+        },
+        "cloud_down_by_reason": {
+          "value": {
+            "could_not_connect": 1,
+            "http_503": 1,
+            "timed_out": 1
+          },
+          "status": "direct"
+        },
+        "update_errors_by_step": {
+          "value": {
+            "check_failed": 1
+          },
+          "status": "direct"
+        }
+      },
+      "collection": {
+        "reported_in": {
+          "value": "collection",
+          "status": "direct",
+          "note": "a pointer, not a copy: the report's own Collection section, telemetry-health's summary of the batch record, is the one record of collection"
+        }
+      },
+      "reading": {
+        "events_read": {
+          "value": 225,
+          "status": "direct"
+        },
+        "unreadable": {
+          "value": 0,
+          "status": "direct"
+        },
+        "policy_excluded_count": {
+          "value": 0,
+          "status": "direct"
+        },
+        "values_replaced": {
+          "value": 0,
+          "status": "direct"
+        },
+        "unknown_fields_dropped": {
+          "value": 0,
+          "status": "direct"
+        }
+      }
+    },
+    "platform": {
+      "installs_by_os_family": {
+        "value": {
+          "macOS": 3,
+          "small groups": 3
+        },
+        "status": "derived",
+        "note": "by the install's newest launch line; groups of fewer than 3 installs in `small groups`"
+      },
+      "installs_by_arch": {
+        "value": {
+          "aarch64": 3,
+          "x86_64": 3
+        },
+        "status": "derived",
+        "note": "by the install's newest launch line; groups of fewer than 3 installs in `small groups`"
+      },
+      "installs_by_cpu_class": {
+        "value": {
+          "Apple M-series": 3,
+          "small groups": 3
+        },
+        "status": "derived",
+        "note": "by the install's newest launch line; groups of fewer than 3 installs in `small groups`"
+      },
+      "installs_by_ram_band": {
+        "value": {
+          "small groups": 6
+        },
+        "status": "derived",
+        "note": "by the install's newest launch line; groups of fewer than 3 installs in `small groups`"
+      },
+      "installs_by_install_place": {
+        "value": {
+          "small groups": 6
+        },
+        "status": "derived",
+        "note": "by the install's newest launch line; groups of fewer than 3 installs in `small groups`"
+      },
+      "installs_by_app_version": {
+        "value": {
+          "9.9.0-synthetic": 3,
+          "9.9.1-synthetic": 3
+        },
+        "status": "derived",
+        "note": "an install counted in each version it ran; groups of fewer than 3 installs in `small groups`"
+      },
+      "turns_by_app_version": {
+        "value": {
+          "9.9.1-synthetic": 54,
+          "9.9.0-synthetic": 22
+        },
+        "status": "direct",
+        "note": "every turn; versions run by fewer than 3 installs in `small groups`"
+      },
+      "wait_ms_laptop_by_os_family": {
+        "value": {
+          "macOS": {
+            "count": 35,
+            "p50": 5700,
+            "p75": 6100,
+            "p95": 6500,
+            "excluded": 0,
+            "of": 35,
+            "sufficient": true
+          },
+          "small groups": {
+            "count": 12,
+            "withheld": "groups of fewer than 3 installs or 30 measurements"
+          }
+        },
+        "status": "derived",
+        "note": "answered on the laptop; shown for groups of 3+ installs and 30+ turns, the rest in `small groups`"
+      },
+      "wait_ms_laptop_by_cpu_class": {
+        "value": {
+          "Apple M-series": {
+            "count": 35,
+            "p50": 5700,
+            "p75": 6100,
+            "p95": 6500,
+            "excluded": 0,
+            "of": 35,
+            "sufficient": true
+          },
+          "small groups": {
+            "count": 12,
+            "withheld": "groups of fewer than 3 installs or 30 measurements"
+          }
+        },
+        "status": "derived",
+        "note": "answered on the laptop; shown for groups of 3+ installs and 30+ turns, the rest in `small groups`"
+      },
+      "wait_ms_laptop_by_ram_band": {
+        "value": {
+          "small groups": {
+            "count": 47,
+            "withheld": "groups of fewer than 3 installs or 30 measurements"
+          }
+        },
+        "status": "derived",
+        "note": "answered on the laptop; shown for groups of 3+ installs and 30+ turns, the rest in `small groups`"
+      },
+      "wait_ms_laptop_by_app_version": {
+        "value": {
+          "small groups": {
+            "count": 47,
+            "withheld": "groups of fewer than 3 installs or 30 measurements"
+          }
+        },
+        "status": "derived",
+        "note": "answered on the laptop; shown for groups of 3+ installs and 30+ turns, the rest in `small groups`"
+      }
+    }
+  }
+}

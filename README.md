@@ -858,6 +858,12 @@ Nothing in it names an install, a talk or a launch, or holds what a learner
 said or what Ella was told. The same events and the same generation time give
 the same report, in whatever order the events are read.
 
+To see every section with something in it, without real data:
+`npm run telemetry:synthetic` makes six made-up laptops' batches, takes them
+in and reports 2026-W02 with the same tools, all of it marked synthetic (see
+`scripts/fixtures/telemetry-synthetic/README.md`); the tests expect the same
+report.
+
 Read it with its limits: a talk that spans two weeks counts in each; a
 group shown needs a fleet bigger than the 4 laptops of 2026-W45, all of them
 running from source; and the recap's total has a long tail (P75 of minutes)

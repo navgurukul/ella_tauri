@@ -1,0 +1,4 @@
+# Synthetic telemetry fixtures: kept byte for byte. A batch's id is the hash
+# of its bytes, and the expected report is compared exactly, so no checkout
+# may change their line endings.
+* -text
