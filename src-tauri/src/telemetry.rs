@@ -397,9 +397,14 @@ struct TurnDetail {
     warm_up: Option<WarmUpReport>,
     /// What happened to the reply on the way, in order: `flagged`,
     /// `no_audio_ahead`, `repeated_question`, `rewrite_repeat_dropped`,
-    /// `rewrite_empty`, `repeat_dropped`, `took_offer`,
+    /// `rewrite_used`, `rewrite_empty`, `repeat_dropped`,
+    /// `took_offer`,
     /// `said_before_dropped`, `ledger_break`, `ledger_break_twice`,
     /// `audio_ahead_dropped`, `piper_broke`.
+    /// `rewrite_repeat_dropped` means a duplicate question was stripped;
+    /// `rewrite_used` means the remaining rewrite was returned, while
+    /// `rewrite_empty` means filtering left nothing and the first attempt
+    /// was kept.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     notes: Vec<&'static str>,
     /// `overlapped`, said from audio made while the reply was written;

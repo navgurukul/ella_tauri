@@ -26,12 +26,25 @@
 //! sexual, or severely mean) is rustrict's own recommended general-audience
 //! threshold, confirmed by testing to stay clear of ordinary chore friction
 //! ("that price is a rip-off!"), which only reaches its milder `MEAN` level.
-use rustrict::{CensorStr, Type};
+use rustrict::{Censor, Trie, Type};
+use std::sync::OnceLock;
+
+fn safety_trie() -> &'static Trie {
+    static TRIE: OnceLock<Trie> = OnceLock::new();
+    TRIE.get_or_init(|| {
+        let mut trie = Trie::default();
+        trie.set("right? it", Type::NONE);
+        trie
+    })
+}
 
 /// Whether `text` trips rustrict's general-audience profanity/vulgarity
-/// threshold.
+/// threshold. The one known safe phrase is added to rustrict's trie so the
+/// full text can be checked without splitting at sentence boundaries.
 pub fn flagged(text: &str) -> bool {
-    text.is(Type::INAPPROPRIATE)
+    let mut censor = Censor::from_str(text);
+    censor.with_trie(safety_trie());
+    censor.analyze().is(Type::INAPPROPRIATE)
 }
 
 /// A censored copy of `text` with anything rustrict recognizes as profane,
@@ -41,7 +54,9 @@ pub fn flagged(text: &str) -> bool {
 /// gets read back during a transcript review like the one that found the
 /// cases in this file.
 pub fn censor(text: &str) -> String {
-    text.censor()
+    let mut censor = Censor::from_str(text);
+    censor.with_trie(safety_trie());
+    censor.censor()
 }
 
 /// A fixed decline that never repeats the flagged text back, followed by the
@@ -193,5 +208,28 @@ mod tests {
             censor("I ate bhel puri near my college yesterday."),
             "I ate bhel puri near my college yesterday."
         );
+    }
+
+    #[test]
+    fn repetition_complaint_is_not_flagged_as_inappropriate() {
+        let complaint = "You are asking me repeated question, right? It is I have already answered this question previously. Mmhmm";
+        assert!(!flagged(complaint));
+    }
+
+    #[test]
+    fn obfuscated_profanity_inside_a_complaint_does_not_bypass_the_filter() {
+        let complaint = "You are asking me repeated question, right? It is I have already answered this question previously.";
+        for profanity in ["sh!t", "b!tch", "f?ck", "f.u.c.k. y.o.u."] {
+            assert!(
+                flagged(&format!("{complaint} You are a {profanity}.")),
+                "{profanity}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_repetition_complaint_is_not_censored_as_profanity() {
+        let complaint = "You are asking me repeated question, right? It is I have already answered this question previously.";
+        assert_eq!(censor(complaint), complaint);
     }
 }
