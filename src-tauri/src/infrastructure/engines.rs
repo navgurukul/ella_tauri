@@ -45,6 +45,10 @@ use crate::{
     topics,
 };
 
+// Beside this file, not in an `engines/` folder, which `.gitignore` leaves out.
+#[path = "laptop_prompts.rs"]
+mod laptop_prompts;
+
 #[derive(Debug)]
 pub struct GeneratedReply {
     pub text: String,
@@ -4230,7 +4234,8 @@ const LAPTOP_LESSON_CLOSING_TOKENS: u32 = 40;
 /// What the laptop's model is asked for a reply when it is not what the
 /// cloud's is: a lesson's own instructions, history and note
 /// (`lesson_prompt::laptop_system_prompt`), with a grammar its reply must
-/// follow and a budget of its own.
+/// follow and a budget of its own; or a talk's or chore's own instructions
+/// over the same conversation (`laptop_prompts`).
 struct Laptop {
     messages: Vec<Value>,
     grammar: Option<String>,
@@ -4783,11 +4788,10 @@ impl TutorEngine for LocalEngine {
 
     fn opening(&self, topic: &Topic, learner_name: &str, pitch: &Pitch) -> EllaResult<String> {
         let text = opening_for(&topic.id, learner_name);
-        self.warm_prompt_cache(
-            ella_system_prompt(learner_name, &topic.id, &topic.label, pitch),
-            text.clone(),
-            vec![("topic", ella_topic_prompt(learner_name, &topic.id, &topic.label, &pitch.level))],
-        );
+        // llama-server keeps the laptop's own instructions: the cloud keeps
+        // nothing of ours between requests.
+        let system = laptop_prompts::topic_prompt(learner_name, &topic.id, &topic.label, &pitch.level);
+        self.warm_prompt_cache(system.clone(), text.clone(), vec![("topic", system)]);
         Ok(text)
     }
 
@@ -4806,7 +4810,7 @@ impl TutorEngine for LocalEngine {
                 topic_id,
                 topic_label,
                 level,
-            } => self.prepare_prompt("topic", ella_topic_prompt(learner_name, topic_id, topic_label, level)),
+            } => self.prepare_prompt("topic", laptop_prompts::topic_prompt(learner_name, topic_id, topic_label, level)),
             NextTalk::Placement { learner_name, age } => {
                 self.prepare_prompt("placement", placement_system_prompt(learner_name, *age))
             }
@@ -5107,7 +5111,7 @@ impl TutorEngine for LocalEngine {
         let text = chore_opening_for(&context.chore_id)
             .map(str::to_owned)
             .unwrap_or_else(|| fallback_opening(context));
-        let system = chore_system_prompt(learner_name, context);
+        let system = laptop_prompts::chore_prompt(learner_name, context);
         // Everything that moves between turns is in the turn's note, so the
         // whole of this is the same for every talk of this chore at this level.
         self.warm_prompt_cache(system.clone(), text.clone(), vec![("chore", system)]);
@@ -5126,6 +5130,19 @@ impl TutorEngine for LocalEngine {
                 &request.topic_id,
                 &request.topic_label,
                 &request.pitch,
+            ),
+        };
+        // The laptop's own instructions, where they are not the cloud's
+        // (`laptop_prompts`). The placement chat's are the same for both: its
+        // readiness check is read off its prefix in the slot.
+        let laptop_system = match (&request.placement, &request.chore) {
+            (Some(_), _) => system.clone(),
+            (None, Some(context)) => laptop_prompts::chore_prompt(&request.learner_name, context),
+            (None, None) => laptop_prompts::topic_prompt(
+                &request.learner_name,
+                &request.topic_id,
+                &request.topic_label,
+                &request.pitch.level,
             ),
         };
         let mut history = self.history_messages(request);
@@ -5174,7 +5191,7 @@ impl TutorEngine for LocalEngine {
             telemetry::note("no_audio_ahead");
         }
 
-        let first = self.stream_once(&system, &history, None, aim.as_deref(), pipeline.as_mut(), TALK_BUDGET)?;
+        let first = self.stream_once(&system, &laptop_system, &history, None, aim.as_deref(), pipeline.as_mut(), TALK_BUDGET)?;
         // Only the first generation feeds the speaker; a regenerated reply is
         // said from scratch by the caller. Whatever is still being synthesized
         // carries on while the reply is checked.
@@ -5205,6 +5222,7 @@ impl TutorEngine for LocalEngine {
                 drop(pipeline.take());
                 let second = self.stream_once(
                     &system,
+                    &laptop_system,
                     &history,
                     Some(&corrective),
                     None,
@@ -5342,7 +5360,7 @@ impl TutorEngine for LocalEngine {
             ledger.spec.unit,
             ledger.current,
         );
-        let second = self.stream_once(&system, &history, Some(&corrective), None, None, TALK_BUDGET)?;
+        let second = self.stream_once(&system, &laptop_system, &history, Some(&corrective), None, None, TALK_BUDGET)?;
         let (retry_text, retry_signal) = take_signal(&second.text);
         let retry_figure = settled_figure(
             &retry_text,
@@ -6054,19 +6072,31 @@ impl LocalEngine {
     fn stream_once(
         &self,
         system: &str,
+        laptop_system: &str,
         history: &[Value],
         corrective: Option<&str>,
         aim: Option<&str>,
         speech: Option<&mut SpeechPipeline>,
         budget: Budget,
     ) -> EllaResult<GeneratedReply> {
-        let mut messages = vec![json!({"role": "system", "content": system})];
-        messages.extend(history.iter().cloned());
-        if let Some(corrective) = corrective {
-            messages.push(json!({"role": "system", "content": corrective}));
-        }
-        log_prompt(system, self.llm_slot);
-        self.stream_reply(messages, None, corrective.is_some(), aim, speech, budget)
+        let chained = |system: &str| {
+            let mut messages = vec![json!({"role": "system", "content": system})];
+            messages.extend(history.iter().cloned());
+            if let Some(corrective) = corrective {
+                messages.push(json!({"role": "system", "content": corrective}));
+            }
+            messages
+        };
+        // The cloud is asked `system`; the laptop, its own instructions over
+        // the same conversation, with the same budget and no grammar.
+        let laptop = (laptop_system != system).then(|| Laptop {
+            messages: chained(laptop_system),
+            grammar: None,
+            max_tokens: budget.local,
+            said_as_written: true,
+        });
+        log_prompt(laptop_system, self.llm_slot);
+        self.stream_reply(chained(system), laptop, corrective.is_some(), aim, speech, budget)
             .map(|(reply, _)| reply)
     }
 
@@ -10309,11 +10339,16 @@ mod errand_tests {
         assert_eq!(talk_turns(&fake), 0, "the cloud wrote it");
         let read = readings(&fake);
         assert_eq!(read.len(), 1, "the laptop read the conversation once");
+        // What the laptop would reply to: the same conversation, under the
+        // laptop's own instructions (`laptop_prompts`).
+        let read = read[0].body["messages"].as_array().unwrap();
+        let asked = fake.cloud_chats()[0].body["messages"].as_array().unwrap().clone();
         assert_eq!(
-            read[0].body["messages"],
-            fake.cloud_chats()[0].body["messages"],
-            "what the laptop would reply to"
+            read[0]["content"],
+            laptop_prompts::topic_prompt("Souvik", "street-food", "Street food stories", "B2"),
+            "the laptop's instructions"
         );
+        assert_eq!(read[1..], asked[1..], "over the conversation the cloud was asked about");
         let event = crate::telemetry::written().pop().unwrap();
         assert!(event["notes"].as_array().unwrap().contains(&json!("laptop_hedged")));
 
