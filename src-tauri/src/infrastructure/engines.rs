@@ -4235,6 +4235,9 @@ struct Laptop {
     messages: Vec<Value>,
     grammar: Option<String>,
     max_tokens: u32,
+    /// Whether Piper may read the reply as it is written. Not a lesson's,
+    /// which the app says only once it has put its own lines around it.
+    said_as_written: bool,
 }
 
 /// Who wrote a reply.
@@ -5632,6 +5635,7 @@ impl LocalEngine {
                 lesson_prompt::LaptopStep::Practise => LAPTOP_LESSON_TOKENS,
                 _ => LAPTOP_LESSON_CLOSING_TOKENS,
             },
+            said_as_written: false,
         };
         let mut pipeline = self
             .piper_daemon
@@ -6158,7 +6162,7 @@ impl LocalEngine {
         // The laptop's lesson reply is said only once the app has put its own
         // lines around it, so Piper reading it as it is written would be
         // work thrown away, on a CPU the model needs.
-        if laptop.is_some() {
+        if laptop.as_ref().is_some_and(|laptop| !laptop.said_as_written) {
             speech = None;
         }
         let errand = self.queue.running();
