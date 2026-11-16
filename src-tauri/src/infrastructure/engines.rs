@@ -11074,13 +11074,20 @@ mod errand_tests {
             }
         }
 
-        fn assert_all(found: Vec<String>) {
+        fn assert_all(found: Vec<String>, also: &str) {
             assert!(
                 found.is_empty(),
-                "{}\n(write them again with ELLA_WRITE_PROMPT_SNAPSHOTS=1 if the change is meant)",
+                "{}\n(write them again with ELLA_WRITE_PROMPT_SNAPSHOTS=1 if the change is meant){also}",
                 found.join("\n")
             );
         }
+
+        /// Said when the cloud's prompt moved: the laptop's talk and chore
+        /// instructions are its own, and nothing else says they fell behind.
+        const MIRROR_ON_THE_LAPTOP: &str = "\nThe laptop's model has its own talk and chore \
+            instructions (src-tauri/src/infrastructure/laptop_prompts.rs). If you changed \
+            ella_topic_prompt or chore_system_prompt, make the same change there, and pin any \
+            new phrase in its tests too.";
 
         #[test]
         fn what_the_laptops_model_is_asked_matches_its_snapshots() {
@@ -11098,7 +11105,7 @@ mod errand_tests {
                 assert!(!bodies.is_empty(), "{}: the laptop was asked nothing", scenario.name);
                 found.extend(check(&format!("laptop/{}.txt", scenario.name), &render(&bodies)));
             }
-            assert_all(found);
+            assert_all(found, "");
         }
 
         #[test]
@@ -11112,7 +11119,7 @@ mod errand_tests {
                 assert!(!bodies.is_empty(), "{}: the cloud was asked nothing", scenario.name);
                 found.extend(check(&format!("cloud/{}.txt", scenario.name), &render(&bodies)));
             }
-            assert_all(found);
+            assert_all(found, MIRROR_ON_THE_LAPTOP);
         }
     }
 }
