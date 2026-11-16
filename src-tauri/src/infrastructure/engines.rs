@@ -45,6 +45,10 @@ use crate::{
     topics,
 };
 
+// Beside this file, not in an `engines/` folder, which `.gitignore` leaves out.
+#[path = "laptop_prompts.rs"]
+mod laptop_prompts;
+
 #[derive(Debug)]
 pub struct GeneratedReply {
     pub text: String,
@@ -4230,11 +4234,15 @@ const LAPTOP_LESSON_CLOSING_TOKENS: u32 = 40;
 /// What the laptop's model is asked for a reply when it is not what the
 /// cloud's is: a lesson's own instructions, history and note
 /// (`lesson_prompt::laptop_system_prompt`), with a grammar its reply must
-/// follow and a budget of its own.
+/// follow and a budget of its own; or a talk's or chore's own instructions
+/// over the same conversation (`laptop_prompts`).
 struct Laptop {
     messages: Vec<Value>,
     grammar: Option<String>,
     max_tokens: u32,
+    /// Whether Piper may read the reply as it is written. Not a lesson's,
+    /// which the app says only once it has put its own lines around it.
+    said_as_written: bool,
 }
 
 /// Who wrote a reply.
@@ -4780,11 +4788,10 @@ impl TutorEngine for LocalEngine {
 
     fn opening(&self, topic: &Topic, learner_name: &str, pitch: &Pitch) -> EllaResult<String> {
         let text = opening_for(&topic.id, learner_name);
-        self.warm_prompt_cache(
-            ella_system_prompt(learner_name, &topic.id, &topic.label, pitch),
-            text.clone(),
-            vec![("topic", ella_topic_prompt(learner_name, &topic.id, &topic.label, &pitch.level))],
-        );
+        // llama-server keeps the laptop's own instructions: the cloud keeps
+        // nothing of ours between requests.
+        let system = laptop_prompts::topic_prompt(learner_name, &topic.id, &topic.label, &pitch.level);
+        self.warm_prompt_cache(system.clone(), text.clone(), vec![("topic", system)]);
         Ok(text)
     }
 
@@ -4803,7 +4810,7 @@ impl TutorEngine for LocalEngine {
                 topic_id,
                 topic_label,
                 level,
-            } => self.prepare_prompt("topic", ella_topic_prompt(learner_name, topic_id, topic_label, level)),
+            } => self.prepare_prompt("topic", laptop_prompts::topic_prompt(learner_name, topic_id, topic_label, level)),
             NextTalk::Placement { learner_name, age } => {
                 self.prepare_prompt("placement", placement_system_prompt(learner_name, *age))
             }
@@ -5104,7 +5111,7 @@ impl TutorEngine for LocalEngine {
         let text = chore_opening_for(&context.chore_id)
             .map(str::to_owned)
             .unwrap_or_else(|| fallback_opening(context));
-        let system = chore_system_prompt(learner_name, context);
+        let system = laptop_prompts::chore_prompt(learner_name, context);
         // Everything that moves between turns is in the turn's note, so the
         // whole of this is the same for every talk of this chore at this level.
         self.warm_prompt_cache(system.clone(), text.clone(), vec![("chore", system)]);
@@ -5123,6 +5130,19 @@ impl TutorEngine for LocalEngine {
                 &request.topic_id,
                 &request.topic_label,
                 &request.pitch,
+            ),
+        };
+        // The laptop's own instructions, where they are not the cloud's
+        // (`laptop_prompts`). The placement chat's are the same for both: its
+        // readiness check is read off its prefix in the slot.
+        let laptop_system = match (&request.placement, &request.chore) {
+            (Some(_), _) => system.clone(),
+            (None, Some(context)) => laptop_prompts::chore_prompt(&request.learner_name, context),
+            (None, None) => laptop_prompts::topic_prompt(
+                &request.learner_name,
+                &request.topic_id,
+                &request.topic_label,
+                &request.pitch.level,
             ),
         };
         let mut history = self.history_messages(request);
@@ -5171,7 +5191,7 @@ impl TutorEngine for LocalEngine {
             telemetry::note("no_audio_ahead");
         }
 
-        let first = self.stream_once(&system, &history, None, aim.as_deref(), pipeline.as_mut(), TALK_BUDGET)?;
+        let first = self.stream_once(&system, &laptop_system, &history, None, aim.as_deref(), pipeline.as_mut(), TALK_BUDGET)?;
         // Only the first generation feeds the speaker; a regenerated reply is
         // said from scratch by the caller. Whatever is still being synthesized
         // carries on while the reply is checked.
@@ -5202,6 +5222,7 @@ impl TutorEngine for LocalEngine {
                 drop(pipeline.take());
                 let second = self.stream_once(
                     &system,
+                    &laptop_system,
                     &history,
                     Some(&corrective),
                     None,
@@ -5339,7 +5360,7 @@ impl TutorEngine for LocalEngine {
             ledger.spec.unit,
             ledger.current,
         );
-        let second = self.stream_once(&system, &history, Some(&corrective), None, None, TALK_BUDGET)?;
+        let second = self.stream_once(&system, &laptop_system, &history, Some(&corrective), None, None, TALK_BUDGET)?;
         let (retry_text, retry_signal) = take_signal(&second.text);
         let retry_figure = settled_figure(
             &retry_text,
@@ -5632,6 +5653,7 @@ impl LocalEngine {
                 lesson_prompt::LaptopStep::Practise => LAPTOP_LESSON_TOKENS,
                 _ => LAPTOP_LESSON_CLOSING_TOKENS,
             },
+            said_as_written: false,
         };
         let mut pipeline = self
             .piper_daemon
@@ -6050,19 +6072,31 @@ impl LocalEngine {
     fn stream_once(
         &self,
         system: &str,
+        laptop_system: &str,
         history: &[Value],
         corrective: Option<&str>,
         aim: Option<&str>,
         speech: Option<&mut SpeechPipeline>,
         budget: Budget,
     ) -> EllaResult<GeneratedReply> {
-        let mut messages = vec![json!({"role": "system", "content": system})];
-        messages.extend(history.iter().cloned());
-        if let Some(corrective) = corrective {
-            messages.push(json!({"role": "system", "content": corrective}));
-        }
-        log_prompt(system, self.llm_slot);
-        self.stream_reply(messages, None, corrective.is_some(), aim, speech, budget)
+        let chained = |system: &str| {
+            let mut messages = vec![json!({"role": "system", "content": system})];
+            messages.extend(history.iter().cloned());
+            if let Some(corrective) = corrective {
+                messages.push(json!({"role": "system", "content": corrective}));
+            }
+            messages
+        };
+        // The cloud is asked `system`; the laptop, its own instructions over
+        // the same conversation, with the same budget and no grammar.
+        let laptop = (laptop_system != system).then(|| Laptop {
+            messages: chained(laptop_system),
+            grammar: None,
+            max_tokens: budget.local,
+            said_as_written: true,
+        });
+        log_prompt(laptop_system, self.llm_slot);
+        self.stream_reply(chained(system), laptop, corrective.is_some(), aim, speech, budget)
             .map(|(reply, _)| reply)
     }
 
@@ -6158,7 +6192,7 @@ impl LocalEngine {
         // The laptop's lesson reply is said only once the app has put its own
         // lines around it, so Piper reading it as it is written would be
         // work thrown away, on a CPU the model needs.
-        if laptop.is_some() {
+        if laptop.as_ref().is_some_and(|laptop| !laptop.said_as_written) {
             speech = None;
         }
         let errand = self.queue.running();
@@ -10305,11 +10339,16 @@ mod errand_tests {
         assert_eq!(talk_turns(&fake), 0, "the cloud wrote it");
         let read = readings(&fake);
         assert_eq!(read.len(), 1, "the laptop read the conversation once");
+        // What the laptop would reply to: the same conversation, under the
+        // laptop's own instructions (`laptop_prompts`).
+        let read = read[0].body["messages"].as_array().unwrap();
+        let asked = fake.cloud_chats()[0].body["messages"].as_array().unwrap().clone();
         assert_eq!(
-            read[0].body["messages"],
-            fake.cloud_chats()[0].body["messages"],
-            "what the laptop would reply to"
+            read[0]["content"],
+            laptop_prompts::topic_prompt("Souvik", "street-food", "Street food stories", "B2"),
+            "the laptop's instructions"
         );
+        assert_eq!(read[1..], asked[1..], "over the conversation the cloud was asked about");
         let event = crate::telemetry::written().pop().unwrap();
         assert!(event["notes"].as_array().unwrap().contains(&json!("laptop_hedged")));
 
@@ -10738,5 +10777,342 @@ mod errand_tests {
         assert!(assessing.join().unwrap().is_err(), "and gives up when Ella closes");
         assert!(fake.completions().is_empty(), "having asked the model nothing");
         drop(talking);
+    }
+
+    /// Golden snapshots of exactly what each model is asked in a reply, for
+    /// a fixed set of scenarios: what llama-server gets with no cloud (the
+    /// laptop's prompt), and what the proxy gets with the cloud up (the
+    /// cloud's prompt). A change to either fails here until its snapshot is
+    /// written again with `ELLA_WRITE_PROMPT_SNAPSHOTS=1`, so a prompt change
+    /// shows in review as a diff of `src-tauri/tests/prompt_snapshots/`, and
+    /// a change meant for one model shows that the other's did not move.
+    mod prompt_snapshots {
+        use super::*;
+        use crate::domain::Focus;
+
+        struct Scenario {
+            name: &'static str,
+            request: TutorRequest,
+            /// What the stand-in writes for the laptop, turn by turn.
+            replies: &'static [&'static str],
+        }
+
+        fn talk(topic_id: &str, level: &str, exchanges: &[(&str, &str)], answer: &str) -> TutorRequest {
+            let topic = topics::find(topic_id).expect("a topic in the catalogue");
+            let mut messages = vec![said(Speaker::Ella, &opening_for(topic_id, "Asha"), 0)];
+            for (index, (learner, ella)) in exchanges.iter().enumerate() {
+                let turn = index as u32 + 1;
+                messages.push(said(Speaker::Learner, learner, turn));
+                messages.push(said(Speaker::Ella, ella, turn));
+            }
+            TutorRequest {
+                learner_name: "Asha".into(),
+                topic_id: topic.id.clone(),
+                topic_label: topic.label.clone(),
+                messages,
+                learner_text: answer.into(),
+                turn: exchanges.len() as u32 + 1,
+                chore: None,
+                pitch: Pitch::at(level),
+                placement: None,
+                lesson: None,
+            }
+        }
+
+        fn scene(chore_id: &str, level: &str, current: Option<i32>, exchanges: &[(&str, &str)], answer: &str) -> TutorRequest {
+            let chore = find_chore(chore_id).expect("a chore in the catalogue");
+            let mut messages = vec![said(
+                Speaker::Ella,
+                chore_opening_for(chore_id).expect("an authored opening"),
+                0,
+            )];
+            for (index, (learner, character)) in exchanges.iter().enumerate() {
+                let turn = index as u32 + 1;
+                messages.push(said(Speaker::Learner, learner, turn));
+                messages.push(said(Speaker::Ella, character, turn));
+            }
+            TutorRequest {
+                learner_name: "Asha".into(),
+                topic_id: chore.id.clone(),
+                topic_label: chore.title.clone(),
+                messages,
+                learner_text: answer.into(),
+                turn: exchanges.len() as u32 + 1,
+                chore: Some(ChoreContext {
+                    chore_id: chore.id.clone(),
+                    level: level.into(),
+                    character: find_character(&chore.character_id).unwrap(),
+                    setting: chore.setting.clone(),
+                    learner_goal: chore.learner_goal.clone(),
+                    character_brief: chore.character_brief.clone(),
+                    max_turns: chore.max_turns,
+                    ledger: match &chore.win {
+                        WinCondition::Ledger(spec) => Some(LedgerTurn {
+                            spec: spec.clone(),
+                            current: current.unwrap_or(spec.opening),
+                            agreed: false,
+                        }),
+                        WinCondition::Rubric { .. } => None,
+                    },
+                }),
+                pitch: Pitch::at(level),
+                placement: None,
+                lesson: None,
+            }
+        }
+
+        fn first_talk(age: Option<u8>, exchanges: &[(&str, &str)], answer: &str, closing: bool) -> TutorRequest {
+            let mut messages = vec![said(Speaker::Ella, &placement_opening_line("Asha"), 0)];
+            for (index, (learner, ella)) in exchanges.iter().enumerate() {
+                let turn = index as u32 + 1;
+                messages.push(said(Speaker::Learner, learner, turn));
+                messages.push(said(Speaker::Ella, ella, turn));
+            }
+            TutorRequest {
+                learner_name: "Asha".into(),
+                topic_id: "placement".into(),
+                topic_label: "First talk".into(),
+                messages,
+                learner_text: answer.into(),
+                turn: exchanges.len() as u32 + 1,
+                chore: None,
+                pitch: Pitch::at("A2"),
+                placement: Some(crate::domain::PlacementBrief { age, closing }),
+                lesson: None,
+            }
+        }
+
+        const FOOD: [(&str, &str); 5] = [
+            ("I ate vada pav near the station yesterday.", "Vada pav near the station sounds tasty. Who were you with?"),
+            ("With my friend Rohan, after college.", "After college with Rohan sounds fun. What did it taste like?"),
+            ("It was very spicy and hot, I like spicy.", "Spicy and hot is a great choice. How much did it cost?"),
+            ("Only twenty rupees for two.", "Twenty rupees for two is a good deal. Do you go there often?"),
+            ("Yes, every Friday we go there.", "Every Friday sounds like a nice habit. What else do you eat there?"),
+        ];
+
+        fn scenarios() -> Vec<Scenario> {
+            let mut aimed = talk("street-food", "A2", &FOOD[..1], "Rohan likes it very much.");
+            aimed.pitch.focus = Some(Focus {
+                step_title: "Telling what happened".into(),
+                step_focus: "Talking about the past.".into(),
+                skill: "I can say what I did yesterday.".into(),
+                label: "What I did".into(),
+            });
+            vec![
+                Scenario {
+                    name: "talk_01_first_turn",
+                    request: talk("street-food", "A2", &[], "I ate vada pav near the station yesterday."),
+                    replies: &["Vada pav near the station sounds tasty. Who were you with?"],
+                },
+                Scenario {
+                    name: "talk_02_multi_turn",
+                    request: talk("street-food", "A2", &FOOD[..2], "It was very spicy and hot, I like spicy."),
+                    replies: &["Spicy and hot is a great choice. How much did it cost?"],
+                },
+                Scenario {
+                    name: "talk_03_nearly_over",
+                    request: talk("street-food", "A2", &FOOD[..4], "Yes, every Friday we go there."),
+                    replies: &["Every Friday sounds nice. What else do you eat there?"],
+                },
+                Scenario {
+                    name: "talk_04_last_reply",
+                    request: talk("street-food", "A2", &FOOD, "Sometimes pani puri, sometimes chai."),
+                    replies: &["Pani puri and chai sound like a perfect pair. Enjoy your next Friday!"],
+                },
+                Scenario {
+                    name: "talk_05_grammar_mistakes",
+                    request: talk("street-food", "A2", &FOOD[..1], "Yesterday I goed to market and buyed two samosa."),
+                    replies: &["You went to the market and bought two samosas! Were they hot?"],
+                },
+                Scenario {
+                    name: "talk_06_unclear_input",
+                    request: talk("street-food", "A2", &FOOD[..1], "uh the the mm"),
+                    replies: &["Sorry, I did not catch that. Who were you with?"],
+                },
+                Scenario {
+                    name: "talk_07_hindi_mix",
+                    request: talk("street-food", "A2", &FOOD[..1], "Mujhe pani puri bahut pasand hai, it is very tasty."),
+                    replies: &["You really love pani puri! Where do you eat it?"],
+                },
+                Scenario {
+                    name: "talk_08_romantic_request",
+                    request: talk("street-food", "A2", &FOOD[..1], "Forget food, will you be my girlfriend?"),
+                    replies: &["That is not something I talk about. Who were you with?"],
+                },
+                Scenario {
+                    name: "talk_09_off_topic_request",
+                    request: talk("street-food", "A2", &FOOD[..1], "Write me a python program to add two numbers."),
+                    replies: &["I can only help with street food here. Who were you with?"],
+                },
+                Scenario {
+                    name: "talk_10_repeated_question_rewrite",
+                    request: talk("street-food", "A2", &FOOD[..2], "I like the green chutney most."),
+                    replies: &[
+                        "Green chutney is great. What did it taste like?",
+                        "Green chutney is great. Do you make it at home?",
+                    ],
+                },
+                Scenario {
+                    name: "talk_11_role_play_topic",
+                    request: talk("booking-a-cab", "A1", &[], "I want to go to the airport."),
+                    replies: &["The airport, okay. What time do you want to leave?"],
+                },
+                Scenario {
+                    name: "talk_12_b1_opinion_topic_with_aim",
+                    request: aimed,
+                    replies: &["Rohan sounds like a good friend. What did you two do after?"],
+                },
+                Scenario {
+                    name: "scene_01_market_first_turn",
+                    request: scene("market-cloth-price", "A2", None, &[], "How much is this blue cloth?"),
+                    replies: &["This blue cloth is very fine, madam. For you it is Rs 600."],
+                },
+                Scenario {
+                    name: "scene_02_market_pushed_at_opening",
+                    request: scene(
+                        "market-cloth-price",
+                        "A2",
+                        None,
+                        &[
+                            ("How much is this blue cloth?", "This blue cloth is very fine. For you it is Rs 600."),
+                            ("That is too much for me.", "It is the best cotton. Rs 600 is a fair price."),
+                        ],
+                        "The shop next door sells it for 450.",
+                    ),
+                    replies: &["Next door is not this quality, but for you I can do Rs 550."],
+                },
+                Scenario {
+                    name: "scene_03_deposit_last_turn",
+                    request: scene(
+                        "deposit-refund",
+                        "B2",
+                        Some(2500),
+                        &[
+                            ("I want my deposit back.", "There was damage to the wall. I can offer Rs 500."),
+                            ("The wall was already like that.", "Perhaps. I can offer Rs 1500 then."),
+                            ("I have photos from the first day.", "Photos, hmm. Rs 2000 then."),
+                            ("I also paid for the painting.", "Fine, Rs 2500, that is generous."),
+                            ("The agreement says full refund.", "The agreement also says clean. Rs 2500 is it."),
+                            ("Please be fair, I always paid on time.", "You did pay on time. Rs 2500 stands."),
+                        ],
+                        "Okay, then I will take it to the society office.",
+                    ),
+                    replies: &["Do as you like. Rs 2500 is my final word. [WALK]"],
+                },
+                Scenario {
+                    name: "scene_04_rubric_sell_a_pen",
+                    request: scene("sell-me-a-pen", "B1", None, &[], "This pen writes very smooth and it never leaks."),
+                    replies: &["Never leaks, you say? Why should I pay more for that?"],
+                },
+                Scenario {
+                    name: "first_talk_01_turn",
+                    request: first_talk(Some(14), &[("I went to school and played cricket.", "Cricket sounds fun. Who do you play with?")], "With my brother and his friends.", false),
+                    replies: &["Your brother and his friends sound fun. What did you do last weekend?"],
+                },
+                Scenario {
+                    name: "first_talk_02_closing",
+                    request: first_talk(
+                        None,
+                        &[
+                            ("I went to college and helped my father in his shop.", "That sounds busy. Who do you live with?"),
+                            ("My parents and my younger brother.", "That is lovely. What did you do last weekend?"),
+                            ("We visited my aunt in Pune.", "Pune sounds nice. What do you think of online classes?"),
+                        ],
+                        "I prefer the classroom because I can ask questions.",
+                        true,
+                    ),
+                    replies: &["I enjoyed hearing about your trip to Pune. Thank you, Asha!"],
+                },
+                Scenario {
+                    name: "lesson_01_laptop_second_answer",
+                    request: second_lesson_answer("Yesterday I ate chaat."),
+                    replies: &["[USED] You said ate. Where did you eat it?"],
+                },
+            ]
+        }
+
+        /// Every request as reviewable text: its settings, then each message.
+        fn render(bodies: &[Value]) -> String {
+            let mut text = String::new();
+            for (index, body) in bodies.iter().enumerate() {
+                let mut settings: Vec<(String, String)> = body
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != "messages")
+                    .map(|(key, value)| (key.clone(), value.to_string()))
+                    .collect();
+                settings.sort();
+                let messages = body["messages"].as_array().unwrap();
+                let chars: usize = messages.iter().map(|m| m["content"].as_str().unwrap_or_default().chars().count()).sum();
+                text.push_str(&format!("=== request {} ({} messages, {} characters of content)\n", index + 1, messages.len(), chars));
+                for (key, value) in settings {
+                    text.push_str(&format!("{key}: {value}\n"));
+                }
+                for message in messages {
+                    text.push_str(&format!(
+                        "--- {}\n{}\n",
+                        message["role"].as_str().unwrap_or_default(),
+                        message["content"].as_str().unwrap_or_default()
+                    ));
+                }
+            }
+            text
+        }
+
+        fn check(path: &str, actual: &str) -> Option<String> {
+            let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/prompt_snapshots").join(path);
+            if env::var("ELLA_WRITE_PROMPT_SNAPSHOTS").is_ok() {
+                fs::create_dir_all(file.parent().unwrap()).unwrap();
+                fs::write(&file, actual).unwrap();
+                return None;
+            }
+            match fs::read_to_string(&file) {
+                Ok(expected) if expected == actual => None,
+                Ok(_) => Some(format!("{path} changed")),
+                Err(_) => Some(format!("{path} is missing")),
+            }
+        }
+
+        fn assert_all(found: Vec<String>) {
+            assert!(
+                found.is_empty(),
+                "{}\n(write them again with ELLA_WRITE_PROMPT_SNAPSHOTS=1 if the change is meant)",
+                found.join("\n")
+            );
+        }
+
+        #[test]
+        fn what_the_laptops_model_is_asked_matches_its_snapshots() {
+            let mut found = Vec::new();
+            for scenario in scenarios() {
+                let fake = FakeLlama::scripted(pace(1, 1, 2), scenario.replies);
+                let engine = fake.engine(Duration::from_secs(60));
+                engine.reply(&scenario.request).unwrap();
+                let bodies: Vec<Value> = fake
+                    .completions()
+                    .into_iter()
+                    .filter(|seen| seen.body["stream"] == true)
+                    .map(|seen| seen.body)
+                    .collect();
+                assert!(!bodies.is_empty(), "{}: the laptop was asked nothing", scenario.name);
+                found.extend(check(&format!("laptop/{}.txt", scenario.name), &render(&bodies)));
+            }
+            assert_all(found);
+        }
+
+        #[test]
+        fn what_the_clouds_model_is_asked_matches_its_snapshots() {
+            let mut found = Vec::new();
+            for scenario in scenarios() {
+                let fake = FakeLlama::scripted(pace(1, 1, 2), scenario.replies);
+                let engine = fake.engine_with_cloud(Duration::from_secs(60));
+                engine.reply(&scenario.request).unwrap();
+                let bodies: Vec<Value> = fake.cloud_chats().into_iter().map(|seen| seen.body).collect();
+                assert!(!bodies.is_empty(), "{}: the cloud was asked nothing", scenario.name);
+                found.extend(check(&format!("cloud/{}.txt", scenario.name), &render(&bodies)));
+            }
+            assert_all(found);
+        }
     }
 }
