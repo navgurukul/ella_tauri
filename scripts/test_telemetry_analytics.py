@@ -392,7 +392,7 @@ class TalkLifecycle(unittest.TestCase):
         for rate in ("completion_rate", "left_rate"):
             self.assertEqual(shown[rate]["status"], analytics.UNAVAILABLE)
             self.assertIn("#45", shown[rate]["note"])
-        self.assertIsNone(analytics.TALK_LEFT_SINCE, "no release is yet known to send talk_left")
+        self.assertEqual(analytics.TALK_LEFT_SINCE, "0.1.28", "the first release known to send talk_left")
 
     def test_once_a_release_is_known_rates_count_only_its_talks(self):
         events = [

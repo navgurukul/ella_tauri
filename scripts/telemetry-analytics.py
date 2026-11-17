@@ -239,11 +239,12 @@ def usage(week_events, all_events=(), week=None):
 # The note the app puts on a talk's turns when it sends a talk that was
 # left: no end, and no turn for 12 hours (#45, telemetry_queue.rs).
 TALK_LEFT = "talk_left"
-# The first released version known to send `talk_left`. Until one is, every
-# build sending is 0.1.27 whether it has #45 or not, so a talk with no note
-# may be one a build without #45 left, and the share of talks completed or
-# left cannot be told: the rates stay unavailable while this is None.
-TALK_LEFT_SINCE = None
+# The first released version known to send `talk_left`: 0.1.28, the first
+# release made after #45 (every build of 0.1.27 may or may not have it, so a
+# talk with no note may be one a build without #45 left). Rates are given
+# only over talks wholly of this version or later; None would leave them
+# unavailable.
+TALK_LEFT_SINCE = "0.1.28"
 
 COMPLETED, LEFT, RESUMED, UNRESOLVED = "completed", "left", "resumed", "unresolved"
 

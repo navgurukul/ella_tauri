@@ -339,9 +339,20 @@ class AnalyticsInTheReport(unittest.TestCase):
         self.assertGreater(text.index("## Analytics V1"), text.index("## Collection"))
 
     def test_unavailable_and_limited_metrics_are_named_never_zero(self):
-        text = weekly.markdown(self.build())
+        report = self.build()
+        week = [e for e in self.events() if sanitize.week_of(e) == "2026-W43"]
+        # The rates as they are with no release known to send talk_left.
+        report["analytics"]["talk_lifecycle"] = weekly.analytics.talk_lifecycle(week, since=None)
+        text = weekly.markdown(report)
         self.assertIn("| completion_rate | unavailable | **unavailable** |", text)
         self.assertIn("| left | 0 | **historically limited** |", text)
+        self.assertNotIn("| completion_rate | 0", text)
+
+    def test_a_rate_over_no_talk_of_the_release_is_no_rate(self):
+        """Every turn here is 0.1.25, before TALK_LEFT_SINCE: a rate over 0
+        talks is shown as none, never as 0%."""
+        text = weekly.markdown(self.build())
+        self.assertIn("| completion_rate | – | derived | over the 0 talks wholly of builds 0.1.28 or later", text)
         self.assertNotIn("| completion_rate | 0", text)
 
     def test_too_few_measurements_are_said_to_be_too_few(self):
@@ -415,7 +426,7 @@ class AnalyticsInTheReport(unittest.TestCase):
 
     def test_the_finished_contract_holds(self):
         self.assertEqual(weekly.REPORT_VERSION, 4)
-        self.assertIsNone(weekly.analytics.TALK_LEFT_SINCE, "lifecycle rates wait for a release known to send talk_left")
+        self.assertEqual(weekly.analytics.TALK_LEFT_SINCE, "0.1.28", "lifecycle rates count from the first release known to send talk_left")
         pointer = self.build(ledger=[])["analytics"]["reliability"]["collection"]["reported_in"]
         self.assertEqual(pointer["value"], "collection")
         self.assertIn("a pointer, not a copy", pointer["note"])

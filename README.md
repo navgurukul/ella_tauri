@@ -820,10 +820,10 @@ The sections:
   `completed` (an end, no note), `left` (noted `talk_left`, no end),
   `resumed` (the note, then an end) or `unresolved` (neither). Left and
   resumed are floors, as builds from before `talk_left` never note one. The
-  completion and left rates stay unavailable while `TALK_LEFT_SINCE` is
-  `None`: every build sending is 0.1.27, with or without `talk_left`. Set it
-  to the first released version known to send it, and the rates are given
-  over talks wholly of that version or later.
+  completion and left rates are given only over talks wholly of builds at
+  or after `TALK_LEFT_SINCE`, 0.1.28, the first release known to send
+  `talk_left` (a build of 0.1.27 may or may not have it). Until laptops run
+  0.1.28 those rates are over 0 talks; `None` would make them unavailable.
 - **Latency**: the Latency table's own rules (voice turns that succeeded,
   Word of the day left out), as a count with P50, P75 and P95, and `of`, the
   rows it was taken over, so a timing a build does not keep shows as fewer
