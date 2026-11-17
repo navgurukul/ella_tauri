@@ -516,13 +516,13 @@
       },
       "completion_rate": {
         "value": null,
-        "status": "unavailable",
-        "note": "until a released version is known to send talk_left (#45): builds with and without it share a version"
+        "status": "derived",
+        "note": "over the 0 talks wholly of builds 0.1.28 or later; completed or resumed"
       },
       "left_rate": {
         "value": null,
-        "status": "unavailable",
-        "note": "until a released version is known to send talk_left (#45): builds with and without it share a version"
+        "status": "derived",
+        "note": "over the 0 talks wholly of builds 0.1.28 or later; ever noted left"
       }
     },
     "latency": {

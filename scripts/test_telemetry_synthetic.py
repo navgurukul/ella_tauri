@@ -154,7 +154,9 @@ class ThePipeline(unittest.TestCase):
             {"completed": 14, "left": 1, "resumed": 1, "unresolved": 1},
         )
         for rate in ("completion_rate", "left_rate"):
-            self.assertEqual(self.analytics["talk_lifecycle"][rate]["status"], "unavailable")
+            shown = self.analytics["talk_lifecycle"][rate]
+            self.assertIsNone(shown["value"], "a -synthetic version is no release, so no talk counts toward a rate")
+            self.assertIn("over the 0 talks", shown["note"])
 
         self.assertTrue(self.report["flags"], "the week is slower than the one before")
 
