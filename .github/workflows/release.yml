@@ -139,7 +139,10 @@ jobs:
     if: >-
       !cancelled() && needs.windows.result != 'failure' &&
       (github.event_name == 'push' || inputs.platforms != 'windows')
-    runs-on: macos-14
+    # GitHub retired the macos-14 image (v0.1.28's Apple Silicon job was
+    # cancelled: 'macos-14-arm64-us-default' is not supported). macos-15 is
+    # Apple Silicon too; the app still targets macOS 12 (minimumSystemVersion).
+    runs-on: macos-15
     permissions:
       contents: write
 
