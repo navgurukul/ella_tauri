@@ -1,4 +1,8 @@
 {
+  "0.1.28": [
+    "Ella remembers what you already answered, so she doesn't ask you the same question again.",
+    "Ella answers faster when you talk without the internet."
+  ],
   "0.1.26": [
     "New on Home: Word of the day. Every day there is a new word to learn in a short talk with Ella.",
     "Ella asks if you know the word, tells you what it means, and asks you a few questions so you can use it.",
