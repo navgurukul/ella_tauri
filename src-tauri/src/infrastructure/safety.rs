@@ -34,12 +34,20 @@ fn safety_trie() -> &'static Trie {
     TRIE.get_or_init(|| {
         let mut trie = Trie::default();
         trie.set("right? it", Type::NONE);
+        trie.set("as per my", Type::NONE);
+        trie.set("still, it", Type::NONE);
+        trie.set("still. it", Type::NONE);
+        trie.set("still; it", Type::NONE);
+        trie.set("that. it", Type::NONE);
+        trie.set("i did order", Type::NONE);
+        trie.set("see me next week", Type::NONE);
+        trie.set("shop or not", Type::NONE);
         trie
     })
 }
 
 /// Whether `text` trips rustrict's general-audience profanity/vulgarity
-/// threshold. The one known safe phrase is added to rustrict's trie so the
+/// threshold. Narrow, tested benign phrase collisions are excepted in the trie so the
 /// full text can be checked without splitting at sentence boundaries.
 pub fn flagged(text: &str) -> bool {
     let mut censor = Censor::from_str(text);
@@ -231,5 +239,71 @@ mod tests {
     fn a_repetition_complaint_is_not_censored_as_profanity() {
         let complaint = "You are asking me repeated question, right? It is I have already answered this question previously.";
         assert_eq!(censor(complaint), complaint);
+    }
+
+    // These are narrow lexical collisions confirmed against rustrict 0.7.39.
+    // Keep the exceptions phrase-scoped: explicit content elsewhere in the
+    // same message must still be detected and censored.
+    #[test]
+    fn known_benign_phrase_collisions_are_not_flagged_or_censored() {
+        for line in [
+            "as per my",
+            "as per my understanding",
+            "still, it is",
+            "still. It is",
+            "still; it is",
+            "that. It was",
+            "I will say that. It was never about the luck.",
+            "I did order",
+            "I did order the food yesterday.",
+            "See me next week",
+            "Please see me next week.",
+            "Shop or not?",
+            "Should we shop or not?",
+        ] {
+            assert!(!flagged(line), "{line:?} should not be flagged");
+            assert_eq!(censor(line), line, "{line:?} should remain unchanged");
+        }
+    }
+
+    #[test]
+    fn explicit_sexual_content_remains_flagged_and_censored() {
+        for line in [
+            "That is a dildo.",
+            "There was semen on the floor.",
+            "The website contains porn.",
+        ] {
+            assert!(flagged(line), "{line:?} should remain flagged");
+
+            let redacted = censor(line);
+            assert_ne!(redacted, line, "{line:?} should be censored");
+            assert!(
+                !redacted.to_lowercase().contains(
+                    match line {
+                        "That is a dildo." => "dildo",
+                        "There was semen on the floor." => "semen",
+                        _ => "porn",
+                    }
+                ),
+                "Explicit term should be redacted in {redacted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn benign_phrase_exception_does_not_hide_explicit_content_elsewhere() {
+        let mixed = "Please see me next week; there was semen on the floor.";
+
+        assert!(flagged(mixed), "Explicit content elsewhere must still be flagged");
+
+        let redacted = censor(mixed);
+        assert!(
+            redacted.contains("Please see me next week"),
+            "The benign phrase should remain intact: {redacted:?}"
+        );
+        assert!(
+            !redacted.to_lowercase().contains("semen"),
+            "The explicit term should still be redacted: {redacted:?}"
+        );
     }
 }
