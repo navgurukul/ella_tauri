@@ -334,6 +334,147 @@ describe("Ella learner flow", () => {
   });
 
   /**
+   * Early speech (`ELLA_EARLY_SPEECH`): Ella starts saying a laptop reply's
+   * statement before the reply is settled. The line shown is cleared rather
+   * than left up under her new words, and the reply appears once, whole, when
+   * its text comes; it is never shown a piece at a time.
+   */
+  describe("early speech", () => {
+    const audio = { mime_type: "audio/wav", base64: "AAAA" };
+    let started: number[];
+    let emit: ((segment: SpeechSegment) => void) | undefined;
+    let release: ((streamed: number) => void) | undefined;
+    let turnSession: string;
+    let reply: string;
+    let held: { mockRestore(): void };
+    let shown: string[];
+    let watching: MutationObserver;
+
+    beforeEach(async () => {
+      started = [];
+      class FakeAudioContext {
+        state = "running";
+        currentTime = 0;
+        destination = {};
+        async resume() {}
+        async close() {}
+        async decodeAudioData(buffer: ArrayBuffer) {
+          return { duration: buffer.byteLength } as AudioBuffer;
+        }
+        createBufferSource() {
+          return {
+            buffer: null,
+            onended: null as (() => void) | null,
+            connect() {},
+            stop() {},
+            start(at: number) {
+              started.push(at);
+            },
+          };
+        }
+      }
+      Object.defineProperty(window, "AudioContext", { configurable: true, value: FakeAudioContext });
+      (bridge as EllaBridge).onSpeechSegment = async (handler) => {
+        emit = handler;
+        return () => {
+          emit = undefined;
+        };
+      };
+      await onboard("Aarav");
+      fireEvent.click(screen.getByRole("button", { name: /start talking/i }));
+      await screen.findByText("End talk");
+      turnSession = "";
+      reply = "";
+      const real = bridge.sendTextTurn.bind(bridge);
+      held = vi.spyOn(bridge, "sendTextTurn").mockImplementation(async (sessionId: string, text: string) => {
+        turnSession = sessionId;
+        const result = await real(sessionId, text);
+        reply = result.ella_message.content;
+        return new Promise<TurnResult>((resolve) => {
+          release = (streamed) => resolve({ ...result, audio, streamed_segments: streamed });
+        });
+      });
+      // Every text the line takes, in order, to show it is never built up.
+      shown = [];
+      watching = new MutationObserver(() => {
+        const now = promptText();
+        if (shown[shown.length - 1] !== now) shown.push(now);
+      });
+      watching.observe(document.body, { subtree: true, childList: true, characterData: true });
+    });
+
+    afterEach(() => {
+      watching.disconnect();
+      held.mockRestore();
+      delete (bridge as EllaBridge).onSpeechSegment;
+      Reflect.deleteProperty(window, "AudioContext");
+    });
+
+    async function answer() {
+      fireEvent.click(screen.getByRole("button", { name: /type instead/i }));
+      fireEvent.change(screen.getByLabelText("Your answer"), {
+        target: { value: "I ate vada pav near the station" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
+      await waitFor(() => expect(reply).not.toBe(""));
+    }
+
+    /** What the line showed from the first early sentence on. */
+    function shownSince(opening: string): string[] {
+      return shown.slice(Math.max(0, shown.lastIndexOf(opening) + 1));
+    }
+
+    it("clears the line for a sentence said early, then shows the reply once, whole", async () => {
+      const opening = promptText();
+      await answer();
+      const [first, ...rest] = reply.split(/(?<=[.!?])\s+/);
+
+      emit?.({ session_id: turnSession, turn: 1, index: 0, text: first, audio, ready_ms: 400, words: [], text_follows: true });
+      await waitFor(() => expect(promptText()).toBe(""));
+      expect(document.querySelector(".talk-prompt.is-awaiting")).not.toBeNull();
+      await waitFor(() => expect(started).toHaveLength(1));
+
+      emit?.({ session_id: turnSession, turn: 1, index: 1, text: rest.join(" "), audio, ready_ms: 900, words: [], reply });
+      await waitFor(() => expect(promptText()).toBe(reply));
+      expect(document.querySelector(".talk-prompt.is-awaiting")).toBeNull();
+      await waitFor(() => expect(started).toHaveLength(2));
+
+      await act(async () => {
+        release?.(2);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(promptText()).toBe(reply);
+      expect(started).toHaveLength(2);
+      expect(shownSince(opening)).toEqual(["", reply]);
+    });
+
+    it("shows a reply said whole before it settled when the turn returns", async () => {
+      const opening = promptText();
+      await answer();
+      emit?.({ session_id: turnSession, turn: 1, index: 0, text: reply, audio, ready_ms: 400, words: [], text_follows: true });
+      await waitFor(() => expect(promptText()).toBe(""));
+
+      await act(async () => {
+        release?.(1);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await waitFor(() => expect(promptText()).toBe(reply));
+      expect(started).toHaveLength(1);
+      expect(shownSince(opening)).toEqual(["", reply]);
+    });
+
+    it("ignores an early sentence from another turn", async () => {
+      const opening = promptText();
+      await answer();
+      emit?.({ session_id: turnSession, turn: 0, index: 0, text: "Hello.", audio, ready_ms: 100, words: [], text_follows: true });
+      emit?.({ session_id: "another-talk", turn: 1, index: 0, text: "Hello.", audio, ready_ms: 100, words: [], text_follows: true });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(promptText()).toBe(opening);
+      expect(started).toHaveLength(0);
+    });
+  });
+
+  /**
    * Without any sentence of it having arrived, the turn's own recording is
    * played when the turn returns, and its text shown then, whole.
    */

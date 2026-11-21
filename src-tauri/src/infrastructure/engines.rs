@@ -701,17 +701,29 @@ struct SentenceSplitter {
 }
 
 impl SentenceSplitter {
+    #[cfg(test)]
     fn push(&mut self, delta: &str) -> Vec<String> {
+        self.push_marked(delta).into_iter().map(|(sentence, _)| sentence).collect()
+    }
+
+    /// `push`, saying of each piece whether it was cut where a sentence ends,
+    /// rather than at `SPEECH_SOFT_CAP_CHARS` in the middle of one.
+    fn push_marked(&mut self, delta: &str) -> Vec<(String, bool)> {
         self.pending.push_str(delta);
         let mut ready = Vec::new();
-        while let Some(cut) = self.next_cut() {
+        while let Some((cut, sentence_end)) = self.next_cut() {
             let sentence = self.pending[..cut].trim().to_string();
             self.pending = self.pending[cut..].trim_start().to_string();
             if !sentence.is_empty() {
-                ready.push(sentence);
+                ready.push((sentence, sentence_end));
             }
         }
         ready
+    }
+
+    /// Whether nothing is waiting for the rest of its sentence.
+    fn is_empty(&self) -> bool {
+        self.pending.trim().is_empty()
     }
 
     /// Whatever is left once the stream ends, sentence-final or not.
@@ -721,8 +733,8 @@ impl SentenceSplitter {
     }
 
     /// Byte offset just past a sentence end, or `None` while the pending text
-    /// is still mid-sentence.
-    fn next_cut(&self) -> Option<usize> {
+    /// is still mid-sentence. The flag is false for a cut made at the soft cap.
+    fn next_cut(&self) -> Option<(usize, bool)> {
         // A control token must never straddle a cut: `strip_bracket_tokens`
         // treats an unbalanced '[' as ordinary text, so half of `[DEAL]` would
         // be read aloud. While one is open, wait for its close.
@@ -755,9 +767,9 @@ impl SentenceSplitter {
             while end < bytes.len() && bytes[end].is_ascii_whitespace() {
                 end += 1;
             }
-            return Some(end);
+            return Some((end, true));
         }
-        self.soft_cap_cut()
+        self.soft_cap_cut().map(|cut| (cut, false))
     }
 
     fn is_abbreviation_or_decimal(&self, dot: usize) -> bool {
@@ -842,6 +854,60 @@ fn same_words(left: &str, right: &str) -> bool {
     left.split_whitespace().eq(right.split_whitespace())
 }
 
+/// Whether a piece of a reply may be heard before the reply is settled
+/// (`ELLA_EARLY_SPEECH`): a whole statement, cut where it ended. Nothing the
+/// free talk's checks can change is in it. They only ever drop or rewrite a
+/// question (`repeated_question`, `without_repeated_questions`), and a piece
+/// with a '?' anywhere in it, or cut at the soft cap partway through what may
+/// be a question, waits. So does anything holding a control token.
+fn may_go_early(sentence: &str, cut_at_sentence_end: bool) -> bool {
+    cut_at_sentence_end
+        && !sentence.contains('?')
+        && !sentence.contains('[')
+        && matches!(sentence.trim_end().chars().last(), Some('.' | '!'))
+}
+
+/// One recording of pieces said one after the other, with their word and
+/// sound timings moved along to match: what a reply heard partly early, and
+/// the rest of it after, is replayed from. `None` when a piece is not a WAV
+/// this can read or the pieces disagree on their rate. Sound timings are kept
+/// only while every piece has them, as a reply's are.
+pub fn joined_recording(
+    parts: &[(&AudioPayload, &[WordSpan], &[PhonemeSpan])],
+) -> Option<(AudioPayload, Vec<WordSpan>, Vec<PhonemeSpan>)> {
+    let mut pcm = Vec::new();
+    let mut rate = None;
+    let mut words = Vec::new();
+    let mut phonemes = Some(Vec::new());
+    for (audio, part_words, part_phonemes) in parts {
+        let bytes = STANDARD.decode(&audio.base64).ok()?;
+        let (part, part_rate) = wav_pcm(&bytes).ok()??;
+        if rate.is_some_and(|rate| rate != part_rate) {
+            return None;
+        }
+        rate = Some(part_rate);
+        let offset_ms = pcm.len() as f64 / 2.0 * 1_000.0 / part_rate as f64;
+        words.extend(shifted(part_words, offset_ms));
+        phonemes = phonemes.filter(|_| !part_phonemes.is_empty()).map(|mut all: Vec<PhonemeSpan>| {
+            all.extend(part_phonemes.iter().map(|span| PhonemeSpan {
+                phoneme: span.phoneme.clone(),
+                start_ms: span.start_ms + offset_ms,
+                end_ms: span.end_ms + offset_ms,
+            }));
+            all
+        });
+        pcm.extend_from_slice(&part);
+    }
+    Some((
+        AudioPayload {
+            mime_type: "audio/wav".into(),
+            base64: STANDARD.encode(raw_pcm_to_wav(&pcm, rate?, 1)),
+        },
+        words,
+        phonemes.unwrap_or_default(),
+    ))
+}
+
 /// What a finished speech pipeline leaves behind.
 struct StreamedSpeech {
     /// Concatenation of every segment actually synthesized.
@@ -887,16 +953,37 @@ impl StreamedSpeech {
 enum Gate {
     /// Synthesized ahead of the reply being settled, and kept until it is.
     Held(Vec<SpeechSegment>),
+    /// While the laptop writes a free talk's reply with `ELLA_EARLY_SPEECH`
+    /// on: each statement (`may_go_early`) goes to the window the moment it
+    /// is ready, until the first piece that may not. That piece and every one
+    /// after it are held, as in `Held`, so nothing is heard out of order.
+    Early {
+        sink: Arc<dyn SpeechSink>,
+        held: Vec<SpeechSegment>,
+    },
     /// Handed to the window: everything held until then, and each sentence
     /// after it the moment it is ready.
     Live(Arc<dyn SpeechSink>),
+}
+
+impl Gate {
+    /// Stop sending anything early: what is out stays out, and the rest is
+    /// held. Called whenever the reply being read may no longer be the one
+    /// returned, so nothing more of it is heard.
+    fn freeze(&mut self) {
+        if let Gate::Early { held, .. } = self {
+            *self = Gate::Held(std::mem::take(held));
+        }
+    }
 }
 
 /// Synthesizes sentences on a worker thread while the reply is still being
 /// generated, so Piper's ~100-200 ms per sentence overlaps the model's seconds
 /// of decode instead of following them.
 struct SpeechPipeline {
-    sentences: Option<std::sync::mpsc::Sender<String>>,
+    /// Each piece of the reply, and whether it may be heard early
+    /// (`may_go_early`).
+    sentences: Option<std::sync::mpsc::Sender<(String, bool)>>,
     worker: Option<thread::JoinHandle<StreamedSpeech>>,
     splitter: SentenceSplitter,
     gate: Arc<Mutex<Gate>>,
@@ -905,6 +992,10 @@ struct SpeechPipeline {
     /// Tells the worker to stop at the next sentence, because nothing will
     /// play it: the reply it was reading has been dropped.
     abandoned: Arc<AtomicBool>,
+    /// Where statements go early once `open_early` is called: the turn's
+    /// window, given only for a free talk's reply with `ELLA_EARLY_SPEECH` on
+    /// (`allow_early`). `None` leaves the pipeline exactly as it always was.
+    early: Option<Arc<dyn SpeechSink>>,
 }
 
 impl SpeechPipeline {
@@ -913,7 +1004,7 @@ impl SpeechPipeline {
     /// which is right while the turn might still be regenerated, or is not
     /// saved yet.
     fn start(daemon: Arc<PiperDaemon>, sink: Option<Arc<dyn SpeechSink>>, started: Instant) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let (tx, rx) = std::sync::mpsc::channel::<(String, bool)>();
         let gate = Arc::new(Mutex::new(match sink {
             Some(sink) => Gate::Live(sink),
             None => Gate::Held(Vec::new()),
@@ -933,7 +1024,7 @@ impl SpeechPipeline {
             // Only kept while every sentence has them: a replay whose mouth
             // stops in the middle is worse than one that only opens.
             let mut reply_phonemes: Option<Vec<PhonemeSpan>> = Some(Vec::new());
-            for sentence in rx {
+            for (sentence, early_ok) in rx {
                 let text = spoken_form(&sentence);
                 if !text.chars().any(char::is_alphanumeric) {
                     continue;
@@ -1009,6 +1100,13 @@ impl SpeechPipeline {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                 {
                     Gate::Held(held) => held.push(segment),
+                    Gate::Early { sink, held } => {
+                        if early_ok && held.is_empty() {
+                            sink.segment(segment);
+                        } else {
+                            held.push(segment);
+                        }
+                    }
                     Gate::Live(sink) => sink.segment(segment),
                 }
                 pcm.extend_from_slice(&speech.pcm);
@@ -1042,22 +1140,47 @@ impl SpeechPipeline {
             gate,
             queued: String::new(),
             abandoned,
+            early: None,
+        }
+    }
+
+    /// Let this reply's statements be heard as they are written, once
+    /// `open_early` says the laptop is the one writing it.
+    fn allow_early(&mut self, sink: Arc<dyn SpeechSink>) {
+        self.early = Some(sink);
+    }
+
+    /// The laptop's model is about to write the reply: from here, each
+    /// statement goes to the window as soon as Piper has it. Nothing happens
+    /// unless `allow_early` was called, or once anything has been fed in,
+    /// which is a reply the cloud began.
+    fn open_early(&mut self) {
+        let Some(sink) = self.early.take() else {
+            return;
+        };
+        if !self.queued.is_empty() || !self.splitter.is_empty() {
+            return;
+        }
+        let mut gate = self.gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(&*gate, Gate::Held(held) if held.is_empty()) {
+            *gate = Gate::Early { sink, held: Vec::new() };
         }
     }
 
     /// Feed one streamed token delta. Complete sentences leave for Piper now.
     fn push(&mut self, delta: &str) {
-        for sentence in self.splitter.push(delta) {
-            self.send(sentence);
+        for (sentence, sentence_end) in self.splitter.push_marked(delta) {
+            let early_ok = may_go_early(&sentence, sentence_end);
+            self.send(sentence, early_ok);
         }
     }
 
-    fn send(&mut self, sentence: String) {
+    fn send(&mut self, sentence: String, early_ok: bool) {
         let Some(tx) = self.sentences.as_ref() else {
             return;
         };
         let text = spoken_form(&sentence);
-        if tx.send(sentence).is_err() {
+        if tx.send((sentence, early_ok)).is_err() {
             // The worker gave up; stop feeding it.
             self.sentences = None;
             return;
@@ -1074,8 +1197,10 @@ impl SpeechPipeline {
     /// No more text is coming: whatever the splitter still holds goes to Piper
     /// as the last sentence.
     fn close(&mut self) {
+        // The last piece is never early: the reply is not settled yet, and
+        // what the stream ended on is not proof a sentence did.
         if let Some(rest) = self.splitter.flush() {
-            self.send(rest);
+            self.send(rest, false);
         }
         self.sentences = None;
     }
@@ -1089,7 +1214,7 @@ impl SpeechPipeline {
     /// each of the rest the moment it is.
     fn release(&self, sink: Arc<dyn SpeechSink>) {
         let mut gate = self.gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Gate::Held(held) = &mut *gate {
+        if let Gate::Held(held) | Gate::Early { held, .. } = &mut *gate {
             for segment in held.drain(..) {
                 sink.segment(segment);
             }
@@ -1125,6 +1250,10 @@ impl Drop for SpeechPipeline {
     fn drop(&mut self) {
         // Dropped without `finish`: whatever is still queued will never play.
         self.abandoned.store(true, Ordering::Relaxed);
+        // Nor is any more of it heard early: the reply it was reading is no
+        // longer the one being returned. A sentence Piper finishes after this
+        // is held, and goes nowhere.
+        self.gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).freeze();
     }
 }
 
@@ -2150,7 +2279,7 @@ fn content_words(sentence: &str) -> BTreeSet<String> {
 /// The reply's sentences, each with the mark that ends it. A mark ends a
 /// sentence only where a space or the end of the reply follows it, so
 /// "Rs 2.5" and "Wait..." stay whole.
-fn sentences(reply: &str) -> Vec<&str> {
+pub(crate) fn sentences(reply: &str) -> Vec<&str> {
     let mut found = Vec::new();
     let mut start = 0;
     let mut characters = reply.char_indices().peekable();
@@ -3129,6 +3258,21 @@ pub trait TutorEngine: Send + Sync {
     /// without jumping as each piece landed.
     fn reply(&self, request: &TutorRequest) -> EllaResult<GeneratedReply>;
 
+    /// `reply`, with the turn's window to say a free talk's statements to as
+    /// the laptop writes them, ahead of the rest (`ELLA_EARLY_SPEECH`). The
+    /// text is still shown only once it is settled, whole: the window is told
+    /// so on each sentence (`SpeechStreamEvent::text_follows`). Whatever goes
+    /// to `early` is heard, and the caller saves the reply after it.
+    ///
+    /// The default never speaks early, which is every engine but the laptop.
+    fn reply_speaking(
+        &self,
+        request: &TutorRequest,
+        _early: Option<Arc<dyn SpeechSink>>,
+    ) -> EllaResult<GeneratedReply> {
+        self.reply(request)
+    }
+
     /// The character's first line, in role. The default is an authored opener,
     /// which is what demo mode uses; `LocalEngine` generates it so the setting
     /// and the hidden brief are already in play on turn one.
@@ -4091,6 +4235,10 @@ pub struct LocalEngine {
     /// Lesson openings the cloud wrote while the learner was on Home: see
     /// `prepare_lesson`.
     lessons: Arc<MadeAhead>,
+    /// `ELLA_EARLY_SPEECH`: a free talk's statements are heard as the laptop
+    /// writes them, ahead of the reply being settled (`Gate::Early`). Off
+    /// unless set, and then every reply is held until it is saved, as before.
+    early_speech: bool,
 }
 
 /// After this long without the cloud's first word, the laptop's model starts
@@ -4572,6 +4720,9 @@ impl LocalEngine {
         let piper_daemon = daemon_enabled
             .then(|| resident_piper(&piper_binary, &piper_voice))
             .flatten();
+        let early_speech = env::var("ELLA_EARLY_SPEECH")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         if let Some(daemon) = &piper_daemon {
             daemon.warm();
         }
@@ -4660,6 +4811,7 @@ impl LocalEngine {
             hedge_after: HEDGE_AFTER,
             reply_first_word: cloud_llm::REPLY_FIRST_WORD,
             lessons: Arc::default(),
+            early_speech,
         };
         // So the first talk, or a bench's, does not go to the laptop only
         // because the first look at the cloud had not come back yet.
@@ -5119,6 +5271,14 @@ impl TutorEngine for LocalEngine {
     }
 
     fn reply(&self, request: &TutorRequest) -> EllaResult<GeneratedReply> {
+        self.reply_speaking(request, None)
+    }
+
+    fn reply_speaking(
+        &self,
+        request: &TutorRequest,
+        early: Option<Arc<dyn SpeechSink>>,
+    ) -> EllaResult<GeneratedReply> {
         if let Some(ask) = lesson_ask(request) {
             return self.lesson_reply(request, &ask);
         }
@@ -5189,6 +5349,20 @@ impl TutorEngine for LocalEngine {
             .map(|daemon| SpeechPipeline::start(Arc::clone(daemon), None, generation_started));
         if pipeline.is_none() {
             telemetry::note("no_audio_ahead");
+        }
+        // With `ELLA_EARLY_SPEECH`, a free talk's statements are heard as the
+        // laptop writes them. Only a free talk's: a chore's sentences can be
+        // dropped as said before and its figure can send it back to be
+        // written again, a placement's closing reply loses its question, and
+        // the talk's last two replies close it. Whatever the checks below do
+        // to this reply, what was heard stays at its start (`AppService`
+        // saves it there), because they only ever touch its questions.
+        let speaks_early = self.early_speech
+            && request.chore.is_none()
+            && request.placement.is_none()
+            && free_closing_note(request.turn).is_none();
+        if let (Some(pipeline), Some(early)) = (pipeline.as_mut(), early.filter(|_| speaks_early)) {
+            pipeline.allow_early(early);
         }
 
         let first = self.stream_once(&system, &laptop_system, &history, None, aim.as_deref(), pipeline.as_mut(), TALK_BUDGET)?;
@@ -6194,6 +6368,13 @@ impl LocalEngine {
         // work thrown away, on a CPU the model needs.
         if laptop.as_ref().is_some_and(|laptop| !laptop.said_as_written) {
             speech = None;
+        }
+        // The laptop is writing this reply, so a free talk's statements may
+        // now be heard as they come (`SpeechPipeline::open_early`). Never
+        // before: a reply the cloud writes is done before Piper has its first
+        // sentence, and one it breaks off partway is said afresh.
+        if let Some(pipeline) = speech.as_deref_mut() {
+            pipeline.open_early();
         }
         let errand = self.queue.running();
         let mut body = json!({
@@ -8737,9 +8918,9 @@ mod speech_stream_tests {
     /// closes it. Every sentence it says is the same `pcm`, and each start of
     /// the process adds a line to `starts`.
     #[cfg(unix)]
-    struct FakePiper {
-        piper: PathBuf,
-        voice: PathBuf,
+    pub(super) struct FakePiper {
+        pub(super) piper: PathBuf,
+        pub(super) voice: PathBuf,
         pcm: Vec<u8>,
         starts: PathBuf,
     }
@@ -8750,10 +8931,10 @@ mod speech_stream_tests {
     /// the other's file in its check that nothing was left behind, so they
     /// take turns.
     #[cfg(unix)]
-    static ONE_PIPER_AT_A_TIME: Mutex<()> = Mutex::new(());
+    pub(super) static ONE_PIPER_AT_A_TIME: Mutex<()> = Mutex::new(());
 
     #[cfg(unix)]
-    fn fake_piper(root: &Path) -> FakePiper {
+    pub(super) fn fake_piper(root: &Path) -> FakePiper {
         use std::os::unix::fs::PermissionsExt;
         let pcm: Vec<u8> = (0..2_000_i16).flat_map(i16::to_le_bytes).collect();
         let sentence = root.join("sentence.wav");
@@ -9401,6 +9582,7 @@ mod errand_tests {
                 hedge_after: HEDGE_AFTER,
                 reply_first_word: cloud_llm::REPLY_FIRST_WORD,
                 lessons: Arc::default(),
+                early_speech: false,
             }
         }
 
@@ -11120,6 +11302,211 @@ mod errand_tests {
                 found.extend(check(&format!("cloud/{}.txt", scenario.name), &render(&bodies)));
             }
             assert_all(found, MIRROR_ON_THE_LAPTOP);
+        }
+    }
+
+    /// `ELLA_EARLY_SPEECH`: a free talk's statements heard as the laptop
+    /// writes them, against the stand-in's llama-server and a resident
+    /// stand-in for `piper.exe`.
+    #[cfg(unix)]
+    mod early_speech_tests {
+        use super::super::speech_stream_tests::{fake_piper, FakePiper, ONE_PIPER_AT_A_TIME};
+        use super::*;
+
+        /// The turn's window: each sentence, and when it came.
+        #[derive(Default)]
+        struct Window(Mutex<Vec<(String, Instant)>>);
+
+        impl SpeechSink for Window {
+            fn segment(&self, segment: SpeechSegment) {
+                self.0.lock().unwrap().push((segment.text, Instant::now()));
+            }
+        }
+
+        impl Window {
+            fn said(&self) -> Vec<String> {
+                self.0.lock().unwrap().iter().map(|(text, _)| text.clone()).collect()
+            }
+        }
+
+        /// Slow enough that the reply is still being written when its first
+        /// sentence is ready: four parts, 500 ms apart. The stand-in Piper
+        /// takes about half a second over its first sentence.
+        fn slow() -> Pace {
+            pace(5, 500, 4)
+        }
+
+        fn speaking(fake: &FakeLlama, piper: &FakePiper, early: bool) -> LocalEngine {
+            let mut engine = fake.engine(Duration::from_secs(60));
+            engine.piper_daemon = Some(PiperDaemon::binary(piper.piper.clone(), piper.voice.clone()));
+            engine.early_speech = early;
+            engine
+        }
+
+        /// A street-food turn the learner answered, partway through the talk.
+        fn mid_talk() -> TutorRequest {
+            after_where("I had pani puri at the station.")
+        }
+
+        #[test]
+        fn a_statement_is_heard_while_the_reply_is_written_and_its_question_waits() {
+            let _turn = ONE_PIPER_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+            let root = tempfile::tempdir().unwrap();
+            let piper = fake_piper(root.path());
+            let fake = FakeLlama::scripted(slow(), &["That sounds lovely. Which stall do you like best?"]);
+            let engine = speaking(&fake, &piper, true);
+            let window = Arc::new(Window::default());
+            let reply = engine.reply_speaking(&mid_talk(), Some(window.clone())).unwrap();
+            let returned = Instant::now();
+
+            assert_eq!(window.said(), ["That sounds lovely."], "the statement went, the question waits");
+            let (_, heard_at) = window.0.lock().unwrap()[0].clone();
+            assert!(
+                returned.duration_since(heard_at) >= Duration::from_millis(200),
+                "heard while the rest was still being written"
+            );
+            let pending = reply.pending.expect("the reply is what was read");
+            pending.release(window.clone());
+            let audio = pending.finish().unwrap();
+            assert_eq!(audio.segments, 2);
+            assert_eq!(window.said().join(" "), reply.text, "heard in order, all of it, once");
+        }
+
+        #[test]
+        fn without_the_flag_nothing_is_heard_before_the_reply_is_released() {
+            let _turn = ONE_PIPER_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+            let root = tempfile::tempdir().unwrap();
+            let piper = fake_piper(root.path());
+            let fake = FakeLlama::scripted(slow(), &["That sounds lovely. Which stall do you like best?"]);
+            let engine = speaking(&fake, &piper, false);
+            let window = Arc::new(Window::default());
+            let reply = engine.reply_speaking(&mid_talk(), Some(window.clone())).unwrap();
+            assert!(window.said().is_empty());
+            let pending = reply.pending.unwrap();
+            pending.release(window.clone());
+            assert_eq!(pending.finish().unwrap().segments, 2);
+            assert_eq!(window.said().join(" "), reply.text);
+        }
+
+        #[test]
+        fn a_chore_a_placement_and_a_talks_last_two_replies_are_never_heard_early() {
+            let _turn = ONE_PIPER_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+            let root = tempfile::tempdir().unwrap();
+            let piper = fake_piper(root.path());
+            let mut placement = mid_talk();
+            placement.placement = Some(crate::domain::PlacementBrief { age: None, closing: false });
+            let mut closing = mid_talk();
+            closing.turn = FREE_TOPIC_TURNS - 1;
+            let mut last = mid_talk();
+            last.turn = FREE_TOPIC_TURNS;
+            let chore = deposit_turn(5_000, &[], "Can I have my deposit back, please?");
+            for (name, request) in [("placement", placement), ("nearly over", closing), ("last", last), ("chore", chore)] {
+                let fake = FakeLlama::scripted(slow(), &["That sounds lovely. Which stall do you like best?"]);
+                let engine = speaking(&fake, &piper, true);
+                let window = Arc::new(Window::default());
+                let _ = engine.reply_speaking(&request, Some(window.clone())).unwrap();
+                assert!(window.said().is_empty(), "{name}: nothing is heard before the reply is settled");
+            }
+        }
+
+        #[test]
+        fn a_reply_the_cloud_writes_is_never_heard_early() {
+            let _turn = ONE_PIPER_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+            let root = tempfile::tempdir().unwrap();
+            let piper = fake_piper(root.path());
+            let fake = FakeLlama::start(slow());
+            let mut engine = fake.engine_with_cloud(Duration::from_secs(60));
+            engine.piper_daemon = Some(PiperDaemon::binary(piper.piper.clone(), piper.voice.clone()));
+            engine.early_speech = true;
+            let window = Arc::new(Window::default());
+            let reply = engine.reply_speaking(&mid_talk(), Some(window.clone())).unwrap();
+            assert_eq!(fake.cloud_chats().len(), 1, "the cloud wrote it");
+            assert!(window.said().is_empty());
+            let pending = reply.pending.unwrap();
+            pending.release(window.clone());
+            pending.finish().unwrap();
+            assert_eq!(window.said().join(" "), reply.text);
+        }
+
+        #[test]
+        fn once_a_reply_is_written_again_nothing_more_of_the_first_is_heard() {
+            let _turn = ONE_PIPER_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+            let root = tempfile::tempdir().unwrap();
+            let piper = fake_piper(root.path());
+            let fake = FakeLlama::scripted(
+                slow(),
+                &[
+                    "Oh, yummy! It sounds so crispy. Where did you find it?",
+                    "Oh, yummy! What kind of food does this place serve?",
+                ],
+            );
+            let engine = speaking(&fake, &piper, true);
+            let window = Arc::new(Window::default());
+            let reply = engine
+                .reply_speaking(&after_where("I had the crispy corn in Barbecue Nation."), Some(window.clone()))
+                .unwrap();
+            assert!(reply.regenerated, "the first asked where again");
+            assert!(reply.pending.is_none(), "the rewrite is said by the caller");
+            assert_eq!(reply.text, "Oh, yummy! What kind of food does this place serve?", "the rewrite is as it was");
+            let heard = window.said();
+            thread::sleep(Duration::from_millis(800));
+            assert_eq!(window.said(), heard, "nothing of the first attempt after it was dropped");
+            assert!(!heard.is_empty(), "the first attempt's opening statement was heard");
+            assert!(
+                "Oh, yummy! It sounds so crispy. Where did you find it?".starts_with(&heard.join(" ")),
+                "only statements from the start of the first attempt: {heard:?}"
+            );
+            assert!(heard.iter().all(|sentence| !sentence.contains('?')));
+        }
+
+        #[test]
+        fn only_a_whole_statement_may_be_heard_early() {
+            assert!(may_go_early("That sounds lovely.", true));
+            assert!(may_go_early("Oh, yummy!", true));
+            assert!(!may_go_early("Great! What did you like?", true), "a question in it");
+            assert!(!may_go_early("Since you liked that stall near your school,", false), "cut at the cap");
+            assert!(!may_go_early("That sounds lovely.", false), "not cut where it ended");
+            assert!(!may_go_early("Fine, take it. [DEAL]", true), "a control token");
+            assert!(!may_go_early("And then", true), "no end");
+        }
+
+        /// The whole way through, as the window gets it: the statement while
+        /// the reply is written and the rest once it is saved, the reply's
+        /// text once, and what she said is what was saved.
+        #[test]
+        fn a_turn_heard_early_saves_what_was_said() {
+            use crate::application::{AppService, SpeechBroadcast};
+            use crate::domain::SpeechStreamEvent;
+            use crate::infrastructure::database::Database;
+
+            #[derive(Default)]
+            struct Events(Mutex<Vec<SpeechStreamEvent>>);
+            impl SpeechBroadcast for Events {
+                fn speak(&self, event: SpeechStreamEvent) {
+                    self.0.lock().unwrap().push(event);
+                }
+            }
+
+            let _turn = ONE_PIPER_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+            let root = tempfile::tempdir().unwrap();
+            let piper = fake_piper(root.path());
+            let fake = FakeLlama::start(slow());
+            let service = AppService::new(Database::in_memory().unwrap(), Box::new(speaking(&fake, &piper, true)));
+            service.save_learner("Asha", Some(14)).unwrap();
+            let events = Arc::new(Events::default());
+            service.set_speech_broadcast(events.clone());
+            let session = service.start_session("street-food").unwrap();
+            let result = service.send_text_turn(&session.id, "I had pani puri at the station.").unwrap();
+
+            let saved = result.ella_message.content.clone();
+            let turn: Vec<SpeechStreamEvent> =
+                events.0.lock().unwrap().iter().filter(|event| event.turn == 1).cloned().collect();
+            assert_eq!(turn.iter().map(|event| event.index).collect::<Vec<_>>(), [0, 1]);
+            assert!(turn[0].text_follows && turn[0].reply.is_none(), "said before the text was settled");
+            assert!(!turn[1].text_follows);
+            assert_eq!(turn[1].reply.as_deref(), Some(saved.as_str()), "the text, once, when it is");
+            assert_eq!(turn.iter().map(|event| event.text.as_str()).collect::<Vec<_>>().join(" "), saved);
+            assert_eq!(result.streamed_segments, 2);
         }
     }
 }

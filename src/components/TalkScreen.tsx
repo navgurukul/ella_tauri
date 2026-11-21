@@ -226,7 +226,12 @@ export function TalkScreen({
         // Segments arrive in order on one channel; an index already queued is a
         // repeat, and queueing it would say the sentence twice.
         if (segment.index < armed.queue.received) return;
-        if (segment.index === 0 && segment.reply) setIncomingReply(segment.reply);
+        // The reply's text comes once, whole, on the first sentence sent after
+        // it was settled. A sentence said before then clears the line shown
+        // rather than leave the last one up under her new words; nothing is
+        // ever shown a piece at a time.
+        if (segment.reply) setIncomingReply(segment.reply);
+        else if (segment.text_follows) setIncomingReply((shown) => shown ?? "");
         armed.queue.push(segment.audio, segment.words);
       })
       .then((stop) => {
@@ -788,6 +793,9 @@ export function TalkScreen({
       result.streamed_segments > 0 &&
       streaming.queue.received > 0
     ) {
+      // Every sentence was said before the reply's text was settled, so none
+      // brought it: it is the turn's own message, shown now, whole.
+      setIncomingReply((shown) => (shown === "" ? null : shown));
       llog(
         "playback:streamed",
         `${streaming.queue.received}/${result.streamed_segments} sentence(s) already playing`,
@@ -953,7 +961,10 @@ export function TalkScreen({
             ) : null}
           </div>
 
-          <p className="talk-prompt">
+          {/* While she says what she said before her reply was settled, the
+              line is empty but keeps its room, so the stage does not move
+              until the reply comes, whole. */}
+          <p className={`talk-prompt${incomingReply === "" ? " is-awaiting" : ""}`}>
             {promptWords.map((word, index) => (
               <Fragment key={`${index}-${word}`}>
                 <span

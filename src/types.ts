@@ -348,9 +348,13 @@ export interface SpeechSegment {
   /** Every token of `audio`, in order. Empty or missing when the voice cannot
    * time them, and then her mouth only opens while she talks. */
   phonemes?: PhonemeSpan[];
-  /** The whole reply, on a reply's first sentence only: its text is settled
-   * before any of it is sent, so it can be shown whole as she starts. */
+  /** The whole reply, on the first of its sentences sent once its text is
+   * settled, and on no other: it is shown whole then. */
   reply?: string | null;
+  /** True for a sentence said before the reply's text was settled (early
+   * speech, `ELLA_EARLY_SPEECH`). The line shown is cleared, and the reply
+   * appears once its text comes, whole, on a later sentence or with the turn. */
+  text_follows?: boolean;
 }
 
 /** The result of speaking a line the app already had — Ella's opening. Carries

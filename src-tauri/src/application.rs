@@ -23,7 +23,7 @@ use crate::{
         audio::{pause_cut_index, quietest_cut_index, trim_to_speech, VadOutput},
         database::{AssessmentWrite, CurriculumReader, Database, LessonMark},
         engines::{
-            trailing_question, GeneratedReply, NextRecap, NextTalk, SpeechSegment, SpeechSink, TutorEngine,
+            joined_recording, sentences, trailing_question, GeneratedReply, NextRecap, NextTalk, SpeechSegment, SpeechSink, TutorEngine,
             FREE_TOPIC_TURNS,
         },
         lesson_prompt::{self, LessonAsk},
@@ -60,39 +60,108 @@ struct TurnSpeech {
     broadcast: Arc<dyn SpeechBroadcast>,
     session_id: String,
     turn: u32,
-    /// The whole reply, sent with its first sentence so the window can show
-    /// all of it the moment Ella starts saying it. `None` for a line that is
-    /// already on screen, such as the opening.
+    /// Made before the reply is written (`turn_speech_ahead`), so a free
+    /// talk's statements can be said as the laptop writes them. Its text is
+    /// then not known until `settle`.
+    ahead: bool,
+    sent: Mutex<SentSpeech>,
+}
+
+/// What a turn's window has been sent so far.
+#[derive(Default)]
+struct SentSpeech {
+    /// The whole reply, sent with the first sentence that goes once it is
+    /// known, so the window can show all of it the moment it has it. `None`
+    /// for a line that is already on screen, such as the opening, and for a
+    /// reply not yet settled.
     reply: Option<String>,
+    /// Whether `reply` has gone.
+    reply_sent: bool,
+    /// Whether the reply has been settled and saved (`settle`). Always true
+    /// for a line made with its text.
+    settled: bool,
+    /// How many sentences went, which numbers the next: every sentence the
+    /// window gets for this line is numbered in the order it got them,
+    /// whichever pipeline said it.
+    count: u32,
+    /// Every sentence sent, in order: what the learner has heard of it.
+    said: Vec<SpeechSegment>,
+    /// How many of `said` went before the reply was settled.
+    early: u32,
     /// When the first sentence went to the window.
-    first_sent: Mutex<Option<Instant>>,
+    first_sent: Option<Instant>,
 }
 
 impl TurnSpeech {
+    fn lock(&self) -> std::sync::MutexGuard<'_, SentSpeech> {
+        self.sent.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn first_sent(&self) -> Option<Instant> {
-        *self
-            .first_sent
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.lock().first_sent
+    }
+
+    /// The reply is written and saved: it goes with the next sentence sent.
+    fn settle(&self, reply: &str) {
+        let mut sent = self.lock();
+        sent.reply = Some(reply.to_owned());
+        sent.settled = true;
+    }
+
+    /// Every sentence sent so far, in order.
+    fn said(&self) -> Vec<SpeechSegment> {
+        self.lock().said.clone()
+    }
+
+    /// The text of what was said before the reply was settled.
+    fn heard_early(&self) -> String {
+        let sent = self.lock();
+        sent.said[..sent.early as usize]
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Whether anything was said before the reply was settled.
+    fn spoke_early(&self) -> bool {
+        self.lock().early > 0
+    }
+
+    /// How many sentences the window has been sent.
+    fn count(&self) -> u32 {
+        self.lock().count
     }
 }
 
 impl SpeechSink for TurnSpeech {
     fn segment(&self, segment: SpeechSegment) {
-        self.first_sent
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get_or_insert_with(Instant::now);
+        // Sent under the lock, so sentences from two pipelines can never be
+        // numbered or delivered out of order.
+        let mut sent = self.lock();
+        sent.first_sent.get_or_insert_with(Instant::now);
+        let index = sent.count;
+        sent.count += 1;
+        let text_follows = self.ahead && !sent.settled;
+        if text_follows {
+            sent.early += 1;
+        }
+        sent.said.push(segment.clone());
+        let reply = (sent.settled && !sent.reply_sent).then(|| sent.reply.clone()).flatten();
+        if reply.is_some() {
+            sent.reply_sent = true;
+        }
         self.broadcast.speak(SpeechStreamEvent {
             session_id: self.session_id.clone(),
             turn: self.turn,
-            index: segment.index,
-            reply: (segment.index == 0).then(|| self.reply.clone()).flatten(),
+            index,
+            reply,
             text: segment.text,
             audio: segment.audio,
             ready_ms: segment.ready_ms,
             words: segment.words,
             phonemes: segment.phonemes,
+            text_follows,
         });
     }
 }
@@ -265,8 +334,29 @@ impl AppService {
                 broadcast,
                 session_id: session_id.to_owned(),
                 turn,
-                reply: reply.map(str::to_owned),
-                first_sent: Mutex::new(None),
+                ahead: false,
+                sent: Mutex::new(SentSpeech {
+                    reply: reply.map(str::to_owned),
+                    settled: true,
+                    ..SentSpeech::default()
+                }),
+            })
+        })
+    }
+
+    /// `turn_speech` for a reply not written yet, so the engine can say a free
+    /// talk's statements while the laptop writes it (`ELLA_EARLY_SPEECH`).
+    /// Its text goes once the turn is saved (`TurnSpeech::settle`). Without
+    /// early speech nothing is sent before then, and the window gets exactly
+    /// what `turn_speech` with the text would have sent it.
+    fn turn_speech_ahead(&self, session_id: &str, turn: u32) -> Option<Arc<TurnSpeech>> {
+        self.speech_broadcast().map(|broadcast| {
+            Arc::new(TurnSpeech {
+                broadcast,
+                session_id: session_id.to_owned(),
+                turn,
+                ahead: true,
+                sent: Mutex::new(SentSpeech::default()),
             })
         })
     }
@@ -1451,6 +1541,10 @@ impl AppService {
             placement: brief.clone(),
             lesson: lesson.clone(),
         };
+        // Made before the reply is written, so the laptop can say a free
+        // talk's statements as it writes them (`ELLA_EARLY_SPEECH`). Without
+        // that, nothing goes to the window until the turn is saved below.
+        let speech = self.turn_speech_ahead(session_id, turn);
         let mut generated = if flagged {
             // Skip the model entirely: a live session showed it does not
             // reliably self-correct once one turn slips into a soft,
@@ -1472,7 +1566,8 @@ impl AppService {
                 &format!("requesting tutor reply for turn {turn} ({} history messages)", request.messages.len()),
             );
             trace.record_llm_start();
-            self.engine.reply(&request)?
+            self.engine
+                .reply_speaking(&request, speech.clone().map(|speech| speech as Arc<dyn SpeechSink>))?
         };
         trace.record_llm(generated.ttft_ms, generated.completion_ms);
         trace.stage(
@@ -1485,7 +1580,12 @@ impl AppService {
                 generated.text.trim()
             ),
         );
-        let reply = generated.text.trim().to_owned();
+        // What she has already said cannot be taken back, so the reply saved
+        // starts with it. The engine's reply already does unless a rewrite
+        // replaced it, and then what she said is kept ahead of the rewrite,
+        // less the rewrite's opening that only says it again.
+        let heard = speech.as_ref().map(|speech| speech.heard_early()).unwrap_or_default();
+        let reply = after_what_was_heard(&heard, generated.text.trim(), generated.regenerated, clean);
         if reply.is_empty() {
             return Err(EllaError::Engine("Ella returned an empty reply.".into()));
         }
@@ -1536,12 +1636,18 @@ impl AppService {
         // go to the window at once, with the whole text, and the rest follow as
         // Piper finishes them, so Ella starts talking without waiting for the
         // last one. Any other reply is said now, on the clock.
-        let speech = self.turn_speech(session_id, turn, Some(&reply));
+        //
+        // A reply some of which was heard before it was settled goes on from
+        // there: what was released or played already is not said again.
+        if let Some(speech) = &speech {
+            speech.settle(&reply);
+        }
+        let spoke_early = speech.as_ref().is_some_and(|speech| speech.spoke_early());
         let sink = speech.clone().map(|speech| speech as Arc<dyn SpeechSink>);
         let (audio, speech_words, speech_phonemes, streamed_segments) =
             match generated.pending.take() {
                 Some(pending) => {
-                    if let Some(sink) = sink {
+                    if let Some(sink) = sink.clone() {
                         pending.release(sink);
                     }
                     match pending.finish() {
@@ -1573,12 +1679,17 @@ impl AppService {
                         // Piper broke off partway. The window is told nothing
                         // was played, and gets the whole recording instead of
                         // a reply that stops mid-thought.
-                        None => {
+                        None if !spoke_early => {
                             trace.note("piper_broke");
                             self.speak_on_clock(&reply, None, trace)
                         }
+                        None => {
+                            trace.note("piper_broke");
+                            self.speak_on(&reply, speech.as_deref(), sink, trace)
+                        }
                     }
                 }
+                None if spoke_early => self.speak_on(&reply, speech.as_deref(), sink, trace),
                 None => self.speak_on_clock(&reply, sink, trace),
             };
         trace.record_tts_sentences(streamed_segments);
@@ -1882,6 +1993,82 @@ impl AppService {
             speech_phonemes,
             streamed_segments,
         })
+    }
+
+    /// Say the rest of a reply the learner has heard the start of, on from
+    /// the first sentence the window has not had, and put together the
+    /// recording of all of it for the replay button. The window is told how
+    /// many sentences it has had in all.
+    ///
+    /// What is left goes through `speech` like any other sentence, numbered
+    /// on from the last one sent. Where Piper can no longer stream it (the
+    /// resident one was set aside, or broke off partway), the recording made
+    /// instead is sent as one more sentence rather than thrown away, so the
+    /// start is never said twice. If no Piper can say it at all, the window
+    /// has what was heard and shows the rest as text.
+    fn speak_on(
+        &self,
+        reply: &str,
+        speech: Option<&TurnSpeech>,
+        sink: Option<Arc<dyn SpeechSink>>,
+        trace: &mut LatencyTrace,
+    ) -> (Option<AudioPayload>, Vec<WordSpan>, Vec<PhonemeSpan>, u32) {
+        let (Some(speech), Some(sink)) = (speech, sink) else {
+            return self.speak_on_clock(reply, None, trace);
+        };
+        let heard = |speech: &TurnSpeech| {
+            speech.said().iter().map(|segment| segment.text.clone()).collect::<Vec<_>>().join(" ")
+        };
+        match words_after(reply, &heard(speech)) {
+            None => {
+                // Cannot happen: the reply was saved starting with what was heard.
+                eprintln!("[LATENCY]     tts> the saved reply does not start with what was heard; saying it whole");
+                return self.speak_on_clock(reply, None, trace);
+            }
+            Some(rest) if rest.is_empty() => trace.record_tts_path("overlapped"),
+            Some(_) => {}
+        }
+        // Twice at most: a stream that breaks off partway leaves a shorter
+        // rest, which the second pass says as one recording.
+        for _ in 0..2 {
+            let rest = words_after(reply, &heard(speech)).unwrap_or_default();
+            if rest.is_empty() {
+                break;
+            }
+            let sent_before = speech.count();
+            let (audio, words, phonemes, _) = self.speak_on_clock(&rest, Some(Arc::clone(&sink)), trace);
+            if speech.count() > sent_before {
+                // Some or all of it streamed; anything still unsaid is
+                // what follows the last sentence sent.
+                continue;
+            }
+            // Nothing streamed: a recording of all of `rest`, if Piper made
+            // one, is the next sentence.
+            if let Some(audio) = audio {
+                eprintln!("[LATENCY]     tts> the rest could not stream; sending its recording as the next sentence");
+                sink.segment(SpeechSegment {
+                    index: sent_before,
+                    text: rest,
+                    audio,
+                    ready_ms: 0.0,
+                    words,
+                    phonemes,
+                });
+            } else {
+                eprintln!("[LATENCY]     tts> no Piper could say the rest; it is shown, not heard");
+            }
+            break;
+        }
+        let said = speech.said();
+        let parts: Vec<(&AudioPayload, &[WordSpan], &[PhonemeSpan])> = said
+            .iter()
+            .map(|segment| (&segment.audio, segment.words.as_slice(), segment.phonemes.as_slice()))
+            .collect();
+        let count = speech.count();
+        match joined_recording(&parts) {
+            Some((audio, words, phonemes)) => (Some(audio), words, phonemes, count),
+            None => (None, Vec::new(), Vec::new(), count),
+        }
     }
 
     /// Say the reply with the learner waiting: through `speech` sentence by
@@ -2901,6 +3088,145 @@ fn transcribe_stream_chunk(
         tail: false,
         at_pause: false,
     }
+}
+
+/// `reply` after `heard`, word for word: what is left of it to say. `None`
+/// when `reply` does not start with what was heard.
+fn words_after(reply: &str, heard: &str) -> Option<String> {
+    let mut words = reply.split_whitespace();
+    for said in heard.split_whitespace() {
+        if words.next()? != said {
+            return None;
+        }
+    }
+    Some(words.collect::<Vec<_>>().join(" "))
+}
+
+/// The reply to save when `heard` has already been said of it: `reply` as
+/// it is when it starts with that, which it does unless it was written
+/// again, and otherwise what was heard and then `reply`. Nothing said is
+/// taken back, and nothing saved goes unsaid.
+///
+/// A `rewritten` reply was asked to respond to the learner's answer and ask
+/// something new. What was heard has responded already, so the rewrite's
+/// opening that only does so again is left out: see `new_in_rewrite`.
+/// `heard` is empty unless `ELLA_EARLY_SPEECH` said some of the reply before
+/// it was settled, and then `reply` is returned as it is.
+fn after_what_was_heard(heard: &str, reply: &str, rewritten: bool, learner: &str) -> String {
+    if heard.trim().is_empty() || words_after(reply, heard).is_some() {
+        return reply.to_owned();
+    }
+    let rest = if rewritten { new_in_rewrite(heard, reply, learner) } else { reply.to_owned() };
+    if rest.is_empty() {
+        heard.to_owned()
+    } else {
+        format!("{heard} {rest}")
+    }
+}
+
+/// What a rewrite adds to what was heard of the first try. Its leading
+/// sentences are left out while each only says again what was heard: an
+/// acknowledgement (see `acknowledges`), or a statement at least three in
+/// five of whose words were heard already. It stops at the first sentence
+/// that does anything else, and never goes past the first question, which
+/// is what the rewrite is for. With no question, the first sentence that
+/// adds something is kept, and all after it.
+///
+/// One sentence fewer is left out when the first one kept points back
+/// ("it", "there", "they"...) and the one before it names something neither
+/// heard nor in the learner's answer: the question may be about that. Words
+/// of praise name nothing ("Sounds yummy!"), so they do not count.
+fn new_in_rewrite(heard: &str, rewrite: &str, learner: &str) -> String {
+    let all = sentences(rewrite);
+    let heard_words = content_words(heard);
+    let says_again = |sentence: &str| {
+        let words = content_words(sentence);
+        let heard_before = words.iter().filter(|word| heard_words.contains(*word)).count();
+        acknowledges(sentence) || (words.len() >= 2 && heard_before * 5 >= words.len() * 3)
+    };
+    let before_question = all.iter().position(|sentence| sentence.ends_with('?')).unwrap_or(all.len());
+    let mut cut = all[..before_question].iter().take_while(|sentence| says_again(sentence)).count();
+    if cut > 0 && cut < all.len() && points_back(all[cut]) {
+        let learner_words = content_words(learner);
+        let named = content_words(all[cut - 1]);
+        let names_something_new = named.iter().any(|word| {
+            !heard_words.contains(word)
+                && !learner_words.contains(word)
+                && !REACTIONS.contains(&word.as_str())
+                && !PRAISE.contains(&word.as_str())
+        });
+        if names_something_new {
+            cut -= 1;
+        }
+    }
+    all[cut..].join(" ")
+}
+
+/// Words that open a reaction to what the learner said.
+const REACTIONS: &[&str] = &[
+    "alright", "awesome", "cool", "fantastic", "good", "great", "lovely", "nice", "oh", "ok", "okay", "perfect",
+    "right", "sure", "understood", "wonderful", "wow", "yeah", "yes",
+];
+
+/// Words that praise what the learner said rather than name anything in it.
+const PRAISE: &[&str] = &[
+    "amazing", "delicious", "enjoy", "enjoyed", "exciting", "fun", "glad", "happy", "hear", "interesting", "know",
+    "like", "liked", "love", "loved", "really", "sound", "sounds", "tasty", "yummy",
+];
+
+/// A sentence that reacts to the learner rather than telling them anything:
+/// a short exclamation ("That's good!", "Pani puri sounds delicious!"), a
+/// reaction on its own ("Understood."), or a statement opening on one
+/// ("Great, I'll pick you up at your home."). Never one with a figure in
+/// it, which may be news.
+fn acknowledges(sentence: &str) -> bool {
+    if sentence.chars().any(|character| character.is_ascii_digit()) {
+        return false;
+    }
+    let words: Vec<&str> = sentence.split_whitespace().collect();
+    let Some(first) = words.first() else {
+        return false;
+    };
+    let opener = first.trim_end_matches([',', '.', '!']).to_lowercase();
+    let reacts = REACTIONS.contains(&opener.as_str()) && (words.len() == 1 || first.ends_with([',', '!']));
+    reacts || (sentence.ends_with('!') && words.len() <= 6)
+}
+
+/// Common words that say nothing of what a sentence is about.
+const FILLER: &[&str] = &[
+    "about", "all", "also", "and", "any", "are", "but", "can", "could", "did", "does", "for", "from", "had",
+    "has", "have", "here", "how", "i'll", "i'm", "into", "it's", "its", "just", "more", "much", "not", "now",
+    "our", "should", "some", "than", "that", "that's", "the", "their", "them", "then", "there", "they", "this",
+    "too", "very", "was", "were", "what", "when", "where", "which", "who", "will", "with", "would", "you",
+    "you're", "your",
+];
+
+/// The words of `text` that say what it is about, lower-cased: every figure,
+/// and every other word of three letters or more that is not filler.
+fn content_words(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|word| {
+            word.replace('\u{2019}', "'")
+                .trim_matches(|character: char| !character.is_alphanumeric() && character != '\'')
+                .to_lowercase()
+        })
+        .filter(|word| {
+            word.chars().any(|character| character.is_ascii_digit())
+                || (word.chars().count() >= 3 && !FILLER.contains(&word.as_str()))
+        })
+        .collect()
+}
+
+/// Whether a sentence refers back to something named before it.
+fn points_back(sentence: &str) -> bool {
+    sentence.split_whitespace().any(|word| {
+        let word = word.trim_matches(|character: char| !character.is_alphanumeric()).to_lowercase();
+        matches!(
+            word.as_str(),
+            "it" | "its" | "that" | "this" | "these" | "those" | "there" | "they" | "them" | "their" | "he"
+                | "she" | "him" | "her" | "his" | "one"
+        )
+    })
 }
 
 fn finish_turn(outcome: EllaResult<TurnResult>, trace: LatencyTrace) -> EllaResult<TurnResult> {
@@ -5624,6 +5950,7 @@ mod deal_tests {
 #[cfg(test)]
 mod speech_release_tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use crate::{
         domain::EngineStatus,
         infrastructure::{
@@ -5732,6 +6059,511 @@ mod speech_release_tests {
         assert!(result.audio.is_some(), "the recording is played instead");
         let timings = result.timings.unwrap();
         assert_eq!(timings.speech_ms, Some(timings.total_ms), "she speaks when the turn returns");
+    }
+
+    /// A sentence of audio the test engines below hand the window: real WAV,
+    /// so a reply's recording can be put together from its sentences.
+    fn clip(index: u32, text: &str) -> SpeechSegment {
+        let pcm: Vec<u8> = (0..220_i16).flat_map(i16::to_le_bytes).collect();
+        SpeechSegment {
+            index,
+            text: text.to_owned(),
+            audio: AudioPayload {
+                mime_type: "audio/wav".into(),
+                base64: base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    crate::infrastructure::audio::raw_pcm_to_wav(&pcm, 22_050, 1),
+                ),
+            },
+            ready_ms: 1.0,
+            words: text
+                .split_whitespace()
+                .enumerate()
+                .map(|(at, word)| WordSpan { text: word.to_owned(), start_ms: at as f64, end_ms: at as f64 + 1.0 })
+                .collect(),
+            phonemes: Vec::new(),
+        }
+    }
+
+    /// A laptop reply with early speech, as `LocalEngine` gives one when
+    /// `ELLA_EARLY_SPEECH` is on: `early` reaches the window while the reply
+    /// is still being written, and `text` is the reply the engine settles on
+    /// afterwards, which a rewrite or a dropped question can change. With
+    /// `fails`, the model stops answering once the early sentences are out.
+    struct Early {
+        early: &'static [&'static str],
+        text: &'static str,
+        fails: bool,
+        /// Whether `text` is a rewrite, as `GeneratedReply::regenerated` says.
+        rewritten: bool,
+        piper: AfterEarly,
+    }
+
+    /// What Piper can still do once the early sentences are out.
+    enum AfterEarly {
+        /// Stays resident and streams the rest sentence by sentence.
+        Resident,
+        /// Was set aside: the rest comes back as one recording, from a Piper
+        /// started for it, and nothing streams.
+        SetAside,
+        /// Streams this many sentences of the rest, breaks, and records the
+        /// whole of what it was given instead, as `speak_in_sentences` does;
+        /// from then on it is set aside.
+        BreaksAfter(usize, AtomicBool),
+        /// Cannot say anything more.
+        Gone,
+    }
+
+    impl TutorEngine for Early {
+        fn status(&self) -> EngineStatus {
+            DemoEngine.status()
+        }
+        fn opening(&self, topic: &Topic, learner_name: &str, pitch: &Pitch) -> EllaResult<String> {
+            DemoEngine.opening(topic, learner_name, pitch)
+        }
+        fn reply(&self, request: &TutorRequest) -> EllaResult<GeneratedReply> {
+            self.reply_speaking(request, None)
+        }
+        fn reply_speaking(
+            &self,
+            _: &TutorRequest,
+            early: Option<Arc<dyn SpeechSink>>,
+        ) -> EllaResult<GeneratedReply> {
+            if let Some(sink) = &early {
+                for (index, sentence) in self.early.iter().enumerate() {
+                    sink.segment(clip(index as u32, sentence));
+                }
+            }
+            if self.fails {
+                return Err(EllaError::Engine("the model stopped answering".into()));
+            }
+            let mut reply = GeneratedReply::plain(self.text.into(), 1.0, 1.0);
+            reply.regenerated = self.rewritten;
+            Ok(reply)
+        }
+        fn uses_native_stt(&self) -> bool {
+            false
+        }
+        fn transcribe(&self, _: &[i16], _: u32) -> EllaResult<Transcription> {
+            Err(EllaError::Engine("no microphone in tests".into()))
+        }
+        fn synthesize(&self, _: &str) -> EllaResult<SynthesizedAudio> {
+            DemoEngine.synthesize("")
+        }
+        fn speak(&self, text: &str, speech: Option<Arc<dyn SpeechSink>>) -> EllaResult<SynthesizedAudio> {
+            let sentences: Vec<&str> = text
+                .split_inclusive(['.', '!', '?'])
+                .map(str::trim)
+                .filter(|sentence| !sentence.is_empty())
+                .collect();
+            let whole = clip(0, text);
+            let recorded = SynthesizedAudio {
+                audio: Some(whole.audio),
+                first_audio_ms: Some(1.0),
+                completion_ms: Some(2.0),
+                words: whole.words,
+                phonemes: Vec::new(),
+                segments: 0,
+            };
+            let streams = match &self.piper {
+                AfterEarly::Resident => sentences.len(),
+                AfterEarly::SetAside => 0,
+                AfterEarly::BreaksAfter(sentences, broken) => {
+                    if broken.swap(true, Ordering::SeqCst) { 0 } else { *sentences }
+                }
+                AfterEarly::Gone => {
+                    return Ok(SynthesizedAudio { audio: None, words: Vec::new(), ..recorded });
+                }
+            };
+            let Some(sink) = &speech else {
+                return Ok(recorded);
+            };
+            for (index, sentence) in sentences.iter().take(streams).enumerate() {
+                sink.segment(clip(index as u32, sentence));
+            }
+            if streams >= sentences.len() {
+                return Ok(SynthesizedAudio { segments: sentences.len() as u32, ..recorded });
+            }
+            Ok(recorded)
+        }
+    }
+
+    fn early(engine: Early) -> (AppService, Arc<Window>, String) {
+        let service = AppService::new(Database::in_memory().unwrap(), Box::new(engine));
+        service.save_learner("Asha", Some(14)).unwrap();
+        let window = Arc::new(Window::default());
+        service.set_speech_broadcast(window.clone());
+        let session = service.start_session("street-food").unwrap();
+        (service, window, session.id)
+    }
+
+    /// The invariant early speech must keep, on every path: the window was
+    /// handed each sentence once, in order; what those sentences say, put
+    /// together, is exactly the reply that was saved; and the reply's text
+    /// came once, either on the first sentence after it was settled or with
+    /// the turn itself, every sentence before that saying its text follows.
+    fn assert_heard_is_saved(window: &Window, result: &TurnResult) {
+        let saved = result.ella_message.content.as_str();
+        let events: Vec<SpeechStreamEvent> = window
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.turn == result.ella_message.turn)
+            .cloned()
+            .collect();
+        assert_eq!(
+            events.iter().map(|event| event.index).collect::<Vec<_>>(),
+            (0..events.len() as u32).collect::<Vec<_>>(),
+            "each sentence once, in order"
+        );
+        assert_eq!(result.streamed_segments as usize, events.len(), "the window is told how many it has");
+        let spoken = events.iter().map(|event| event.text.as_str()).collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            spoken.split_whitespace().collect::<Vec<_>>(),
+            saved.split_whitespace().collect::<Vec<_>>(),
+            "what she said is what was saved"
+        );
+        let carrying: Vec<&SpeechStreamEvent> = events.iter().filter(|event| event.reply.is_some()).collect();
+        assert!(carrying.len() <= 1, "the text goes once");
+        if let Some(event) = carrying.first() {
+            assert_eq!(event.reply.as_deref(), Some(saved));
+        }
+        let settled = events.iter().position(|event| event.reply.is_some()).unwrap_or(events.len());
+        assert!(events[..settled].iter().all(|event| event.text_follows), "said before the text was settled");
+        assert!(events[settled..].iter().all(|event| !event.text_follows), "said once it was");
+    }
+
+    #[test]
+    fn a_reply_spoken_whole_after_it_is_saved_keeps_the_invariant() {
+        let service = voiced();
+        let window = Arc::new(Window::default());
+        service.set_speech_broadcast(window.clone());
+        let session = service.start_session("street-food").unwrap();
+        let result = service.send_text_turn(&session.id, "I ate bhel puri.").unwrap();
+        assert_heard_is_saved(&window, &result);
+        assert!(window.0.lock().unwrap().iter().all(|event| !event.text_follows));
+    }
+
+    #[test]
+    fn what_she_said_early_starts_the_reply_and_the_rest_follows_it() {
+        let (service, window, session) = early(Early {
+            early: &["Oh, yummy!"],
+            text: "Oh, yummy! What did you eat there?",
+            fails: false,
+            rewritten: false,
+            piper: AfterEarly::Resident,
+        });
+        let result = service.send_text_turn(&session, "I ate bhel puri.").unwrap();
+        assert_eq!(result.ella_message.content, "Oh, yummy! What did you eat there?");
+        assert_heard_is_saved(&window, &result);
+        assert_eq!(result.streamed_segments, 2);
+        let events = window.0.lock().unwrap();
+        assert_eq!(events.last().unwrap().reply.as_deref(), Some("Oh, yummy! What did you eat there?"));
+        drop(events);
+        assert_eq!(
+            result.speech_words.iter().map(|word| word.text.as_str()).collect::<Vec<_>>().join(" "),
+            "Oh, yummy! What did you eat there?",
+            "the replay button says all of it, early part included"
+        );
+        assert!(result.audio.is_some());
+        assert!(result.timings.unwrap().speech_ms.is_some());
+    }
+
+    #[test]
+    fn a_rewrite_after_early_speech_is_saved_after_what_was_already_said() {
+        let (service, window, session) = early(Early {
+            early: &["Oh, yummy!"],
+            text: "That sounds tasty. What else did you try there?",
+            fails: false,
+            rewritten: true,
+            piper: AfterEarly::Resident,
+        });
+        let result = service.send_text_turn(&session, "I ate bhel puri.").unwrap();
+        assert_eq!(
+            result.ella_message.content,
+            "Oh, yummy! That sounds tasty. What else did you try there?",
+            "nothing she said is taken back, and nothing unsaid is saved"
+        );
+        assert_heard_is_saved(&window, &result);
+    }
+
+    #[test]
+    fn a_rewrite_that_begins_with_what_was_already_said_is_not_said_twice() {
+        let (service, window, session) = early(Early {
+            early: &["Oh, yummy!"],
+            text: "Oh, yummy! I bet it was crispy. What else did you try there?",
+            fails: false,
+            rewritten: true,
+            piper: AfterEarly::Resident,
+        });
+        let result = service.send_text_turn(&session, "I ate bhel puri.").unwrap();
+        assert_eq!(result.ella_message.content, "Oh, yummy! I bet it was crispy. What else did you try there?");
+        assert_heard_is_saved(&window, &result);
+        assert_eq!(result.streamed_segments, 3);
+    }
+
+    #[test]
+    fn a_reply_said_whole_before_it_settled_gets_its_text_with_the_turn() {
+        let (service, window, session) = early(Early {
+            early: &["That was kind of you.", "Thank you for telling me."],
+            text: "That was kind of you. Thank you for telling me.",
+            fails: false,
+            rewritten: false,
+            piper: AfterEarly::Resident,
+        });
+        let result = service.send_text_turn(&session, "I shared it with my sister.").unwrap();
+        assert_eq!(result.ella_message.content, "That was kind of you. Thank you for telling me.");
+        assert_heard_is_saved(&window, &result);
+        assert!(window.0.lock().unwrap().iter().all(|event| event.reply.is_none()));
+        assert_eq!(result.streamed_segments, 2);
+        assert!(result.audio.is_some(), "the replay button still has all of it");
+    }
+
+    #[test]
+    fn a_model_that_fails_after_early_speech_saves_nothing() {
+        let (service, window, session) = early(Early {
+            early: &["Oh, yummy!"],
+            text: "",
+            fails: true,
+            rewritten: false,
+            piper: AfterEarly::Resident,
+        });
+        let before = service.get_session(&session).unwrap().messages.len();
+        assert!(service.send_text_turn(&session, "I ate bhel puri.").is_err());
+        assert_eq!(service.get_session(&session).unwrap().messages.len(), before, "the turn is not saved");
+        let events = window.0.lock().unwrap();
+        assert!(events.iter().filter(|event| event.turn == 1).all(|event| event.text_follows && event.reply.is_none()));
+    }
+    /// The rest of a reply after its early sentences, as the window got it.
+    fn turn_events(window: &Window, turn: u32) -> Vec<SpeechStreamEvent> {
+        window.0.lock().unwrap().iter().filter(|event| event.turn == turn).cloned().collect()
+    }
+
+    /// One turn of a laptop reply that was written again after `early` was
+    /// heard, as the learner's `answer` asked for it: what was saved, which
+    /// the window was sent exactly, sentence by sentence.
+    fn rewritten_after(early_said: &'static [&'static str], rewrite: &'static str, answer: &str) -> (String, Vec<String>) {
+        let (service, window, session) = early(Early {
+            early: early_said,
+            text: rewrite,
+            fails: false,
+            rewritten: true,
+            piper: AfterEarly::Resident,
+        });
+        let result = service.send_text_turn(&session, answer).unwrap();
+        assert_heard_is_saved(&window, &result);
+        let said = turn_events(&window, 1).into_iter().map(|event| event.text).collect();
+        (result.ella_message.content, said)
+    }
+
+    #[test]
+    fn a_rewrite_that_tells_the_fare_again_adds_only_its_new_question() {
+        // A cab talk on the Mac (2026-11-20): the first try's "Great, it will
+        // cost 60 rupees and take about 15 minutes." was heard, then its
+        // question was a repeat, and the rewrite told the fare and the time again.
+        let (saved, said) = rewritten_after(
+            &["Great, it will cost 60 rupees and take about 15 minutes."],
+            "Great, I'll pick you up at your home. The fare will be 60 rupees and it should take about \
+             15 minutes. Where will you be at 4 PM?",
+            "Yes.",
+        );
+        assert_eq!(saved, "Great, it will cost 60 rupees and take about 15 minutes. Where will you be at 4 PM?");
+        assert_eq!(said, ["Great, it will cost 60 rupees and take about 15 minutes.", "Where will you be at 4 PM?"]);
+    }
+
+    #[test]
+    fn a_rewrite_does_not_react_again_to_an_answer_already_reacted_to() {
+        let (saved, said) = rewritten_after(
+            &["You did taste it!"],
+            "That's good! What did you like best about the pani puri?",
+            "Yes.",
+        );
+        assert_eq!(saved, "You did taste it! What did you like best about the pani puri?");
+        assert_eq!(said, ["You did taste it!", "What did you like best about the pani puri?"]);
+
+        let (saved, _) = rewritten_after(
+            &["That sounds delicious!"],
+            "Pani puri sounds delicious! Where did you get it?",
+            "Pani puri.",
+        );
+        assert_eq!(
+            saved, "That sounds delicious! Where did you get it?",
+            "\"it\" is the pani puri the learner named, so nothing it needs is left out"
+        );
+    }
+
+    #[test]
+    fn a_rewrite_does_not_praise_again_what_was_already_praised() {
+        // The street-food talk on the Mac (2026-11-21), twice: the early
+        // "Oh, pani puri sounds delicious!" was heard, and each rewrite
+        // opened on more praise before a question about "it".
+        let (saved, _) = rewritten_after(
+            &["Oh, pani puri sounds delicious!"],
+            "Sounds yummy! Where did you get it? What kind did you like best?",
+            "Pani puri.",
+        );
+        assert_eq!(saved, "Oh, pani puri sounds delicious! Where did you get it? What kind did you like best?");
+        let (saved, _) = rewritten_after(
+            &["Oh, pani puri sounds delicious!"],
+            "Pani puri sounds yummy! Did you get it from a street stall?",
+            "Pani puri.",
+        );
+        assert_eq!(saved, "Oh, pani puri sounds delicious! Did you get it from a street stall?");
+    }
+
+    #[test]
+    fn a_rewrite_keeps_what_its_question_points_back_to() {
+        let (saved, _) = rewritten_after(
+            &["Oh, yummy!"],
+            "Great, chai goes well with samosas. Do you drink it with sugar?",
+            "I had samosas.",
+        );
+        assert_eq!(
+            saved, "Oh, yummy! Great, chai goes well with samosas. Do you drink it with sugar?",
+            "\"it\" is the chai only the left-out sentence named, so that sentence stays"
+        );
+        let (saved, _) = rewritten_after(&["Oh, yummy!"], "I love chai! Do you drink it with sugar?", "I had samosas.");
+        assert_eq!(saved, "Oh, yummy! I love chai! Do you drink it with sugar?", "praise around a name keeps the name");
+    }
+
+    #[test]
+    fn a_rewrite_never_loses_a_figure_or_anything_else_it_tells() {
+        let (saved, _) = rewritten_after(
+            &["Oh, nice!"],
+            "Okay, the fare is 80 rupees now. Shall we go?",
+            "Can you take me to the station?",
+        );
+        assert_eq!(saved, "Oh, nice! Okay, the fare is 80 rupees now. Shall we go?");
+    }
+
+    #[test]
+    fn a_rewrite_with_no_question_keeps_its_last_sentence_that_adds_something() {
+        let (saved, _) = rewritten_after(
+            &["Okay, I'll pick you up now."],
+            "Understood. Please tell me your home address, and I will take you to the railway station.",
+            "Now, please.",
+        );
+        assert_eq!(
+            saved,
+            "Okay, I'll pick you up now. Please tell me your home address, and I will take you to the railway station."
+        );
+        let (saved, _) = rewritten_after(&["That sounds yummy!"], "Sounds yummy!", "Pani puri.");
+        assert_eq!(saved, "That sounds yummy!", "a rewrite that only reacts again adds nothing");
+    }
+
+    #[test]
+    fn only_a_rewrite_is_trimmed_after_early_speech() {
+        let (service, window, session) = early(Early {
+            early: &["Oh, yummy!"],
+            text: "That's good! What else did you try there?",
+            fails: false,
+            rewritten: false,
+            piper: AfterEarly::Resident,
+        });
+        let result = service.send_text_turn(&session, "I ate bhel puri.").unwrap();
+        assert_eq!(result.ella_message.content, "Oh, yummy! That's good! What else did you try there?");
+        assert_heard_is_saved(&window, &result);
+    }
+
+    #[test]
+    fn with_nothing_heard_early_a_rewrite_is_saved_and_said_as_written() {
+        // ELLA_EARLY_SPEECH off: nothing reaches the window before the reply
+        // is settled, so the rewrite is the reply, word for word.
+        let (service, window, session) = early(Early {
+            early: &[],
+            text: "That's good! What did you like best about the pani puri?",
+            fails: false,
+            rewritten: true,
+            piper: AfterEarly::Resident,
+        });
+        let result = service.send_text_turn(&session, "Yes.").unwrap();
+        assert_eq!(result.ella_message.content, "That's good! What did you like best about the pani puri?");
+        assert_heard_is_saved(&window, &result);
+        let events = turn_events(&window, 1);
+        assert!(events.iter().all(|event| !event.text_follows));
+        assert_eq!(events[0].reply.as_deref(), Some("That's good! What did you like best about the pani puri?"));
+    }
+
+    #[test]
+    fn once_piper_is_set_aside_after_early_speech_only_the_rest_is_said() {
+        let (service, window, session) = early(Early {
+            early: &["Oh, yummy!"],
+            text: "Oh, yummy! I bet it was crispy. What else did you try there?",
+            fails: false,
+            rewritten: false,
+            piper: AfterEarly::SetAside,
+        });
+        let result = service.send_text_turn(&session, "I ate bhel puri.").unwrap();
+        assert_heard_is_saved(&window, &result);
+        let events = turn_events(&window, 1);
+        assert_eq!(
+            events.iter().map(|event| event.text.as_str()).collect::<Vec<_>>(),
+            ["Oh, yummy!", "I bet it was crispy. What else did you try there?"],
+            "the recording made for the rest is its next sentence, not a replay of all of it"
+        );
+        assert_eq!(result.streamed_segments, 2, "the window plays no recording of its own");
+        assert_eq!(events[1].reply.as_deref(), Some(result.ella_message.content.as_str()));
+        assert_eq!(
+            result.speech_words.iter().map(|word| word.text.as_str()).collect::<Vec<_>>().join(" "),
+            "Oh, yummy! I bet it was crispy. What else did you try there?",
+            "the replay button still says all of it once"
+        );
+    }
+
+    #[test]
+    fn a_piper_that_breaks_partway_after_early_speech_goes_on_from_the_first_unsent_sentence() {
+        let (service, window, session) = early(Early {
+            early: &["Oh, yummy!"],
+            text: "Oh, yummy! I bet it was crispy. Did you eat it hot? What else did you try there?",
+            fails: false,
+            rewritten: false,
+            piper: AfterEarly::BreaksAfter(1, AtomicBool::new(false)),
+        });
+        let result = service.send_text_turn(&session, "I ate bhel puri.").unwrap();
+        assert_heard_is_saved(&window, &result);
+        let events = turn_events(&window, 1);
+        assert_eq!(
+            events.iter().map(|event| event.text.as_str()).collect::<Vec<_>>(),
+            ["Oh, yummy!", "I bet it was crispy.", "Did you eat it hot? What else did you try there?"],
+        );
+        assert_eq!(events.iter().map(|event| event.index).collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!(result.streamed_segments, 3);
+    }
+
+    #[test]
+    fn a_rewrite_whose_piper_is_set_aside_says_only_what_was_not_heard() {
+        let (service, window, session) = early(Early {
+            early: &["Oh, yummy!"],
+            text: "That sounds tasty. What else did you try there?",
+            fails: false,
+            rewritten: true,
+            piper: AfterEarly::SetAside,
+        });
+        let result = service.send_text_turn(&session, "I ate bhel puri.").unwrap();
+        assert_eq!(result.ella_message.content, "Oh, yummy! That sounds tasty. What else did you try there?");
+        assert_heard_is_saved(&window, &result);
+        assert_eq!(turn_events(&window, 1).len(), 2);
+    }
+
+    #[test]
+    fn with_no_piper_left_after_early_speech_the_rest_is_shown_not_said_again() {
+        let (service, window, session) = early(Early {
+            early: &["Oh, yummy!"],
+            text: "Oh, yummy! What did you eat there?",
+            fails: false,
+            rewritten: false,
+            piper: AfterEarly::Gone,
+        });
+        let result = service.send_text_turn(&session, "I ate bhel puri.").unwrap();
+        assert_eq!(result.ella_message.content, "Oh, yummy! What did you eat there?", "the whole reply is saved");
+        let events = turn_events(&window, 1);
+        assert_eq!(events.iter().map(|event| event.text.as_str()).collect::<Vec<_>>(), ["Oh, yummy!"]);
+        assert_eq!(
+            result.streamed_segments, 1,
+            "the window is told it has had everything there is, so it replays nothing"
+        );
+        assert!(events.iter().all(|event| event.reply.is_none()), "the text comes with the turn");
     }
 }
 

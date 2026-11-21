@@ -573,11 +573,18 @@ pub struct SpeechStreamEvent {
     /// them, and then her mouth only opens while she talks.
     #[serde(default)]
     pub phonemes: Vec<PhonemeSpan>,
-    /// The whole reply, on a reply's first sentence only. Its text is settled
-    /// before any of it is sent, so the window shows all of it the moment
-    /// Ella starts saying it rather than wait for the turn to return.
+    /// The whole reply, on the first of a reply's sentences sent once its
+    /// text is settled, and on no other. The window shows all of it then,
+    /// rather than wait for the turn to return.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<String>,
+    /// True for a sentence said before the reply's text was settled
+    /// (`ELLA_EARLY_SPEECH`): the window clears the line it showed and shows
+    /// the reply only once its text comes, whole, on a later sentence or with
+    /// the turn. False for every other sentence, which is every sentence
+    /// unless early speech is on.
+    #[serde(default)]
+    pub text_follows: bool,
 }
 
 /// The result of speaking a line the app already had — Ella's opening. Carries

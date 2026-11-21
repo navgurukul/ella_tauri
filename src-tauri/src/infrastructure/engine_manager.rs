@@ -805,6 +805,22 @@ impl TutorEngine for DeferredEngine {
         }
     }
 
+    fn reply_speaking(
+        &self,
+        request: &TutorRequest,
+        early: Option<Arc<dyn SpeechSink>>,
+    ) -> EllaResult<GeneratedReply> {
+        match self
+            .inner
+            .read()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|engine| engine.reply_speaking(request, early.clone())))
+        {
+            Some(result) => result,
+            None => Err(self.pending()),
+        }
+    }
+
     fn uses_native_stt(&self) -> bool {
         // Claiming the browser recognizer while the native one is still
         // loading would send the WebView down a path the desktop cannot
