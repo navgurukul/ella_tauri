@@ -11460,6 +11460,31 @@ mod errand_tests {
         }
 
         #[test]
+        fn a_question_dropped_after_early_speech_leaves_what_was_heard_at_the_start() {
+            let _turn = ONE_PIPER_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+            let root = tempfile::tempdir().unwrap();
+            let piper = fake_piper(root.path());
+            let fake = FakeLlama::scripted(
+                slow(),
+                &["Oh, yummy! It sounds so crispy. Where did you find it? What did you eat with it?"],
+            );
+            let engine = speaking(&fake, &piper, true);
+            let window = Arc::new(Window::default());
+            let reply = engine
+                .reply_speaking(&after_where("I had the crispy corn in Barbecue Nation."), Some(window.clone()))
+                .unwrap();
+            assert!(!reply.regenerated, "its last question is new, so it is not written again");
+            assert_eq!(reply.text, "Oh, yummy! It sounds so crispy. What did you eat with it?");
+            assert!(reply.pending.is_none(), "the reply changed, so the caller says the rest");
+            let heard = window.said();
+            thread::sleep(Duration::from_millis(800));
+            assert_eq!(window.said(), heard, "nothing more of what Piper was reading once it changed");
+            assert!(!heard.is_empty(), "the opening statement was heard");
+            assert!(reply.text.starts_with(&heard.join(" ")), "what was heard still starts the reply: {heard:?}");
+            assert!(heard.iter().all(|sentence| !sentence.contains('?')));
+        }
+
+        #[test]
         fn only_a_whole_statement_may_be_heard_early() {
             assert!(may_go_early("That sounds lovely.", true));
             assert!(may_go_early("Oh, yummy!", true));

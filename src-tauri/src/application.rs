@@ -74,9 +74,8 @@ struct SentSpeech {
     /// known, so the window can show all of it the moment it has it. `None`
     /// for a line that is already on screen, such as the opening, and for a
     /// reply not yet settled.
+    /// Taken when it goes, so it goes once.
     reply: Option<String>,
-    /// Whether `reply` has gone.
-    reply_sent: bool,
     /// Whether the reply has been settled and saved (`settle`). Always true
     /// for a line made with its text.
     settled: bool,
@@ -147,10 +146,7 @@ impl SpeechSink for TurnSpeech {
             sent.early += 1;
         }
         sent.said.push(segment.clone());
-        let reply = (sent.settled && !sent.reply_sent).then(|| sent.reply.clone()).flatten();
-        if reply.is_some() {
-            sent.reply_sent = true;
-        }
+        let reply = if sent.settled { sent.reply.take() } else { None };
         self.broadcast.speak(SpeechStreamEvent {
             session_id: self.session_id.clone(),
             turn: self.turn,
@@ -2019,19 +2015,17 @@ impl AppService {
         let heard = |speech: &TurnSpeech| {
             speech.said().iter().map(|segment| segment.text.clone()).collect::<Vec<_>>().join(" ")
         };
-        match words_after(reply, &heard(speech)) {
-            None => {
-                // Cannot happen: the reply was saved starting with what was heard.
-                eprintln!("[LATENCY]     tts> the saved reply does not start with what was heard; saying it whole");
-                return self.speak_on_clock(reply, None, trace);
-            }
-            Some(rest) if rest.is_empty() => trace.record_tts_path("overlapped"),
-            Some(_) => {}
+        let Some(mut rest) = words_after(reply, &heard(speech)) else {
+            // Cannot happen: the reply was saved starting with what was heard.
+            eprintln!("[LATENCY]     tts> the saved reply does not start with what was heard; saying it whole");
+            return self.speak_on_clock(reply, None, trace);
+        };
+        if rest.is_empty() {
+            trace.record_tts_path("overlapped");
         }
         // Twice at most: a stream that breaks off partway leaves a shorter
         // rest, which the second pass says as one recording.
         for _ in 0..2 {
-            let rest = words_after(reply, &heard(speech)).unwrap_or_default();
             if rest.is_empty() {
                 break;
             }
@@ -2040,6 +2034,7 @@ impl AppService {
             if speech.count() > sent_before {
                 // Some or all of it streamed; anything still unsaid is
                 // what follows the last sentence sent.
+                rest = words_after(reply, &heard(speech)).unwrap_or_default();
                 continue;
             }
             // Nothing streamed: a recording of all of `rest`, if Piper made
@@ -3138,17 +3133,17 @@ fn after_what_was_heard(heard: &str, reply: &str, rewritten: bool, learner: &str
 /// of praise name nothing ("Sounds yummy!"), so they do not count.
 fn new_in_rewrite(heard: &str, rewrite: &str, learner: &str) -> String {
     let all = sentences(rewrite);
-    let heard_words = content_words(heard);
+    let heard_words = topic_words(heard);
     let says_again = |sentence: &str| {
-        let words = content_words(sentence);
+        let words = topic_words(sentence);
         let heard_before = words.iter().filter(|word| heard_words.contains(*word)).count();
         acknowledges(sentence) || (words.len() >= 2 && heard_before * 5 >= words.len() * 3)
     };
     let before_question = all.iter().position(|sentence| sentence.ends_with('?')).unwrap_or(all.len());
     let mut cut = all[..before_question].iter().take_while(|sentence| says_again(sentence)).count();
     if cut > 0 && cut < all.len() && points_back(all[cut]) {
-        let learner_words = content_words(learner);
-        let named = content_words(all[cut - 1]);
+        let learner_words = topic_words(learner);
+        let named = topic_words(all[cut - 1]);
         let names_something_new = named.iter().any(|word| {
             !heard_words.contains(word)
                 && !learner_words.contains(word)
@@ -3203,7 +3198,7 @@ const FILLER: &[&str] = &[
 
 /// The words of `text` that say what it is about, lower-cased: every figure,
 /// and every other word of three letters or more that is not filler.
-fn content_words(text: &str) -> Vec<String> {
+fn topic_words(text: &str) -> Vec<String> {
     text.split_whitespace()
         .map(|word| {
             word.replace('\u{2019}', "'")
