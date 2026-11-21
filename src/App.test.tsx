@@ -334,7 +334,7 @@ describe("Ella learner flow", () => {
   });
 
   /**
-   * Early speech (`ELLA_EARLY_SPEECH`): Ella starts saying a laptop reply's
+   * Early speech: Ella starts saying a laptop reply's
    * statement before the reply is settled. The line shown is cleared rather
    * than left up under her new words, and the reply appears once, whole, when
    * its text comes; it is never shown a piece at a time.

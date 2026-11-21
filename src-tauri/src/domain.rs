@@ -578,11 +578,10 @@ pub struct SpeechStreamEvent {
     /// rather than wait for the turn to return.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<String>,
-    /// True for a sentence said before the reply's text was settled
-    /// (`ELLA_EARLY_SPEECH`): the window clears the line it showed and shows
-    /// the reply only once its text comes, whole, on a later sentence or with
-    /// the turn. False for every other sentence, which is every sentence
-    /// unless early speech is on.
+    /// True for a sentence said before the reply's text was settled (early
+    /// speech, a laptop free talk's statements): the window clears the line
+    /// it showed and shows the reply only once its text comes, whole, on a
+    /// later sentence or with the turn. False for every other sentence.
     #[serde(default)]
     pub text_follows: bool,
 }

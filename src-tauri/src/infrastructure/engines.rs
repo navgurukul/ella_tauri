@@ -855,7 +855,7 @@ fn same_words(left: &str, right: &str) -> bool {
 }
 
 /// Whether a piece of a reply may be heard before the reply is settled
-/// (`ELLA_EARLY_SPEECH`): a whole statement, cut where it ended. Nothing the
+/// (early speech): a whole statement, cut where it ended. Nothing the
 /// free talk's checks can change is in it. They only ever drop or rewrite a
 /// question (`repeated_question`, `without_repeated_questions`), and a piece
 /// with a '?' anywhere in it, or cut at the soft cap partway through what may
@@ -953,8 +953,8 @@ impl StreamedSpeech {
 enum Gate {
     /// Synthesized ahead of the reply being settled, and kept until it is.
     Held(Vec<SpeechSegment>),
-    /// While the laptop writes a free talk's reply with `ELLA_EARLY_SPEECH`
-    /// on: each statement (`may_go_early`) goes to the window the moment it
+    /// While the laptop writes a free talk's reply (early speech): each
+    /// statement (`may_go_early`) goes to the window the moment it
     /// is ready, until the first piece that may not. That piece and every one
     /// after it are held, as in `Held`, so nothing is heard out of order.
     Early {
@@ -993,8 +993,7 @@ struct SpeechPipeline {
     /// play it: the reply it was reading has been dropped.
     abandoned: Arc<AtomicBool>,
     /// Where statements go early once `open_early` is called: the turn's
-    /// window, given only for a free talk's reply with `ELLA_EARLY_SPEECH` on
-    /// (`allow_early`). `None` leaves the pipeline exactly as it always was.
+    /// window, given only for a free talk's reply (`allow_early`). `None` leaves the pipeline exactly as it always was.
     early: Option<Arc<dyn SpeechSink>>,
 }
 
@@ -3259,7 +3258,7 @@ pub trait TutorEngine: Send + Sync {
     fn reply(&self, request: &TutorRequest) -> EllaResult<GeneratedReply>;
 
     /// `reply`, with the turn's window to say a free talk's statements to as
-    /// the laptop writes them, ahead of the rest (`ELLA_EARLY_SPEECH`). The
+    /// the laptop writes them, ahead of the rest (early speech). The
     /// text is still shown only once it is settled, whole: the window is told
     /// so on each sentence (`SpeechStreamEvent::text_follows`). Whatever goes
     /// to `early` is heard, and the caller saves the reply after it.
@@ -4235,10 +4234,6 @@ pub struct LocalEngine {
     /// Lesson openings the cloud wrote while the learner was on Home: see
     /// `prepare_lesson`.
     lessons: Arc<MadeAhead>,
-    /// `ELLA_EARLY_SPEECH`: a free talk's statements are heard as the laptop
-    /// writes them, ahead of the reply being settled (`Gate::Early`). Off
-    /// unless set, and then every reply is held until it is saved, as before.
-    early_speech: bool,
 }
 
 /// After this long without the cloud's first word, the laptop's model starts
@@ -4720,9 +4715,6 @@ impl LocalEngine {
         let piper_daemon = daemon_enabled
             .then(|| resident_piper(&piper_binary, &piper_voice))
             .flatten();
-        let early_speech = env::var("ELLA_EARLY_SPEECH")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
         if let Some(daemon) = &piper_daemon {
             daemon.warm();
         }
@@ -4811,7 +4803,6 @@ impl LocalEngine {
             hedge_after: HEDGE_AFTER,
             reply_first_word: cloud_llm::REPLY_FIRST_WORD,
             lessons: Arc::default(),
-            early_speech,
         };
         // So the first talk, or a bench's, does not go to the laptop only
         // because the first look at the cloud had not come back yet.
@@ -5350,15 +5341,14 @@ impl TutorEngine for LocalEngine {
         if pipeline.is_none() {
             telemetry::note("no_audio_ahead");
         }
-        // With `ELLA_EARLY_SPEECH`, a free talk's statements are heard as the
-        // laptop writes them. Only a free talk's: a chore's sentences can be
+        // Early speech: a free talk's statements are heard as the laptop
+        // writes them. Only a free talk's: a chore's sentences can be
         // dropped as said before and its figure can send it back to be
         // written again, a placement's closing reply loses its question, and
         // the talk's last two replies close it. Whatever the checks below do
         // to this reply, what was heard stays at its start (`AppService`
         // saves it there), because they only ever touch its questions.
-        let speaks_early = self.early_speech
-            && request.chore.is_none()
+        let speaks_early = request.chore.is_none()
             && request.placement.is_none()
             && free_closing_note(request.turn).is_none();
         if let (Some(pipeline), Some(early)) = (pipeline.as_mut(), early.filter(|_| speaks_early)) {
@@ -9582,7 +9572,6 @@ mod errand_tests {
                 hedge_after: HEDGE_AFTER,
                 reply_first_word: cloud_llm::REPLY_FIRST_WORD,
                 lessons: Arc::default(),
-                early_speech: false,
             }
         }
 
@@ -11305,8 +11294,8 @@ mod errand_tests {
         }
     }
 
-    /// `ELLA_EARLY_SPEECH`: a free talk's statements heard as the laptop
-    /// writes them, against the stand-in's llama-server and a resident
+    /// Early speech: a free talk's statements heard as the laptop writes
+    /// them, against the stand-in's llama-server and a resident
     /// stand-in for `piper.exe`.
     #[cfg(unix)]
     mod early_speech_tests {
@@ -11336,10 +11325,9 @@ mod errand_tests {
             pace(5, 500, 4)
         }
 
-        fn speaking(fake: &FakeLlama, piper: &FakePiper, early: bool) -> LocalEngine {
+        fn speaking(fake: &FakeLlama, piper: &FakePiper) -> LocalEngine {
             let mut engine = fake.engine(Duration::from_secs(60));
             engine.piper_daemon = Some(PiperDaemon::binary(piper.piper.clone(), piper.voice.clone()));
-            engine.early_speech = early;
             engine
         }
 
@@ -11354,7 +11342,7 @@ mod errand_tests {
             let root = tempfile::tempdir().unwrap();
             let piper = fake_piper(root.path());
             let fake = FakeLlama::scripted(slow(), &["That sounds lovely. Which stall do you like best?"]);
-            let engine = speaking(&fake, &piper, true);
+            let engine = speaking(&fake, &piper);
             let window = Arc::new(Window::default());
             let reply = engine.reply_speaking(&mid_talk(), Some(window.clone())).unwrap();
             let returned = Instant::now();
@@ -11373,22 +11361,6 @@ mod errand_tests {
         }
 
         #[test]
-        fn without_the_flag_nothing_is_heard_before_the_reply_is_released() {
-            let _turn = ONE_PIPER_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
-            let root = tempfile::tempdir().unwrap();
-            let piper = fake_piper(root.path());
-            let fake = FakeLlama::scripted(slow(), &["That sounds lovely. Which stall do you like best?"]);
-            let engine = speaking(&fake, &piper, false);
-            let window = Arc::new(Window::default());
-            let reply = engine.reply_speaking(&mid_talk(), Some(window.clone())).unwrap();
-            assert!(window.said().is_empty());
-            let pending = reply.pending.unwrap();
-            pending.release(window.clone());
-            assert_eq!(pending.finish().unwrap().segments, 2);
-            assert_eq!(window.said().join(" "), reply.text);
-        }
-
-        #[test]
         fn a_chore_a_placement_and_a_talks_last_two_replies_are_never_heard_early() {
             let _turn = ONE_PIPER_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
             let root = tempfile::tempdir().unwrap();
@@ -11402,7 +11374,7 @@ mod errand_tests {
             let chore = deposit_turn(5_000, &[], "Can I have my deposit back, please?");
             for (name, request) in [("placement", placement), ("nearly over", closing), ("last", last), ("chore", chore)] {
                 let fake = FakeLlama::scripted(slow(), &["That sounds lovely. Which stall do you like best?"]);
-                let engine = speaking(&fake, &piper, true);
+                let engine = speaking(&fake, &piper);
                 let window = Arc::new(Window::default());
                 let _ = engine.reply_speaking(&request, Some(window.clone())).unwrap();
                 assert!(window.said().is_empty(), "{name}: nothing is heard before the reply is settled");
@@ -11417,7 +11389,6 @@ mod errand_tests {
             let fake = FakeLlama::start(slow());
             let mut engine = fake.engine_with_cloud(Duration::from_secs(60));
             engine.piper_daemon = Some(PiperDaemon::binary(piper.piper.clone(), piper.voice.clone()));
-            engine.early_speech = true;
             let window = Arc::new(Window::default());
             let reply = engine.reply_speaking(&mid_talk(), Some(window.clone())).unwrap();
             assert_eq!(fake.cloud_chats().len(), 1, "the cloud wrote it");
@@ -11440,7 +11411,7 @@ mod errand_tests {
                     "Oh, yummy! What kind of food does this place serve?",
                 ],
             );
-            let engine = speaking(&fake, &piper, true);
+            let engine = speaking(&fake, &piper);
             let window = Arc::new(Window::default());
             let reply = engine
                 .reply_speaking(&after_where("I had the crispy corn in Barbecue Nation."), Some(window.clone()))
@@ -11468,7 +11439,7 @@ mod errand_tests {
                 slow(),
                 &["Oh, yummy! It sounds so crispy. Where did you find it? What did you eat with it?"],
             );
-            let engine = speaking(&fake, &piper, true);
+            let engine = speaking(&fake, &piper);
             let window = Arc::new(Window::default());
             let reply = engine
                 .reply_speaking(&after_where("I had the crispy corn in Barbecue Nation."), Some(window.clone()))
@@ -11516,7 +11487,7 @@ mod errand_tests {
             let root = tempfile::tempdir().unwrap();
             let piper = fake_piper(root.path());
             let fake = FakeLlama::start(slow());
-            let service = AppService::new(Database::in_memory().unwrap(), Box::new(speaking(&fake, &piper, true)));
+            let service = AppService::new(Database::in_memory().unwrap(), Box::new(speaking(&fake, &piper)));
             service.save_learner("Asha", Some(14)).unwrap();
             let events = Arc::new(Events::default());
             service.set_speech_broadcast(events.clone());

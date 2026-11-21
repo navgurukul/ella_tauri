@@ -341,10 +341,10 @@ impl AppService {
     }
 
     /// `turn_speech` for a reply not written yet, so the engine can say a free
-    /// talk's statements while the laptop writes it (`ELLA_EARLY_SPEECH`).
-    /// Its text goes once the turn is saved (`TurnSpeech::settle`). Without
-    /// early speech nothing is sent before then, and the window gets exactly
-    /// what `turn_speech` with the text would have sent it.
+    /// talk's statements while the laptop writes it (early speech). Its text
+    /// goes once the turn is saved (`TurnSpeech::settle`). For any other
+    /// reply nothing is sent before then, and the window gets exactly what
+    /// `turn_speech` with the text would have sent it.
     fn turn_speech_ahead(&self, session_id: &str, turn: u32) -> Option<Arc<TurnSpeech>> {
         self.speech_broadcast().map(|broadcast| {
             Arc::new(TurnSpeech {
@@ -1538,8 +1538,8 @@ impl AppService {
             lesson: lesson.clone(),
         };
         // Made before the reply is written, so the laptop can say a free
-        // talk's statements as it writes them (`ELLA_EARLY_SPEECH`). Without
-        // that, nothing goes to the window until the turn is saved below.
+        // talk's statements as it writes them (early speech). Any other
+        // reply sends nothing to the window until the turn is saved below.
         let speech = self.turn_speech_ahead(session_id, turn);
         let mut generated = if flagged {
             // Skip the model entirely: a live session showed it does not
@@ -3105,8 +3105,8 @@ fn words_after(reply: &str, heard: &str) -> Option<String> {
 /// A `rewritten` reply was asked to respond to the learner's answer and ask
 /// something new. What was heard has responded already, so the rewrite's
 /// opening that only does so again is left out: see `new_in_rewrite`.
-/// `heard` is empty unless `ELLA_EARLY_SPEECH` said some of the reply before
-/// it was settled, and then `reply` is returned as it is.
+/// `heard` is empty unless early speech said some of the reply before it
+/// was settled, and then `reply` is returned as it is.
 fn after_what_was_heard(heard: &str, reply: &str, rewritten: bool, learner: &str) -> String {
     if heard.trim().is_empty() || words_after(reply, heard).is_some() {
         return reply.to_owned();
@@ -6080,9 +6080,9 @@ mod speech_release_tests {
         }
     }
 
-    /// A laptop reply with early speech, as `LocalEngine` gives one when
-    /// `ELLA_EARLY_SPEECH` is on: `early` reaches the window while the reply
-    /// is still being written, and `text` is the reply the engine settles on
+    /// A laptop reply with early speech, as `LocalEngine` gives a free
+    /// talk's: `early` reaches the window while the reply is still being
+    /// written, and `text` is the reply the engine settles on
     /// afterwards, which a rewrite or a dropped question can change. With
     /// `fails`, the model stops answering once the early sentences are out.
     struct Early {
@@ -6463,8 +6463,9 @@ mod speech_release_tests {
 
     #[test]
     fn with_nothing_heard_early_a_rewrite_is_saved_and_said_as_written() {
-        // ELLA_EARLY_SPEECH off: nothing reaches the window before the reply
-        // is settled, so the rewrite is the reply, word for word.
+        // Nothing reached the window before the reply was settled (a cloud
+        // reply, or a first sentence that was a question), so the rewrite is
+        // the reply, word for word.
         let (service, window, session) = early(Early {
             early: &[],
             text: "That's good! What did you like best about the pani puri?",

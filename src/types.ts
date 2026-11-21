@@ -352,7 +352,7 @@ export interface SpeechSegment {
    * settled, and on no other: it is shown whole then. */
   reply?: string | null;
   /** True for a sentence said before the reply's text was settled (early
-   * speech, `ELLA_EARLY_SPEECH`). The line shown is cleared, and the reply
+   * speech). The line shown is cleared, and the reply
    * appears once its text comes, whole, on a later sentence or with the turn. */
   text_follows?: boolean;
 }
