@@ -185,7 +185,31 @@ export interface AppSnapshot {
   /** Today's Word of the day, for Home's daily card under Today's talk. Null
    * once the learner has played it today, and when signed out. */
   word?: WordShown | null;
+  /** The learner's words, for Profile's "My words" card (`vocab.rs`). Null
+   * when signed out. */
+  words?: LearnerWords | null;
   engine_status: EngineStatus;
+}
+
+/** A learner's words, as Profile's "My words" card shows them (`vocab.rs`). */
+export interface LearnerWords {
+  /** Talks done, the placement aside. */
+  talks: number;
+  /** Shown once they have done three talks. */
+  unlocked: boolean;
+  /** Words said in two talks on two topics, and words said once so far. */
+  yours: number;
+  almost: number;
+  /** The words they say most, in the form they say most, at most three. */
+  most_said: string[];
+}
+
+/** What a talk did to the learner's words, for the recap's "New words" tile. */
+export interface TalkWords {
+  /** Words this talk made theirs. */
+  yours_now: string[];
+  /** Words first said in this talk, the rarest first. */
+  almost_now: string[];
 }
 
 /** The lesson Ella has ready, as Home's Today's talk and the mentor card
@@ -458,6 +482,10 @@ export interface SessionSummary {
   went_well?: string[];
   /** On a Word of the day talk, its word, for the recap's card. */
   word?: WordShown | null;
+  /** The words this talk made the learner's, and those it first said, for
+   * the recap's "New words" tile. Null before three talks, and when it made
+   * nothing new. */
+  new_words?: TalkWords | null;
 }
 
 /** How a ledger chore ended, for the recap's role-play band. */

@@ -258,6 +258,10 @@ pub struct AppSnapshot {
     /// Today's Word of the day, for Home's daily card under Today's talk.
     /// `None` once the learner has played it today, and when signed out.
     pub word: Option<WordShown>,
+    /// The learner's words, for Profile's "My words" card (`crate::vocab`).
+    /// `None` when signed out.
+    #[serde(default)]
+    pub words: Option<crate::vocab::LearnerWords>,
     pub engine_status: EngineStatus,
 }
 
@@ -696,6 +700,11 @@ pub struct SessionSummary {
     /// every other talk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub word: Option<WordShown>,
+    /// The words this talk made the learner's, and those it first said, for
+    /// the recap's "New words" tile (`vocab::talk_words`). `None` before
+    /// three talks, and when it made nothing new.
+    #[serde(default)]
+    pub new_words: Option<crate::vocab::TalkWords>,
 }
 
 /// How a ledger chore ended, for the recap's role-play band.

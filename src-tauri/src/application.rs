@@ -31,6 +31,7 @@ use crate::{
         word_prompt::{self, Knowing, Reaction},
     },
     lesson::{self, LessonCadence, LessonPlan},
+    vocab,
     notes,
     progress::{self, ProgressMap, SkillProgress},
     telemetry::{AssessmentTrace, LatencyTrace, SttPiece},
@@ -297,7 +298,12 @@ impl AppService {
         };
         let mut lesson = None;
         let mut talks_to_lesson = None;
+        let mut words = None;
         if let Some(learner) = &learner {
+            words = self.learner_words(learner, &progress).map(Some).unwrap_or_else(|error| {
+                eprintln!("[words] could not count the learner's words: {error}");
+                None
+            });
             talks_to_lesson = self.talks_to_lesson().unwrap_or_else(|error| {
                 eprintln!("[lesson] could not count the talks to the next lesson: {error}");
                 None
@@ -333,6 +339,7 @@ impl AppService {
             lesson,
             talks_to_lesson,
             word,
+            words,
             engine_status: self.engine.status(),
         })
     }
@@ -2033,7 +2040,25 @@ impl AppService {
             chore,
             went_well,
             word: word.map(|talk| talk.shown()),
+            new_words: self.talk_words(session_id).unwrap_or_else(|error| {
+                eprintln!("[words] could not count this talk's words: {error}");
+                None
+            }),
         })
+    }
+
+    /// The learner's words for Profile's card (`vocab::words_view`).
+    fn learner_words(&self, learner: &Learner, progress: &LearnerProgress) -> EllaResult<vocab::LearnerWords> {
+        Ok(vocab::words_view(&self.database.spoken_turns()?, talks_done(progress), &learner.name))
+    }
+
+    /// What talk `session_id` did to the learner's words (`vocab::talk_words`).
+    fn talk_words(&self, session_id: &str) -> EllaResult<Option<vocab::TalkWords>> {
+        let Some(learner) = self.database.signed_in_learner()? else {
+            return Ok(None);
+        };
+        let talks = talks_done(&self.database.progress()?);
+        Ok(vocab::talk_words(&self.database.spoken_turns()?, session_id, talks, &learner.name))
     }
 
     /// How a ledger chore's talk ended, read off its ledger. Asked for once the
@@ -2803,6 +2828,12 @@ fn distinct(keys: Vec<String>) -> Vec<String> {
 }
 
 /// Today on the laptop's own calendar, the one the learner lives by.
+/// Talks done, as My words counts them before showing a learner theirs:
+/// finished talks, the placement aside, as on Ella Mobile.
+fn talks_done(progress: &LearnerProgress) -> u32 {
+    progress.talks.iter().filter(|talk| talk.topic_id != PLACEMENT_TOPIC_ID).count() as u32
+}
+
 fn today() -> String {
     Local::now().format("%Y-%m-%d").to_string()
 }
@@ -3432,6 +3463,7 @@ mod tests {
             "tomorrow_topic",
             "topics",
             "word",
+            "words",
         ];
         let service = service();
         let fresh = serde_json::to_value(service.bootstrap().unwrap()).unwrap();
@@ -3578,6 +3610,37 @@ mod tests {
             .send_voice_turn(&session.id, vec![0; 480_000], 16_000, Some("yes".into()))
             .unwrap();
         assert_eq!(service.bootstrap().unwrap().progress.xp.total, 1);
+    }
+
+    #[test]
+    fn my_words_open_after_three_spoken_talks_and_the_recap_names_what_a_talk_did() {
+        let service = service();
+        service.save_learner("Asha", Some(14)).unwrap();
+        let spoken_talk = |topic: &str, said: &str| {
+            let session = service.start_session(topic).unwrap();
+            service
+                .send_voice_turn(&session.id, vec![0; 32_000], 16_000, Some(said.into()))
+                .unwrap();
+            // Typed, so none of its words count.
+            service.send_text_turn(&session.id, "The elephant was enormous").unwrap();
+            service.complete_session(&session.id).unwrap()
+        };
+        let first = spoken_talk("street-food", "The market was busy");
+        assert_eq!(first.new_words, None, "not before three talks");
+        let words = service.bootstrap().unwrap().words.unwrap();
+        assert_eq!((words.talks, words.unlocked), (1, false));
+
+        spoken_talk("booking-a-cab", "We took a train");
+        let third = spoken_talk("doctor-clinic", "My teacher went to the market");
+        let new = third.new_words.unwrap();
+        assert_eq!(new.yours_now, ["market"], "said in two talks on two topics");
+        assert_eq!(new.almost_now, ["teacher"]);
+
+        let words = service.bootstrap().unwrap().words.unwrap();
+        assert!(words.unlocked);
+        assert_eq!((words.yours, words.almost), (1, 3), "market; busy, train and teacher (take is a little word)");
+        assert_eq!(words.most_said[0], "market");
+        assert!(!words.most_said.iter().any(|word| word.contains("elephant")), "typed words never count");
     }
 
     #[test]

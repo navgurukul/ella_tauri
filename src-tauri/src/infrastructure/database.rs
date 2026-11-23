@@ -9,6 +9,7 @@ use crate::{
         WinCondition,
     },
     error::{EllaError, EllaResult},
+    vocab::{self, SpokenTurn},
     lesson::LessonCadence,
     progress::SkillProgress,
 };
@@ -775,6 +776,52 @@ impl Database {
             xp,
             level_ups,
         })
+    }
+
+    /// Every answer the learner said aloud, oldest first, with what counting
+    /// their words needs (`crate::vocab`): the talk and its topic, Ella's
+    /// line just before it, and a Word of the day talk's word. Every Word of
+    /// the day talk counts under one topic, `vocab::WORD_TOPIC`. Typed answers
+    /// have no spoken time, and are left out.
+    pub fn spoken_turns(&self) -> EllaResult<Vec<SpokenTurn>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT m.session_id, s.topic_id, s.kind, s.word_talk, m.content,
+                    (SELECT e.content FROM messages e
+                     WHERE e.session_id = m.session_id AND e.speaker = 'ella'
+                       AND e.turn_number < m.turn_number
+                     ORDER BY e.turn_number DESC, e.created_at DESC LIMIT 1)
+             FROM messages m JOIN sessions s ON s.id = m.session_id
+             WHERE m.speaker = 'learner' AND m.spoken_ms IS NOT NULL
+             ORDER BY julianday(s.started_at), s.rowid, m.turn_number, m.created_at",
+        )?;
+        let turns = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|(session, topic, kind, word_talk, text, before)| {
+                let word = (kind.as_deref() == Some("word"))
+                    .then(|| word_talk.as_deref().and_then(crate::words::read_word_talk))
+                    .flatten();
+                SpokenTurn {
+                    session,
+                    topic: if kind.as_deref() == Some("word") { vocab::WORD_TOPIC.into() } else { topic },
+                    text,
+                    before,
+                    target: word.map(|talk| talk.word),
+                }
+            })
+            .collect();
+        Ok(turns)
     }
 
     /// One exchange. `spoken_ms` is how long the learner's answer lasted when

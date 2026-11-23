@@ -432,4 +432,18 @@ describe("Word of the day's recap", () => {
     renderRecap();
     expect(screen.queryByRole("region", { name: "Badge earned" })).not.toBeInTheDocument();
   });
+
+  it("names the words a talk made the learner's, and those said for the first time", () => {
+    renderRecap({ summary: summaryOf({ new_words: { yours_now: ["market"], almost_now: ["teacher", "train"] } }) });
+    const tile = screen.getByRole("region", { name: "New words" });
+    expect(tile).toHaveTextContent("Yours now");
+    expect(tile).toHaveTextContent("market");
+    expect(tile).toHaveTextContent("Almost yours");
+    expect(tile).toHaveTextContent("teacher");
+  });
+
+  it("holds no place for words when the talk made none new", () => {
+    renderRecap();
+    expect(screen.queryByRole("region", { name: "New words" })).not.toBeInTheDocument();
+  });
 });

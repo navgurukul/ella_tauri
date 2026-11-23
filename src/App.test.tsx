@@ -5,7 +5,7 @@ import { bridge } from "./lib/bridge";
 import { levelsAt } from "./lib/curriculum";
 import { dayKey } from "./lib/days";
 import { dayNumber, offeredTopics } from "./lib/topics";
-import type { Assessment, EllaBridge, PhonemeSpan, SpeechSegment, TurnResult } from "./types";
+import type { AppSnapshot, Assessment, EllaBridge, PhonemeSpan, SpeechSegment, TurnResult } from "./types";
 
 /**
  * Noon on the first day from October 2026 on which a new learner, at Step 1 of
@@ -1650,6 +1650,46 @@ describe("Ella badges", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Back to profile" }));
     expect(await screen.findByText("My profile")).toBeInTheDocument();
+  });
+});
+
+describe("My words", () => {
+  beforeEach(() => window.localStorage.clear());
+
+  /** Profile with these words, as the backend sends them. */
+  async function profileWith(words: AppSnapshot["words"]) {
+    await bridge.saveLearner("Asha", 14);
+    const read = bridge.bootstrap.bind(bridge);
+    const spy = vi.spyOn(bridge, "bootstrap").mockImplementation(async () => {
+      const snapshot = await read();
+      return snapshot.learner ? { ...snapshot, words } : snapshot;
+    });
+    render(<App />);
+    await screen.findByText("Namaste, Asha!");
+    fireEvent.click(screen.getByRole("button", { name: /view profile/i }));
+    await screen.findByText("My profile");
+    return spy;
+  }
+
+  it("says how many talks are still to go before the learner's words show", async () => {
+    const spy = await profileWith({ talks: 1, unlocked: false, yours: 0, almost: 0, most_said: [] });
+    try {
+      const card = screen.getByRole("region", { name: "My words" });
+      expect(card).toHaveTextContent("Your words show up after 3 talks. 2 to go.");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("shows the words theirs and almost theirs, and the ones they say most", async () => {
+    const spy = await profileWith({ talks: 4, unlocked: true, yours: 2, almost: 5, most_said: ["market", "train", "busy"] });
+    try {
+      const card = screen.getByRole("region", { name: "My words" });
+      expect(card).toHaveTextContent("2 yours · 5 almost");
+      expect(within(card).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["market", "train", "busy"]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

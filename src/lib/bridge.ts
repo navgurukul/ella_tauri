@@ -407,6 +407,8 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
       // Word of the day's words and its talk are the backend's alone
       // (`words.rs`), so the preview offers none.
       word: null,
+      // Nor does it hear anyone, so no word is ever said aloud in it.
+      words: null,
       engine_status: {
         mode: "demo",
         label: "Browser demo",

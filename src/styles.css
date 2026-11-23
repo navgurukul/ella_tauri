@@ -481,6 +481,17 @@ button { font-family: inherit; }
 .xp-rules li.is-muted { background: var(--ink-10); color: var(--ink-60); }
 .xp-sheet__done { width: 100%; height: 48px; margin-top: 18px; }
 
+/* My words on the profile: the words they say most, as chips. */
+.profile-words__list { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 0; padding: 0; list-style: none; }
+.profile-words__list li {
+  padding: 8px 14px;
+  border-radius: var(--r-pill);
+  background: var(--lilac);
+  font-size: 18px;
+  color: var(--violet-deep);
+}
+.profile-words__hint { margin: 12px 0 0; font-size: 12.5px; font-weight: 500; color: var(--ink-60); }
+
 .sidebar__me { padding-top: 10px; border-top: 1.5px solid var(--ink-10); }
 .profile {
   display: flex;
@@ -2772,6 +2783,29 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 }
 .recap-badge__name { margin: 4px 0 0; font-size: 20px; line-height: 1.1; }
 .recap-badge__line { margin: 0; font-size: 12.5px; font-weight: 600; color: var(--ink-60); }
+
+/* What a talk did to the learner's words: chips, green once theirs. */
+.recap-tile--words { gap: 8px; text-align: center; }
+.recap-words { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.recap-words__kind { margin: 0; font-size: 11.5px; font-weight: 700; color: var(--ink-60); }
+.recap-words__list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.recap-words__list li {
+  padding: 4px 10px;
+  border-radius: var(--r-pill);
+  background: var(--lilac);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--violet-deep);
+}
+.recap-words__list.is-yours li { background: #e7f4d6; color: #3f7a00; }
 
 .recap__tiles {
   display: grid;
