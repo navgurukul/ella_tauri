@@ -1648,6 +1648,48 @@ describe("Ella badges", () => {
   });
 });
 
+describe("XP", () => {
+  beforeEach(() => window.localStorage.clear());
+
+  it("shows the learner's XP beside the streak and how it is earned", async () => {
+    await bridge.saveLearner("Asha", 14);
+    const read = bridge.bootstrap.bind(bridge);
+    const earned = vi.spyOn(bridge, "bootstrap").mockImplementation(async () => {
+      const snapshot = await read();
+      return snapshot.learner
+        ? { ...snapshot, progress: { ...snapshot.progress, xp: { total: 42, today: 3, ms_per_xp: 10_000 } } }
+        : snapshot;
+    });
+    try {
+      render(<App />);
+      await screen.findByText("Namaste, Asha!");
+      const pill = screen.getByRole("button", { name: /42 XP/ });
+      fireEvent.click(pill);
+
+      const sheet = await screen.findByRole("dialog", { name: "Your XP" });
+      expect(within(sheet).getByText("+3 today")).toBeInTheDocument();
+      expect(within(sheet).getByText(/every 10 seconds you speak/)).toBeInTheDocument();
+      expect(within(sheet).getByText("Typed answers don’t count")).toBeInTheDocument();
+
+      fireEvent.keyDown(window, { key: "Escape" });
+      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    } finally {
+      earned.mockRestore();
+    }
+  });
+
+  it("says nothing of today when nothing was earned today", async () => {
+    await bridge.saveLearner("Asha", 14);
+    render(<App />);
+    await screen.findByText("Namaste, Asha!");
+    fireEvent.click(screen.getByRole("button", { name: /0 XP/ }));
+    const sheet = await screen.findByRole("dialog", { name: "Your XP" });
+    expect(within(sheet).queryByText(/today$/)).not.toBeInTheDocument();
+    fireEvent.click(within(sheet).getByRole("button", { name: "Got it" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+});
+
 describe("Ella's lessons", () => {
   beforeEach(() => window.localStorage.clear());
 

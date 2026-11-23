@@ -3453,6 +3453,7 @@ mod tests {
                 "talks": [],
                 "spoken_ms": 0,
                 "spoken_answers": 0,
+                "xp": { "total": 0, "today": 0, "ms_per_xp": 10_000 },
             })
         );
 
@@ -3551,6 +3552,31 @@ mod tests {
         assert_eq!(progress.answers, 2);
         assert_eq!((progress.spoken_answers, progress.spoken_ms), (1, 1_500));
         assert_eq!((progress.days[0].answers, progress.days[0].spoken_ms), (2, 1_500));
+    }
+
+    #[test]
+    fn spoken_answers_earn_xp_by_their_time_and_typed_ones_earn_none() {
+        let service = service();
+        service.save_learner("Asha", Some(14)).unwrap();
+        let session = service.start_session("street-food").unwrap();
+        // Twelve seconds of audio for four words: twelve seconds earned, the
+        // most four words may, which is one XP.
+        service
+            .send_voice_turn(&session.id, vec![0; 192_000], 16_000, Some("I ate poha today".into()))
+            .unwrap();
+        // Typed, however long: nothing.
+        service
+            .send_text_turn(&session.id, "It was a little spicy but my mother made it so I liked it a lot")
+            .unwrap();
+
+        let progress = service.bootstrap().unwrap().progress;
+        assert_eq!((progress.xp.total, progress.xp.today), (1, 1));
+
+        // Thirty seconds of sound for one word earns only three seconds.
+        service
+            .send_voice_turn(&session.id, vec![0; 480_000], 16_000, Some("yes".into()))
+            .unwrap();
+        assert_eq!(service.bootstrap().unwrap().progress.xp.total, 1);
     }
 
     #[test]

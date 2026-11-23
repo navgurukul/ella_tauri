@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef } from "react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, RefObject } from "react";
 import { createPortal } from "react-dom";
 import { PartnerFigure } from "./CastScreen";
 import { Check, Glyph } from "./Glyphs";
@@ -117,40 +117,7 @@ export function BadgeSheet({
   const closeNow = useRef(onClose);
   closeNow.current = onClose;
 
-  useEffect(() => {
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    // The sheet is portalled beside the app, so the whole app can go inert.
-    const app = document.getElementById("root");
-    const wasInert = app?.hasAttribute("inert") ?? false;
-    app?.setAttribute("inert", "");
-    close.current?.focus();
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeNow.current();
-        return;
-      }
-      if (event.key !== "Tab" || !card.current) return;
-      const stops = [...card.current.querySelectorAll<HTMLElement>("button:not(:disabled)")];
-      if (stops.length === 0) return;
-      const first = stops[0];
-      const last = stops[stops.length - 1];
-      const at = document.activeElement;
-      if (event.shiftKey && (at === first || !card.current.contains(at))) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && (at === last || !card.current.contains(at))) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      if (!wasInert) app?.removeAttribute("inert");
-      if (opener?.isConnected) opener.focus();
-    };
-  }, []);
+  useSheet(card, close, closeNow);
 
   const [thumb, wash] = (badge.partner && PARTNER_TINT[badge.partner]) ?? COLOR_TINT[badge.color] ?? ["#EDEDEA", "#F5F5F2"];
   const canGo = badge.partner !== null || !badge.earned;
@@ -238,4 +205,52 @@ function placeGlyph(badge: LearnerBadge): BadgeGlyph {
   if (badge.start.kind === "placement") return "ella";
   if (badge.glyph === "flame") return "flame";
   return "mic";
+}
+
+/**
+ * What every sheet over the window does while it is open: the app behind it
+ * goes inert, focus goes to its close button and Tab stays inside `card`,
+ * Escape closes it, and focus goes back to whatever had it before. The badge
+ * sheet and the XP sheet both use it. `onClose` is a ref, so the effect runs
+ * once however often the caller's handler changes.
+ */
+export function useSheet(
+  card: RefObject<HTMLDivElement | null>,
+  close: RefObject<HTMLButtonElement | null>,
+  closeNow: RefObject<() => void>,
+) {
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // The sheet is portalled beside the app, so the whole app can go inert.
+    const app = document.getElementById("root");
+    const wasInert = app?.hasAttribute("inert") ?? false;
+    app?.setAttribute("inert", "");
+    close.current?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeNow.current?.();
+        return;
+      }
+      if (event.key !== "Tab" || !card.current) return;
+      const stops = [...card.current.querySelectorAll<HTMLElement>("button:not(:disabled)")];
+      if (stops.length === 0) return;
+      const first = stops[0];
+      const last = stops[stops.length - 1];
+      const at = document.activeElement;
+      if (event.shiftKey && (at === first || !card.current.contains(at))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (at === last || !card.current.contains(at))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      if (!wasInert) app?.removeAttribute("inert");
+      if (opener?.isConnected) opener.focus();
+    };
+  }, []);
 }

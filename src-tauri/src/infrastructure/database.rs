@@ -668,6 +668,28 @@ impl Database {
             |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?, row.get::<_, i64>(2)?)),
         )?;
 
+        // XP, from every answer said aloud (`crate::xp`). "Today" is the
+        // laptop's own day, as the streak's is.
+        let mut xp_statement = connection.prepare(
+            "SELECT spoken_ms, content,
+                    date(created_at, 'localtime') = date('now', 'localtime')
+             FROM messages WHERE speaker = 'learner' AND spoken_ms IS NOT NULL",
+        )?;
+        let spoken = xp_statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?.max(0) as u64,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let xp = crate::xp::tally(
+            spoken
+                .iter()
+                .map(|(ms, text, today)| (Some(*ms), text.as_str(), *today)),
+        );
+
         // A finished talk is a completed session the learner said something
         // in. One that closed before they answered — a placement talk that
         // never heard them — earns nothing. Each is dated by the day it
@@ -735,6 +757,7 @@ impl Database {
             talks,
             spoken_ms: spoken_ms.max(0) as u64,
             spoken_answers,
+            xp,
         })
     }
 

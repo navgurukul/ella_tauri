@@ -29,6 +29,7 @@ const NOTHING_YET = {
   talks: [],
   spoken_ms: 0,
   spoken_answers: 0,
+  xp: { total: 0, today: 0, ms_per_xp: 10_000 },
 };
 
 describe("browser proof-of-concept bridge", () => {

@@ -60,6 +60,17 @@ export interface LearnerProgress {
    * length was kept. None kept means not known yet, not nothing said. */
   spoken_ms: number;
   spoken_answers: number;
+  /** Their XP, from every answer said aloud (`xp.rs`). Left out only by an
+   * older backend. */
+  xp?: XpView;
+}
+
+/** A learner's XP: in all, and earned today, with the spoken time that makes
+ * one, so the XP sheet names the backend's rate rather than one of its own. */
+export interface XpView {
+  total: number;
+  today: number;
+  ms_per_xp: number;
 }
 
 /** A topic as its cards print it, from `shared/topics.json`. */

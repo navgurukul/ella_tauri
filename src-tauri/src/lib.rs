@@ -16,6 +16,7 @@ mod telemetry_policy;
 mod telemetry_queue;
 pub mod topics;
 pub mod words;
+pub mod xp;
 mod window_fit;
 
 use std::sync::Arc;

@@ -584,6 +584,7 @@ export default function App() {
           profileActive={screen === "profile" || screen === "levels"}
           learnerName={snapshot.learner?.name ?? "friend"}
           streakDays={streak(snapshot.progress).days}
+          xp={snapshot.progress.xp}
           avatarColor={avatarColor}
           onNavigate={setScreen}
           onProfile={() => setScreen("profile")}

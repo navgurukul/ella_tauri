@@ -101,6 +101,10 @@ pub struct LearnerProgress {
     pub spoken_ms: u64,
     #[serde(default)]
     pub spoken_answers: u32,
+    /// Their XP, in all and earned today, from every answer said aloud
+    /// (`crate::xp`). Worked out from the answers each time, like the streak.
+    #[serde(default)]
+    pub xp: crate::xp::XpView,
 }
 
 /// A topic as the window shows it, from `shared/topics.json` (`crate::topics`).

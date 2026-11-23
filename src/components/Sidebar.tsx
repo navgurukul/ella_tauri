@@ -1,5 +1,7 @@
-import type { ReactElement } from "react";
+import { useState, type ReactElement } from "react";
 import { EllaGlyph, LearnerAvatar } from "./EllaMascot";
+import { XpPill, XpSheet } from "./Xp";
+import type { XpView } from "../types";
 
 export type NavKey = "home" | "cast";
 
@@ -39,6 +41,7 @@ export function Sidebar({
   profileActive = false,
   learnerName,
   streakDays,
+  xp,
   avatarColor,
   onNavigate,
   onProfile,
@@ -49,10 +52,13 @@ export function Sidebar({
   profileActive?: boolean;
   learnerName: string;
   streakDays: number;
+  /** The learner's XP; left out by an older backend, and then not shown. */
+  xp?: XpView;
   avatarColor: string;
   onNavigate: (key: NavKey) => void;
   onProfile: () => void;
 }) {
+  const [xpOpen, setXpOpen] = useState(false);
   return (
     <aside className="sidebar">
       <div className="wordmark">
@@ -75,6 +81,7 @@ export function Sidebar({
       </nav>
 
       <div className="sidebar__foot">
+        {xp && <XpPill xp={xp} onOpen={() => setXpOpen(true)} />}
         <div className="streak-pill">
           <FlameGlyph />
           <span>
@@ -95,6 +102,7 @@ export function Sidebar({
           </button>
         </div>
       </div>
+      {xp && xpOpen && <XpSheet xp={xp} onClose={() => setXpOpen(false)} />}
     </aside>
   );
 }
