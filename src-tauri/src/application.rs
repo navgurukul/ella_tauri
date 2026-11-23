@@ -3454,6 +3454,7 @@ mod tests {
                 "spoken_ms": 0,
                 "spoken_answers": 0,
                 "xp": { "total": 0, "today": 0, "ms_per_xp": 10_000 },
+                "level_ups": [],
             })
         );
 
@@ -4548,6 +4549,8 @@ mod curriculum_flow_tests {
             (1, "Pre-Beginner"),
             "the judge said B1; a word or two an answer is where everyone begins"
         );
+        let level_ups = service.bootstrap().unwrap().progress.level_ups;
+        assert_eq!(level_ups, [crate::domain::LevelUp { level_number: 1, day: today(), placement: true }]);
     }
 
     #[test]
@@ -4920,6 +4923,13 @@ mod curriculum_flow_tests {
         assert_eq!((standing.level_number, standing.level_name.as_str(), standing.step), (4, "Speaking Freely", 1));
         // v0.1.6 reads the level's name off the learner row.
         assert_eq!(service.bootstrap().unwrap().learner.unwrap().level_name, "Speaking Freely");
+        // The level badges read it back: level 4 reached today, by a talk
+        // (the placement here kept no assessment, so it is not in it).
+        let progress = service.bootstrap().unwrap().progress;
+        assert_eq!(
+            progress.level_ups,
+            [crate::domain::LevelUp { level_number: 4, day: today(), placement: false }]
+        );
     }
 
     #[test]

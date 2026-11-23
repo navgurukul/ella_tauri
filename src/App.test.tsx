@@ -1526,7 +1526,7 @@ describe("Ella badges", () => {
     // The sidebar lights the learner's own row while they are on it.
     expect(screen.getByRole("button", { name: /view profile/i })).toHaveAttribute("aria-current", "page");
     const card = screen.getByRole("region", { name: "Badges" });
-    expect(card).toHaveTextContent("0 of 8");
+    expect(card).toHaveTextContent("0 of 14");
     expect(card).toHaveTextContent("Finish a talk with Ella to earn your first badge.");
 
     // Nothing tried yet, so what comes next is where the catalogue starts.
@@ -1578,13 +1578,15 @@ describe("Ella badges", () => {
     await screen.findByText("End talk");
     await typeAnswers(1);
     fireEvent.click(screen.getByRole("button", { name: "End talk" }));
+    // The recap says so, once the figures with the talk in them arrive.
+    expect(await screen.findByRole("region", { name: "Badge earned" })).toHaveTextContent("First talk");
     fireEvent.click(await screen.findByRole("button", { name: "Done" }));
     fireEvent.click(await screen.findByRole("button", { name: /view profile/i }));
     await screen.findByText("My profile");
 
     const card = screen.getByRole("region", { name: "Badges" });
     // A talk a day makes a day's streak, and three days make a badge.
-    expect(card).toHaveTextContent("1 of 8");
+    expect(card).toHaveTextContent("1 of 14");
     fireEvent.click(within(card).getByRole("button", { name: "First talk" }));
     const sheet = screen.getByRole("dialog", { name: "First talk" });
     expect(sheet).toHaveTextContent("Earned today");
@@ -1621,8 +1623,10 @@ describe("Ella badges", () => {
 
     // Too young for Grumble's deposit, so its badge is not offered either.
     const page = screen.getByRole("region", { name: "Level 3: Finding My Voice" });
-    expect(page).toHaveTextContent("0 of 1 earned");
+    // Their own level's badge says how far through it they are.
+    expect(page).toHaveTextContent("0 of 2 earned");
     expect(page).not.toHaveTextContent("Deposit back");
+    expect(within(page).getByRole("button", { name: /Level 3 complete/ })).toHaveTextContent("0%");
 
     fireEvent.click(screen.getByRole("button", { name: /Anytime badges/ }));
     const anytime = screen.getByRole("region", { name: "Anytime badges" });
@@ -1638,10 +1642,11 @@ describe("Ella badges", () => {
     const first = screen.getByRole("region", { name: "Level 1: Pre-Beginner" });
     expect(first).toHaveTextContent("Hello, Ella");
     expect(first).toHaveTextContent("First talk");
+    // Under where they started, but with no placement: not earned yet.
+    expect(within(first).getByRole("button", { name: /Level 1 complete/ })).toHaveTextContent("Not tried");
     fireEvent.click(screen.getByRole("button", { name: /Speaking Freely/ }));
-    expect(screen.getByRole("region", { name: "Level 4: Speaking Freely" })).toHaveTextContent(
-      "No badges at this level yet.",
-    );
+    const fourth = screen.getByRole("region", { name: "Level 4: Speaking Freely" });
+    expect(within(fourth).getByRole("button", { name: /Level 4 complete/ })).toHaveTextContent("Locked");
 
     fireEvent.click(screen.getByRole("button", { name: "Back to profile" }));
     expect(await screen.findByText("My profile")).toBeInTheDocument();

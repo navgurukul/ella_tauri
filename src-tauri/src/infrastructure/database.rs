@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, Transact
 use crate::{
     curriculum::{self, Position},
     domain::{
-        find_chore, DayActivity, FinishedTalk, Learner, LearnerProgress, Message, Session, SessionListItem,
+        find_chore, DayActivity, FinishedTalk, Learner, LearnerProgress, LevelUp, Message, Session, SessionListItem,
         WinCondition,
     },
     error::{EllaError, EllaResult},
@@ -748,6 +748,21 @@ impl Database {
         chores_met.sort();
         chores_met.dedup();
 
+        // The level badges' history: each placement, and each talk that
+        // finished a level, by the standing its kept assessment left them on.
+        let mut level_statement = connection.prepare(
+            "SELECT assessment,
+                    date(COALESCE(completed_at, started_at), 'localtime')
+             FROM sessions WHERE assessment IS NOT NULL
+             ORDER BY julianday(COALESCE(completed_at, started_at)), rowid",
+        )?;
+        let level_ups = level_statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(|(assessment, day)| level_up_of(&assessment, day?))
+            .collect();
+
         Ok(LearnerProgress {
             days,
             talks_finished,
@@ -758,6 +773,7 @@ impl Database {
             spoken_ms: spoken_ms.max(0) as u64,
             spoken_answers,
             xp,
+            level_ups,
         })
     }
 
@@ -1397,6 +1413,20 @@ fn add_curriculum(connection: &Connection) -> EllaResult<()> {
          );",
     )?;
     Ok(())
+}
+
+/// The level a kept assessment left the learner on, when it was a placement
+/// or a talk that finished a level; `None` for any other talk, and for one
+/// kept as `null`.
+fn level_up_of(assessment: &str, day: String) -> Option<LevelUp> {
+    let value: serde_json::Value = serde_json::from_str(assessment).ok()?;
+    let placement = value.get("kind")?.as_str() == Some("placement");
+    let levelled = value.get("advanced").and_then(|advanced| advanced.as_str()) == Some("level");
+    if !placement && !levelled {
+        return None;
+    }
+    let level_number = value.get("standing")?.get("level_number")?.as_u64()?;
+    Some(LevelUp { level_number: u8::try_from(level_number).ok()?, day, placement })
 }
 
 /// How long each spoken answer lasted, for the time the profile and Home say

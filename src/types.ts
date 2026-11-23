@@ -63,6 +63,19 @@ export interface LearnerProgress {
   /** Their XP, from every answer said aloud (`xp.rs`). Left out only by an
    * older backend. */
   xp?: XpView;
+  /** Every placement, and every talk that moved them up a level, the first
+   * first: what the level badges are earned from. */
+  level_ups?: LevelUp[];
+}
+
+/** A talk that left the learner on a higher level: a placement, or one that
+ * finished a level. */
+export interface LevelUp {
+  /** The level it left them on, 1 to 6. */
+  level_number: number;
+  /** `YYYY-MM-DD` it ended on. */
+  day: string;
+  placement: boolean;
 }
 
 /** A learner's XP: in all, and earned today, with the spoken time that makes
@@ -589,7 +602,8 @@ export type BadgeStart =
 export interface BadgeGoal {
   have: number;
   of: number;
-  unit: "days" | "talks";
+  /** `%` for a level badge: how far through the level, out of 100. */
+  unit: "days" | "talks" | "%";
 }
 
 /** A badge as it stands for the learner. */
@@ -614,8 +628,11 @@ export interface LearnerBadge {
   minutes: number | null;
   start: BadgeStart;
   earned: boolean;
-  /** `YYYY-MM-DD` it was first earned; null until it is. */
+  /** `YYYY-MM-DD` it was first earned; null until it is, and for a level
+   * passed before levels kept the day. */
   earnedOn: string | null;
+  /** Not open yet: a level badge above the learner's level. */
+  locked: boolean;
   /** Finished talks of its scene, goal met or not. */
   tries: number;
   goal: BadgeGoal | null;

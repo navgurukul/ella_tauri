@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
+import { BadgeDisc } from "./Badges";
 import { PartnerFigure } from "./CastScreen";
 import { EllaMascot } from "./EllaMascot";
 import { FlameGlyph } from "./Sidebar";
@@ -20,6 +21,7 @@ import type {
   CastId,
   ChoreRecap,
   Fix,
+  LearnerBadge,
   LearnerProgress,
   SessionSummary,
   SkillAim,
@@ -52,6 +54,7 @@ export function SummaryScreen({
   fixPending = false,
   assessError,
   before,
+  badgesEarned = [],
   learnerName,
   standing: standingBefore,
   nextTopic,
@@ -70,6 +73,9 @@ export function SummaryScreen({
   assessError: string | null;
   /** The learner's figures from before this talk, which the streak counts on from. */
   before: LearnerProgress;
+  /** Badges this talk earned (`newlyEarned`): they fill in once the backend's
+   * figures with the talk in them arrive. */
+  badgesEarned?: LearnerBadge[];
   learnerName: string;
   /** Where the learner stood as the talk began, until the assessment says
    * where it left them. */
@@ -102,7 +108,8 @@ export function SummaryScreen({
   const standing = assessment?.standing ?? standingBefore;
   const tiles = tilesFor(summary, assessment, assessError, fixPending);
   const noticeSpan = Math.max(1, 4 - tiles.length);
-  const columns = tiles.reduce((sum, tile) => sum + (isNotice(tile) ? noticeSpan : 1), 1);
+  const columns =
+    tiles.reduce((sum, tile) => sum + (isNotice(tile) ? noticeSpan : 1), 1) + (badgesEarned.length > 0 ? 1 : 0);
 
   return (
     <div className="screen screen--recap" data-screen="summary">
@@ -150,6 +157,7 @@ export function SummaryScreen({
               )}
             </Tile>
           ))}
+          {badgesEarned.length > 0 && <BadgeTile badges={badgesEarned} />}
           <StreakTile run={streakRun} />
         </div>
 
@@ -692,6 +700,23 @@ function Failed({ message, onRetry }: { message: string; onRetry: () => void }) 
 }
 
 /** The streak as it stands now, today's day already counted. */
+/** A badge this talk earned, as Ella Mobile's recap card says it: "Badge
+ * earned", its disc and name, and how many more came with it. Saved to the
+ * profile already, since nothing stores a badge: it is read off the talks. */
+function BadgeTile({ badges }: { badges: LearnerBadge[] }) {
+  const [first, ...more] = badges;
+  return (
+    <section className="recap-tile recap-tile--badge" aria-label="Badge earned">
+      <p className="recap-badge__label">Badge earned</p>
+      <BadgeDisc badge={first} size={84} glyph={40} ring={0} className="badge-disc--pop" />
+      <p className="display recap-badge__name">{first.name}</p>
+      <p className="recap-badge__line">
+        {more.length > 0 ? `and ${more.length} more · ` : ""}Saved to your profile
+      </p>
+    </section>
+  );
+}
+
 function StreakTile({ run }: { run: StreakRecap }) {
   return (
     <section className="recap-tile recap-tile--streak" aria-label="Streak">

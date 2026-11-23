@@ -15,6 +15,8 @@
  * When the backend grows these fields, delete the matching constant and read
  * the snapshot instead — the component API does not have to change.
  */
+import { START, levelIndex, levelTone, type LevelTone } from "./curriculum";
+import curriculum from "../../shared/curriculum.json";
 import { addDays, dayKey } from "./days";
 import { catalogueTopic } from "./topics";
 import type {
@@ -29,6 +31,7 @@ import type {
   LearnerBadge,
   LearnerProgress,
   SessionListItem,
+  Standing,
   Streak,
   StreakDay,
   TalkTally,
@@ -250,6 +253,12 @@ interface BadgeReading {
   earnedBy?: FinishedTalk;
   /** A streak's badge is earned by days rather than by one talk. */
   earnedOn?: string | null;
+  /** Earned with no day to say when: a level passed before levels kept one. */
+  earned?: boolean;
+  /** Not open yet: a level badge above the learner's level. */
+  locked?: boolean;
+  /** Where its mic goes instead of the rule's, as things stand. */
+  start?: BadgeStart;
   tries?: number;
   goal?: BadgeGoal;
 }
@@ -258,6 +267,8 @@ interface BadgeFacts {
   progress: LearnerProgress;
   /** The streak running now. */
   run: number;
+  /** Where the learner stands; null when nobody is signed in. */
+  standing: Standing | null;
 }
 
 interface BadgeRule {
@@ -316,6 +327,67 @@ function streakBadge(length: number): BadgeRule {
       earnedOn: streakReachedOn(progress, length),
       goal: { have: run, of: length, unit: "days" },
     }),
+  };
+}
+
+/** Each level's colour, by its tone on the ladder, as a badge's disc takes it. */
+const LEVEL_COLOR: Record<LevelTone, string> = {
+  green: "#68B506",
+  violet: "#9347DD",
+  blue: "#5B7DEF",
+  orange: "#FF7A00",
+  pink: "#FF3181",
+  ink: "#262626",
+};
+
+/** The level the curriculum starts a learner on who skips the placement, 1 to 6. */
+const START_LEVEL = levelIndex(START.level) + 1;
+
+/**
+ * Whether level `number` is passed, as Ella Mobile's `milestoneBadges` reads
+ * it, and the day it was: the first placement or level-up that left the
+ * learner above it. A level under theirs with no such day (one passed before
+ * levels kept one) is passed without a day, but only once it was earned:
+ * levels under the one a learner starts on without a placement are not,
+ * until a placement reads their level or they pass the start level. Their
+ * own level is passed once every step of the last level is.
+ */
+export function levelPassed(
+  number: number,
+  progress: LearnerProgress,
+  standing: Standing | null,
+): { passed: boolean; on: string | null } {
+  const on = (progress.level_ups ?? []).find((up) => up.level_number > number)?.day ?? null;
+  if (on || !standing) return { passed: on !== null, on };
+  const current = standing.level_number;
+  const earnedBelowStart = standing.placed || current > START_LEVEL;
+  const behind = number < current && (number >= START_LEVEL || earnedBelowStart);
+  const finished = number === current && standing.percent === 100;
+  return { passed: behind || finished, on: null };
+}
+
+function levelBadge(number: number, name: string): BadgeRule {
+  return {
+    id: `level-${number}`,
+    name: `Level ${number} complete`,
+    level: number,
+    color: LEVEL_COLOR[levelTone(number)],
+    glyph: "star",
+    how: `Pass every step of ${name} in your talks, or find your level with Ella.`,
+    where: `Levels · ${name}`,
+    place: name,
+    line: `Level ${number}`,
+    start: { kind: "topic", topicId: null },
+    read: ({ progress, standing }) => {
+      const { passed, on } = levelPassed(number, progress, standing);
+      const current = standing?.level_number ?? null;
+      if (passed) return { earnedOn: on, earned: true };
+      if (current === null) return {};
+      // Under their level but not earned: finding their level is how.
+      if (number < current) return { start: { kind: "placement" } };
+      if (number > current) return { locked: true };
+      return { goal: { have: standing!.percent, of: 100, unit: "%" } };
+    },
   };
 }
 
@@ -409,6 +481,9 @@ const BADGES: BadgeRule[] = [
       goal: { have: progress.talks_finished, of: 50, unit: "talks" },
     }),
   },
+  // One for each level, as on Ella Mobile: passed in talks, or under the
+  // level a placement reads.
+  ...curriculum.levels.map((level, index) => levelBadge(index + 1, level.name)),
 ];
 
 /**
@@ -419,7 +494,11 @@ const BADGES: BadgeRule[] = [
  * earned when that talk is what earned it.
  */
 export function learnerBadges(snapshot: AppSnapshot, today = new Date()): LearnerBadge[] {
-  const facts: BadgeFacts = { progress: snapshot.progress, run: streak(snapshot.progress, today).days };
+  const facts: BadgeFacts = {
+    progress: snapshot.progress,
+    run: streak(snapshot.progress, today).days,
+    standing: snapshot.standing ?? null,
+  };
   const offered = castFor(snapshot.learner?.age);
   // Whatever level Home is offering, the free talk is there to be had.
   const bargaining = catalogueTopic(BARGAIN_TOPIC);
@@ -434,8 +513,9 @@ export function learnerBadges(snapshot: AppSnapshot, today = new Date()): Learne
       color: rule.color,
       glyph: rule.glyph,
       how: rule.how,
-      earned: earnedOn !== null,
+      earned: earnedOn !== null || reading.earned === true,
       earnedOn,
+      locked: reading.locked ?? false,
       tries: reading.tries ?? 0,
       goal: reading.goal ?? null,
     };
@@ -474,7 +554,7 @@ export function learnerBadges(snapshot: AppSnapshot, today = new Date()): Learne
       line: rule.line ?? "",
       partner: null,
       minutes: null,
-      start: rule.start ?? { kind: "topic", topicId: null },
+      start: reading.start ?? rule.start ?? { kind: "topic", topicId: null },
     });
   }
   return badges;
@@ -488,6 +568,20 @@ export function earnedBadges(badges: LearnerBadge[]): LearnerBadge[] {
     .filter(({ badge }) => badge.earned)
     .sort((left, right) => (right.badge.earnedOn ?? "").localeCompare(left.badge.earnedOn ?? "") || left.index - right.index)
     .map(({ badge }) => badge);
+}
+
+/**
+ * The badges a talk has just earned, for the recap's "Badge earned" tile:
+ * those earned now that were not before it, by the same rules, so nothing
+ * is kept to say a badge was shown. Like Ella Mobile's recap, it leaves out
+ * a level's badge, which the "Level up!" celebration shows, and a scene's,
+ * which the role-play band shows.
+ */
+export function newlyEarned(before: AppSnapshot, after: AppSnapshot, today = new Date()): LearnerBadge[] {
+  const had = new Set(learnerBadges(before, today).filter((badge) => badge.earned).map((badge) => badge.id));
+  return learnerBadges(after, today).filter(
+    (badge) => badge.earned && !had.has(badge.id) && badge.partner === null && !badge.id.startsWith("level-"),
+  );
 }
 
 /** Badges still to earn, the ones tried most first, then in the catalogue's
@@ -522,6 +616,9 @@ function tries(count: number): string {
  * along its count is, or how many goes it has had. */
 export function badgeStat(badge: LearnerBadge, today = new Date()): string {
   if (badge.earnedOn) return dayLabel(badge.earnedOn, today);
+  if (badge.earned) return "Earned";
+  if (badge.locked) return "Locked";
+  if (badge.goal?.unit === "%") return `${Math.min(badge.goal.have, 100)}%`;
   if (badge.goal) return `${Math.min(badge.goal.have, badge.goal.of)} / ${badge.goal.of}`;
   return badge.tries > 0 ? tries(badge.tries) : "Not tried";
 }
@@ -533,6 +630,9 @@ export function badgeStatus(badge: LearnerBadge, today = new Date()): string {
     const day = dayLabel(badge.earnedOn, today);
     return day === "Today" ? "Earned today" : `Earned ${day}`;
   }
+  if (badge.earned) return "Earned";
+  if (badge.locked) return `Unlocks at level ${badge.level}`;
+  if (badge.goal?.unit === "%") return `${Math.min(badge.goal.have, 100)}% complete`;
   if (badge.goal) return `${Math.min(badge.goal.have, badge.goal.of)} of ${badge.goal.of} ${badge.goal.unit}`;
   return badge.tries > 0 ? `Not yet · ${tries(badge.tries)}` : "Not tried yet";
 }

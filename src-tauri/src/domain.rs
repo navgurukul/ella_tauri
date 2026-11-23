@@ -105,6 +105,23 @@ pub struct LearnerProgress {
     /// (`crate::xp`). Worked out from the answers each time, like the streak.
     #[serde(default)]
     pub xp: crate::xp::XpView,
+    /// Every talk that moved the learner up a level, and every placement,
+    /// the first first: what the level badges are earned from, read off each
+    /// talk's kept assessment.
+    #[serde(default)]
+    pub level_ups: Vec<LevelUp>,
+}
+
+/// A talk that left the learner on a higher level than before it: one that
+/// finished a level, or a placement, which reads one.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LevelUp {
+    /// The level it left them on, 1 to 6: every level under it is behind them.
+    pub level_number: u8,
+    /// `YYYY-MM-DD` it ended on, in the laptop's own timezone.
+    pub day: String,
+    /// A placement, rather than a talk that finished a level.
+    pub placement: bool,
 }
 
 /// A topic as the window shows it, from `shared/topics.json` (`crate::topics`).
