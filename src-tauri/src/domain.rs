@@ -229,6 +229,11 @@ pub struct AppSnapshot {
     /// that lesson, and the mentor card on Talk partners offers it. `None`
     /// when she has none, and when signed out.
     pub lesson: Option<MentorLesson>,
+    /// With no `lesson` ready, how many more successful talks until Ella has
+    /// one (`lesson::talks_to_lesson`): Home's "2 more talks to your lesson
+    /// with Ella". `None` while one is ready, and when signed out.
+    #[serde(default)]
+    pub talks_to_lesson: Option<u32>,
     /// Today's Word of the day, for Home's daily card under Today's talk.
     /// `None` once the learner has played it today, and when signed out.
     pub word: Option<WordShown>,
@@ -392,6 +397,14 @@ pub struct LevelSkillView {
     pub passed: bool,
     /// Where it stands, as a level's page words it.
     pub standing: SkillStanding,
+    /// How far towards passing, as a whole percent, for its bar: 100 once
+    /// passed, else held at 90 at most (`progress::towards_passing`).
+    #[serde(default)]
+    pub towards_passing: u8,
+    /// The skill Ella is working on now: her lesson's, once she has one
+    /// ready, else the one the next talk aims at. Ella Mobile's `focus`.
+    #[serde(default)]
+    pub ellas_focus: bool,
     /// The titles of the talks it showed in, in the order they came:
     /// "Booking a cab".
     pub topics: Vec<String>,

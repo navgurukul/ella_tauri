@@ -154,6 +154,10 @@ export interface AppSnapshot {
    * lesson, and the mentor card on Talk partners offers it. Null when she has
    * none, and when signed out. */
   lesson?: MentorLesson | null;
+  /** With no lesson ready, how many more successful talks until Ella has one:
+   * Home's "2 more talks to your lesson with Ella". Null while one is ready,
+   * and when signed out. */
+  talks_to_lesson?: number | null;
   /** Today's Word of the day, for Home's daily card under Today's talk. Null
    * once the learner has played it today, and when signed out. */
   word?: WordShown | null;
@@ -264,6 +268,12 @@ export interface LevelSkill {
   passed: boolean;
   /** Where it stands, as a level's page words it. */
   standing: SkillStanding;
+  /** How far towards passing, as a whole percent, for its bar: 100 once
+   * passed, else 90 at most (`progress::towards_passing`). */
+  towards_passing: number;
+  /** The skill Ella is working on now: her lesson's once she has one ready,
+   * else the one the next talk aims at. */
+  ellas_focus: boolean;
   /** The titles of the talks it showed in, in the order they came:
    * "Booking a cab". */
   topics: string[];

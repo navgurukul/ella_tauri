@@ -639,3 +639,9 @@ export function nextTopicLabel(snapshot: AppSnapshot, finishedTopicId: string | 
   if (tomorrow && tomorrow.id !== finishedTopicId) return tomorrow.label;
   return snapshot.topics.find((topic) => topic.id !== finishedTopicId)?.label ?? null;
 }
+
+/** "1 more talk", "2 more talks": the countdown to Ella's next lesson, as
+ * Ella Mobile words it (`moreTalks`). */
+export function moreTalks(count: number): string {
+  return count === 1 ? "1 more talk" : `${count} more talks`;
+}

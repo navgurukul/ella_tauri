@@ -79,6 +79,9 @@ export function levelsAt(position: Position): LevelView[] {
             text: skill.text,
             passed,
             standing: passed ? ("done" as const) : ("not_started" as const),
+            towards_passing: passed ? 100 : 0,
+            // The preview aims no talk, so Ella works on nothing in it.
+            ellas_focus: false,
             topics: [],
           };
         }),

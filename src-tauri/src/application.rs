@@ -30,7 +30,7 @@ use crate::{
         safety,
         word_prompt::{self, Knowing, Reaction},
     },
-    lesson::{self, LessonPlan},
+    lesson::{self, LessonCadence, LessonPlan},
     notes,
     progress::{self, ProgressMap, SkillProgress},
     telemetry::{AssessmentTrace, LatencyTrace, SttPiece},
@@ -296,7 +296,12 @@ impl AppService {
             None => None,
         };
         let mut lesson = None;
+        let mut talks_to_lesson = None;
         if let Some(learner) = &learner {
+            talks_to_lesson = self.talks_to_lesson().unwrap_or_else(|error| {
+                eprintln!("[lesson] could not count the talks to the next lesson: {error}");
+                None
+            });
             // Today's talk is Ella's lesson, once she has one ready.
             let ready = self.lesson_now(learner, topics.first()).unwrap_or_else(|error| {
                 eprintln!("[lesson] could not tell whether a lesson is ready: {error}");
@@ -326,6 +331,7 @@ impl AppService {
             progress,
             standing,
             lesson,
+            talks_to_lesson,
             word,
             engine_status: self.engine.status(),
         })
@@ -389,11 +395,37 @@ impl AppService {
     /// `lesson::plan` for a learner at `position`, from what the database
     /// keeps.
     fn lesson_plan(&self, position: &Position) -> EllaResult<Option<LessonPlan>> {
+        Ok(self.lesson_state(position)?.0)
+    }
+
+    /// `lesson::plan` for a learner at `position`, with the cadence it was
+    /// read from, which the countdown to the next lesson also reads.
+    fn lesson_state(&self, position: &Position) -> EllaResult<(Option<LessonPlan>, LessonCadence)> {
         let in_play = keys_of(&progress::skills_in_play(position));
         let known = progress::by_key(&self.database.skill_progress(&in_play)?);
         let cadence = self.database.lesson_cadence()?;
         let recent = self.database.recent_targets()?;
-        Ok(lesson::plan(position, &known, &cadence, &recent, &today()))
+        let plan = lesson::plan(position, &known, &cadence, &recent, &today());
+        Ok((plan, cadence))
+    }
+
+    /// The skill Ella is working on with a learner at `position`, by its key:
+    /// her lesson's, once she has one ready, else the one the next talk aims
+    /// at, as starting a talk picks them. `None` when there is none.
+    fn ellas_skill(&self, position: &Position) -> EllaResult<Option<String>> {
+        match self.lesson_plan(position)? {
+            Some(plan) => Ok(Some(plan.target.key)),
+            None => self.choose_target(position),
+        }
+    }
+
+    /// How many more successful talks until Ella has a lesson ready, for
+    /// Home and the mentor card (`lesson::talks_to_lesson`); `None` while one
+    /// is ready.
+    fn talks_to_lesson(&self) -> EllaResult<Option<u32>> {
+        let (position, _) = self.placement()?;
+        let (plan, cadence) = self.lesson_state(&position)?;
+        Ok(lesson::talks_to_lesson(plan.as_ref(), &cadence))
     }
 
     /// The topics Home offers: every one written for the learner's level, in
@@ -2596,6 +2628,7 @@ impl AppService {
         let percent = progress::level_percent(&position, &known);
         let aimed: HashSet<String> = self.database.aimed_skills()?.into_iter().collect();
         let titles = talk_titles();
+        let focus = self.ellas_skill(&position)?;
 
         let mut levels = Vec::new();
         for (index, level) in curriculum::levels().iter().enumerate() {
@@ -2623,6 +2656,12 @@ impl AppService {
                         text: skill.text.clone(),
                         passed,
                         standing: progress::standing(passed, &record, aimed.contains(&key)),
+                        towards_passing: if passed {
+                            100
+                        } else {
+                            (progress::towards_passing(skill, &record) * 100.0).round() as u8
+                        },
+                        ellas_focus: !passed && focus.as_deref() == Some(key.as_str()),
                         // By the titles the learner knows the talks by.
                         topics: record
                             .topics
@@ -3389,6 +3428,7 @@ mod tests {
             "recent_sessions",
             "saved_learner",
             "standing",
+            "talks_to_lesson",
             "tomorrow_topic",
             "topics",
             "word",
@@ -3398,6 +3438,7 @@ mod tests {
         assert_eq!(keys(&fresh), snapshot_keys, "no `learners` any more");
         assert_eq!(fresh["learner"], serde_json::Value::Null);
         assert_eq!(fresh["lesson"], serde_json::Value::Null);
+        assert_eq!(fresh["talks_to_lesson"], serde_json::Value::Null, "signed out: nothing to count down");
         assert_eq!(fresh["saved_learner"], serde_json::Value::Null);
         assert_eq!(fresh["standing"], serde_json::Value::Null);
         assert_eq!(fresh["word"], serde_json::Value::Null, "signed out: no word of the day");
@@ -4998,6 +5039,34 @@ mod curriculum_flow_tests {
         let json = serde_json::to_string(&levels[1].steps[1]).unwrap();
         assert!(json.contains(r#""standing":"not_started""#), "{json}");
         assert!(json.contains(r#""topics":["Talk a stall price down"]"#), "{json}");
+
+        // Each bar is how far towards passing: full once passed or behind
+        // them, mastery against the owned mark for one shown once (0.38 of
+        // 0.75), and empty for one not shown.
+        assert_eq!(owned.towards_passing, 100);
+        assert_eq!(once.towards_passing, 51);
+        assert_eq!(skill(&aimed).towards_passing, 0);
+        assert!(levels[1].steps[0].skills.iter().all(|view| view.towards_passing == 100));
+
+        // Ella works on one skill, the one the next talk would aim at, and
+        // never on one already passed.
+        let focused: Vec<&LevelSkillView> = levels
+            .iter()
+            .flat_map(|level| level.steps.iter().flat_map(|step| step.skills.iter()))
+            .filter(|view| view.ellas_focus)
+            .collect();
+        assert_eq!(focused.len(), 1, "{focused:?}");
+        let next = service.choose_target(&Position::new("A1", 2)).unwrap().unwrap();
+        assert_eq!(focused[0].label, curriculum::skill_at(&next).unwrap().2.label);
+        assert!(!focused[0].passed);
+    }
+
+    #[test]
+    fn home_counts_down_the_talks_to_ellas_next_lesson() {
+        let service = demo();
+        let home = service.bootstrap().unwrap();
+        assert_eq!(home.lesson, None);
+        assert_eq!(home.talks_to_lesson, Some(lesson::LESSON_AFTER), "no talk counted yet");
     }
 
     /// The whole flow against a real model: a placement chat that the model

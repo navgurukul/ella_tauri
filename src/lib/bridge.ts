@@ -400,6 +400,8 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
       // and no skill is ever stuck: as the backend's demo mode, Ella never
       // has one ready.
       lesson: null,
+      // ...and with nothing counted, there is no lesson to count down to.
+      talks_to_lesson: null,
       // Word of the day's words and its talk are the backend's alone
       // (`words.rs`), so the preview offers none.
       word: null,

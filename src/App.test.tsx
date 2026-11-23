@@ -1693,6 +1693,40 @@ describe("Ella's lessons", () => {
     }
   });
 
+  it("counts down the talks to her next lesson on Home and the mentor card", async () => {
+    await bridge.saveLearner("Asha", 14);
+    const read = bridge.bootstrap.bind(bridge);
+    const counting = vi.spyOn(bridge, "bootstrap").mockImplementation(async () => {
+      const snapshot = await read();
+      return snapshot.learner ? { ...snapshot, lesson: null, talks_to_lesson: 1 } : snapshot;
+    });
+    try {
+      render(<App />);
+      await screen.findByText("Namaste, Asha!");
+      const today = document.querySelector(".today__card") as HTMLElement;
+      expect(within(today).getByText("1 more talk to your lesson with Ella")).toBeInTheDocument();
+      expect(today).not.toHaveClass("today__card--lesson");
+
+      fireEvent.click(screen.getByRole("button", { name: "Talk partners" }));
+      const card = (await screen.findByText("Your mentor")).closest(".mentor") as HTMLElement;
+      expect(within(card).getByText(/Your next lesson comes after 1 more talk\./)).toBeInTheDocument();
+    } finally {
+      counting.mockRestore();
+    }
+  });
+
+  it("says no countdown once her lesson is ready", async () => {
+    await bridge.saveLearner("Asha", 14);
+    const ready = withLesson(false);
+    try {
+      render(<App />);
+      await screen.findByText("Namaste, Asha!");
+      expect(screen.queryByText(/to your lesson with Ella/)).not.toBeInTheDocument();
+    } finally {
+      ready.mockRestore();
+    }
+  });
+
   it("keeps the mentor card's nothing-to-fix line until she has one", async () => {
     await openTalkPartners("Aarav", "14");
     expect(screen.getByText(/Nothing to fix yet/)).toBeInTheDocument();

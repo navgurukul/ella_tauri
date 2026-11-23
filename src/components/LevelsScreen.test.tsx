@@ -75,6 +75,25 @@ describe("Levels and badges", () => {
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   });
 
+  it("fills each skill's bar towards passing and marks the one Ella is working on", async () => {
+    const levels = levelsAt({ level: "A2", step: 1 });
+    const own = levels.find((level) => level.state === "current")!;
+    const [first, second] = own.steps[0].skills;
+    Object.assign(first, { standing: "shown", towards_passing: 45, topics: ["Booking a cab"], ellas_focus: true });
+    Object.assign(second, { standing: "practising", towards_passing: 0 });
+    vi.spyOn(bridge, "levels").mockResolvedValue(levels);
+    show(standing(1, 0));
+    await screen.findByRole("list", { name: "Levels" });
+
+    const card = (label: string) => screen.getByText(label, { selector: ".skill-card__name" }).closest("li")!;
+    expect(card(first.label)).toHaveClass("is-focus");
+    expect(card(first.label)).toHaveTextContent("Ella’s focus");
+    expect(card(first.label).querySelector(".skill-card__bar > span")).toHaveStyle({ width: "45%" });
+    expect(card(second.label)).not.toHaveClass("is-focus");
+    expect(card(second.label).querySelector(".skill-card__bar > span")).toHaveStyle({ width: "0%" });
+    expect(screen.getAllByText("Ella’s focus")).toHaveLength(1);
+  });
+
   it("shows a higher level percentage as a talk moves the learner on", async () => {
     const levels = vi.spyOn(bridge, "levels").mockResolvedValue(levelsAt({ level: "A2", step: 1 }));
     const view = show(standing(1, 0));

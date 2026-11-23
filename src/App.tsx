@@ -615,6 +615,7 @@ export default function App() {
           <CastScreen
             learner={snapshot.learner}
             lesson={snapshot.lesson ?? null}
+            talksToLesson={snapshot.talks_to_lesson ?? null}
             busy={busy}
             onStartGoal={(goal, partner) =>
               throughEllaFirst(partnerName(partner) ?? goal.title, () => void handleStartGoal(goal, partner))

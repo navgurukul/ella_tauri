@@ -549,7 +549,7 @@ function SkillCard({ skill }: { skill: LevelSkill }) {
   const next = hint(skill);
   const topics = skill.topics.join(", ");
   return (
-    <li className={`skill-card is-${skill.standing}`}>
+    <li className={`skill-card is-${skill.standing} ${skill.ellas_focus ? "is-focus" : ""}`.trim()}>
       <span className="skill-card__top">
         <Circles standing={skill.standing} />
         {topics && (
@@ -559,11 +559,18 @@ function SkillCard({ skill }: { skill: LevelSkill }) {
           </span>
         )}
       </span>
+      {skill.ellas_focus && <span className="skill-card__focus">Ella’s focus</span>}
       <span className="display skill-card__name" title={skill.text}>
         {skill.label}
       </span>
       <span className="sr-only">{skill.text}</span>
       <span className="skill-card__state">{STATE[skill.standing]}</span>
+      {/* How far towards passing (Ella Mobile's `towardsPassing`): short of
+          full until it passes, so one shown on a single topic never looks done.
+          Drawn only: its state above already says where it stands. */}
+      <span className="skill-card__bar" aria-hidden="true">
+        <span style={{ width: `${skill.towards_passing}%` }} />
+      </span>
       {next && <span className="skill-card__hint">{next}</span>}
     </li>
   );

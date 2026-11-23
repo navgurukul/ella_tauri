@@ -861,6 +861,13 @@ button { font-family: inherit; }
   color: var(--ink-60);
   text-wrap: pretty;
 }
+/* How many more talks to Ella's next lesson (Ella Mobile's countdown). */
+.today__countdown {
+  margin: 12px 0 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--violet-deep);
+}
 .btn--talk { flex: none; }
 /* Ella's lesson in Today's talk's place: her lilac, as on the mentor card. */
 .today__card--lesson { border-color: rgba(147, 71, 221, 0.22); background: var(--lilac); }
@@ -3631,6 +3638,29 @@ button.step-row__face:hover .step-row__chevron svg { stroke: var(--ink); }
 .skill-card.is-done .skill-card__state { color: #3f7a00; }
 .skill-card.is-shown .skill-card__state { color: var(--lv-deep); }
 .skill-card.is-practising .skill-card__state { color: var(--ink); }
+/* How far towards passing: the level's colour, green once passed. */
+.skill-card__bar {
+  display: block;
+  width: 100%;
+  height: 5px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--ink-10);
+}
+.skill-card__bar > span { display: block; height: 100%; border-radius: inherit; background: var(--lv); }
+.skill-card.is-done .skill-card__bar > span { background: #68b506; }
+/* The skill Ella is working on now: her lilac, as on her lesson card. */
+.skill-card.is-focus { box-shadow: inset 0 0 0 2px rgba(147, 71, 221, 0.35); background: var(--lilac); }
+.skill-card__focus {
+  margin-top: 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--violet-deep);
+}
 .skill-card__hint { margin-top: 2px; font-size: 12px; font-weight: 500; line-height: 1.35; color: var(--ink-72); }
 
 /* A skill's two circles: filled with a tick once earned, green once it has
