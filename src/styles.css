@@ -461,6 +461,8 @@ button { font-family: inherit; }
 .xp-pill b { font-family: var(--display); font-size: 16px; font-weight: 800; }
 .spark { flex: none; fill: var(--violet); }
 .xp-sheet__label { margin-top: 0; }
+/* Upper case as the badge sheet's labels are, kept as words for the reader. */
+.xp-sheet .badge-sheet__label { text-transform: uppercase; }
 .xp-sheet__total {
   display: flex;
   align-items: center;

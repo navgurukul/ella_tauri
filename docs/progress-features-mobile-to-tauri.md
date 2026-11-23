@@ -130,3 +130,60 @@ Status: ✅ at parity · 🟡 partial · ❌ absent.
 3. Placement recheck on Desktop: learner-initiated only? May it move a learner down?
 4. Is the island map a direction Desktop is meant to follow, or is it Mobile-only?
 5. Reminders: is an in-app-only reminder worth building on a desktop?
+
+---
+
+## E. Implementation status
+
+Branch `feature/progress-features-mobile-to-tauri`. P0 and P1 are implemented; P2 and P3 are not, by decision.
+
+| # | Feature | Status | Where |
+|---|---|---|---|
+| 1 | Lesson countdown | ✅ Done | `lesson::talks_to_lesson` shares one rule (`talks_left`) with `lesson::plan`. `AppSnapshot.talks_to_lesson` carries it. Shown on Home's Today's talk and the mentor card in `CastScreen.tsx` |
+| 2 | Level-map progress | ✅ Done | `progress::towards_passing` / `NOT_YET`. `LevelSkillView.towards_passing` (percent) and `ellas_focus` (the lesson's target, else `choose_target`). Bars and an "Ella's focus" card in `LevelsScreen.tsx`. "Almost there" already existed (`SkillStanding::Shown`) |
+| 3 | XP | ✅ Done | `src-tauri/src/xp.rs` (`earned_ms`, `tally`, `MS_PER_XP`, `MOST_MS_PER_WORD`), worked out in `Database::progress` into `LearnerProgress.xp`. `XpPill` / `XpSheet` (`src/components/Xp.tsx`) in the sidebar. No new storage |
+| 4 | Level badges and recap tile | ✅ Done | `LearnerProgress.level_ups` is read off each talk's kept assessment. `level-1…6` rules in `presentation.ts` (`levelPassed`). `newlyEarned` drives the recap's "Badge earned" tile. No "award once" records |
+| 5 | My Words | ✅ Done | `src-tauri/src/vocab.rs` (Mobile's `vocab.ts`), `shared/english_words.txt` (ESDB, with its notice), `Database::spoken_turns`. `AppSnapshot.words` feeds Profile's "My words" card. `SessionSummary.new_words` feeds the recap's "New words" tile |
+| 6 | Placement recheck | ⏸ Not implemented | See below |
+| 7 | Daily reminders | ⏸ Not implemented | See below |
+| 8 | Island map | ⏸ Not implemented | See below |
+
+### Where the implementation deliberately differs from Mobile
+- **XP time.** Desktop pays for VAD-kept speech (`messages.spoken_ms`); Mobile pays for mic-open time (`turns.listening_ms`). The same answer earns somewhat less on Desktop. The rule is otherwise Mobile's (10 s per XP, at most 3 s per word heard). `xp::MS_PER_XP` is the one number to tune, and the window reads it from the backend.
+- **XP is derived, not kept.** Changing the rule changes past answers' XP too. Mobile keeps XP so that rule changes only apply forward.
+- **XP for flagged answers.** Mobile pays nothing for an answer its safety screen flagged, or one Ella asked to hear again. Desktop keeps no mark with an answer: a flagged answer is stored censored, with its spoken time, so it still earns. Excluding it would need a flag column on `messages`.
+- **XP placement.** The pill sits in the sidebar above the streak pill; Mobile puts it in Home's header. Desktop's streak lives in the sidebar, so the two stay together.
+- **Level badges with no day.** A level passed before assessments recorded the move (e.g. a placement saved as `null` by an older release) is earned with no date, as Mobile does for legacy progress.
+- **The recap's badge tile** leaves out level badges ("Level up!" shows those) and scene badges (the role-play band shows those), as Mobile's recap does.
+- **My Words swear filter.** Swear words are those `safety` (rustrict) already refuses, rather than Mobile's dsojevic list.
+- **My Words scope.** Desktop shows counts plus the three words said most. Mobile's word cloud, "How you speak" card (`voiceOf`) and the "new words" glow are not ported.
+- **My Words in the recap.** The tile appears only when the talk made something new; Mobile sends an empty card in that case.
+- **The level map's "Done" for unplaced learners.** Desktop's level map marks levels under an unplaced learner's start level as done. The badges follow Mobile's stricter rule (not earned without a placement). The map was left unchanged; see follow-ups.
+
+### P2: product decisions needed
+
+**6. Placement recheck.** On Mobile this is a one-off server campaign: after `ELLA_PLACEMENT_RECHECK_BEFORE`, placed learners retake the placement, which can move them **down** as well as up. `recheckedPosition` then resumes them at the first step at or past the highest they reached on that level that is not yet complete. Desktop's placement only ever moves a learner up (`application.rs`, placement assessment) and is offered only while `!standing.placed`. Decisions needed:
+1. Is a recheck learner-initiated ("Check my level again" on the Levels screen), prompted by the app (e.g. after N talks or a long gap), or both?
+2. May a recheck move a learner **down**? If so, what happens to level badges already earned? Mobile keeps them, since they are read from history.
+3. Should Desktop port `recheckedPosition`'s resume rule, which needs the highest step reached per level? Desktop does not keep that today.
+
+**7. Daily reminders.** Mobile schedules OS notifications ahead (`flutter_local_notifications`, `app/lib/reminders/reminder_plan.dart`): one a day, 19:00 by default, skipped on days already practised, with different copy when a lesson is ready, and a 21:30 streak "last call" for adults only (never for under-18s). Decisions needed:
+1. A desktop app is usually not running in the evening. `tauri-plugin-notification` can only notify while Ella is open (or minimised to the tray, which Ella does not do today). Is in-app-only acceptable, or should Ella register an OS-level scheduled task or login item? That is a larger, platform-specific change.
+2. If built, the under-18 rule (no streak-loss messages) must carry over. The learner's age is already stored.
+3. Where does the setting live? Profile → Settings is the natural place.
+
+### P3: technical note on the island map
+
+**8. Island map** (Mobile `supabase/functions/ella/islands.ts`, `schema/0022_islands.sql`, `app/lib/screens/island_home.dart`, `widgets/island/*`). Not implemented. Desktop would need:
+1. **Its dependencies first.** Islands' goals count words made theirs (now available: `vocab::word_states`), Word of the day talks (available), **News talks** and the **Guess it** game. Desktop has neither of the last two. Umananda's last goal is Guess it, and Loktak's is News.
+2. **Stops.** Each stop is two counted talks plus a lesson. Desktop already has the cadence (`lesson::LessonCadence`, `sessions.counted`, `lesson_ready`), so a stop count can be read as "lessons taken since the island was entered".
+3. **A small table.** Mobile keeps one row per island stepped onto (`entered_seq`, `entered_words`, `crossed_at`, `stats`). Desktop would need the same (one learner, so no `learner_id`), because entering and crossing are events, not derivable state.
+4. **Crossing at talk end**, inside the same transaction that commits the assessment, with the crossing returned on the summary for a recap card.
+5. **UI.** The island Home, the map, the goals sheet, the islands list and the crossing recap card are all large, art-heavy pieces with no Desktop equivalent.
+6. **Numbers.** Mobile's `ISLANDS` table is marked "first guess" and the feature is still behind a flag there. Porting it now risks chasing changes.
+
+### Follow-ups worth doing
+- Decide whether Desktop's level map should show levels under an unplaced learner's start as "not started" (Mobile's `open`) to match the badges.
+- Show `SessionSummary.encouragement` / `headline`, or remove them. They are still unused.
+- Consider a `messages.flagged` column so flagged answers earn no XP and never count as words (rustrict already keeps swear words out of My Words).
+- Several Rust tests that depend on thread timing occasionally fail under a parallel `cargo test` run and pass alone, e.g. `a_judge_that_is_never_sure_lets_the_chat_run_to_twelve_answers`, `a_streamed_turn_says_its_talk_its_pieces_and_what_the_engine_did` and `model_queue::…an_assessment_held_between_its_judges_lets_nothing_less_urgent_in`. They are unrelated to this branch, but worth stabilising.
