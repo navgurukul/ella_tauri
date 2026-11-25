@@ -233,6 +233,7 @@ function emptyProgress(): LearnerProgress {
     talks: [],
     spoken_ms: 0,
     spoken_answers: 0,
+    xp: { total: 0, today: 0, ms_per_xp: 10_000 },
   };
 }
 
@@ -281,9 +282,10 @@ function progressOf(sessions: Session[]): LearnerProgress {
     // The preview plays no ledger, so no goal is ever met in it.
     chores_met: [],
     talks: ended.map((talk) => ({ topic_id: talk.topic_id, day: dayKey(talk.ended), goal_met: false })),
-    // Nor does it hear anyone: its answers are typed.
+    // Nor does it hear anyone: its answers are typed, and earn no XP.
     spoken_ms: 0,
     spoken_answers: 0,
+    xp: { total: 0, today: 0, ms_per_xp: 10_000 },
   };
 }
 
@@ -400,9 +402,13 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
       // and no skill is ever stuck: as the backend's demo mode, Ella never
       // has one ready.
       lesson: null,
+      // ...and with nothing counted, there is no lesson to count down to.
+      talks_to_lesson: null,
       // Word of the day's words and its talk are the backend's alone
       // (`words.rs`), so the preview offers none.
       word: null,
+      // Nor does it hear anyone, so no word is ever said aloud in it.
+      words: null,
       engine_status: {
         mode: "demo",
         label: "Browser demo",

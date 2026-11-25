@@ -16,7 +16,7 @@ import {
   streak,
   talkTotals,
 } from "../lib/presentation";
-import type { AppSnapshot, BadgeStart, LearnerBadge } from "../types";
+import type { AppSnapshot, BadgeStart, LearnerBadge, LearnerWords } from "../types";
 
 /** How many earned badges the profile's row has room for, latest first. */
 const BADGE_ROW = 5;
@@ -248,6 +248,8 @@ export function ProfileScreen({
               </div>
             )}
           </section>
+
+          {snapshot.words && <MyWordsCard words={snapshot.words} />}
         </div>
       </div>
 
@@ -307,5 +309,50 @@ function Chevron() {
     <svg className="settings__chevron" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
       <path d="M9 5l7 7-7 7" />
     </svg>
+  );
+}
+
+/** How many talks My words waits for, as `vocab::FIRST_LOOK_TALKS`. */
+const FIRST_LOOK_TALKS = 3;
+
+/**
+ * "My words", as on Ella Mobile's profile: the English words the learner has
+ * said aloud in their talks, those theirs (said in two talks on two topics)
+ * and those almost, with the ones they say most. Shown once they have done
+ * three talks; until then, how many are still to go.
+ */
+function MyWordsCard({ words }: { words: LearnerWords }) {
+  return (
+    <section className="panel profile-words" aria-labelledby="profile-words-title">
+      <div className="profile-badges__head">
+        <h3 id="profile-words-title" className="profile-panel__title">
+          My words
+        </h3>
+        {words.unlocked && (
+          <span className="profile-badges__count">
+            {words.yours} yours · {words.almost} almost
+          </span>
+        )}
+      </div>
+      {!words.unlocked ? (
+        <p className="profile-badges__none">
+          Your words show up after {FIRST_LOOK_TALKS} talks. {Math.max(0, FIRST_LOOK_TALKS - words.talks)} to go.
+        </p>
+      ) : words.most_said.length === 0 ? (
+        <p className="profile-badges__none">Say a few words aloud in your talks and they show up here.</p>
+      ) : (
+        <>
+          <p className="mono profile-badges__label">YOU SAY MOST</p>
+          <ul className="profile-words__list">
+            {words.most_said.map((word) => (
+              <li key={word} className="display">
+                {word}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      <p className="profile-words__hint">Say a word in two talks, on two topics, to make it yours.</p>
+    </section>
   );
 }

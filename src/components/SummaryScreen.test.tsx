@@ -2,7 +2,30 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SummaryScreen } from "./SummaryScreen";
 import { bridge } from "../lib/bridge";
-import type { Assessment, ChoreRecap, LearnerProgress, SessionSummary, Standing } from "../types";
+import type { Assessment, ChoreRecap, LearnerBadge, LearnerProgress, SessionSummary, Standing } from "../types";
+
+/** A badge a talk has just earned, as `newlyEarned` reads it. */
+function earnedBadge(id: string, name: string): LearnerBadge {
+  return {
+    id,
+    name,
+    level: null,
+    color: "#FF7A00",
+    glyph: "flame",
+    how: "",
+    where: "",
+    place: "",
+    line: "",
+    partner: null,
+    minutes: null,
+    start: { kind: "topic", topicId: null },
+    earned: true,
+    earnedOn: "2026-09-25",
+    locked: false,
+    tries: 0,
+    goal: null,
+  };
+}
 
 const standing: Standing = {
   level_number: 3,
@@ -396,5 +419,49 @@ describe("Word of the day's recap", () => {
     expect(screen.queryByRole("region", { name: "Try next time" })).not.toBeInTheDocument();
     // The word, what went well, and the streak.
     expect(document.querySelector(".recap__tiles")?.getAttribute("style")).toContain("--columns: 3");
+  });
+
+  it("shows a badge the talk earned, and how many more came with it", () => {
+    renderRecap({ badgesEarned: [earnedBadge("streak-3", "3-day streak"), earnedBadge("first-talk", "First talk")] });
+    const tile = screen.getByRole("region", { name: "Badge earned" });
+    expect(tile).toHaveTextContent("3-day streak");
+    expect(tile).toHaveTextContent("and 1 more · Saved to your profile");
+  });
+
+  it("holds no place for a badge when the talk earned none", () => {
+    renderRecap();
+    expect(screen.queryByRole("region", { name: "Badge earned" })).not.toBeInTheDocument();
+  });
+
+  it("names the words a talk made the learner's, and those said for the first time", () => {
+    renderRecap({ summary: summaryOf({ new_words: { yours_now: ["market"], almost_now: ["teacher", "train"] } }) });
+    const tile = screen.getByRole("region", { name: "New words" });
+    expect(tile).toHaveTextContent("Yours now");
+    expect(tile).toHaveTextContent("market");
+    expect(tile).toHaveTextContent("Almost yours");
+    expect(tile).toHaveTextContent("teacher");
+  });
+
+  it("holds no place for words when the talk made none new", () => {
+    renderRecap();
+    expect(screen.queryByRole("region", { name: "New words" })).not.toBeInTheDocument();
+  });
+
+  it("stacks the new words and a new badge in one column, so the streak keeps its room", () => {
+    const first = renderRecap({
+      summary: summaryOf({ new_words: { yours_now: ["market"], almost_now: [] } }),
+      badgesEarned: [earnedBadge("streak-3", "3-day streak")],
+    });
+    const column = screen.getByRole("region", { name: "New words" }).parentElement!;
+    expect(column).toHaveClass("recap-extras");
+    expect(column).toContainElement(screen.getByRole("region", { name: "Badge earned" }));
+    const columns = (selector: string) => document.querySelector(selector)?.getAttribute("style");
+    // One more column than the recap without them: the pair, not each.
+    const withExtras = columns(".recap__tiles");
+    first.unmount();
+    renderRecap();
+    const without = columns(".recap__tiles");
+    const count = (style: string | null | undefined) => Number(/--columns: (\d+)/.exec(style ?? "")?.[1]);
+    expect(count(withExtras)).toBe(count(without) + 1);
   });
 });

@@ -60,6 +60,30 @@ export interface LearnerProgress {
    * length was kept. None kept means not known yet, not nothing said. */
   spoken_ms: number;
   spoken_answers: number;
+  /** Their XP, from every answer said aloud (`xp.rs`). Left out only by an
+   * older backend. */
+  xp?: XpView;
+  /** Every placement, and every talk that moved them up a level, the first
+   * first: what the level badges are earned from. */
+  level_ups?: LevelUp[];
+}
+
+/** A talk that left the learner on a higher level: a placement, or one that
+ * finished a level. */
+export interface LevelUp {
+  /** The level it left them on, 1 to 6. */
+  level_number: number;
+  /** `YYYY-MM-DD` it ended on. */
+  day: string;
+  placement: boolean;
+}
+
+/** A learner's XP: in all, and earned today, with the spoken time that makes
+ * one, so the XP sheet names the backend's rate rather than one of its own. */
+export interface XpView {
+  total: number;
+  today: number;
+  ms_per_xp: number;
 }
 
 /** A topic as its cards print it, from `shared/topics.json`. */
@@ -154,10 +178,38 @@ export interface AppSnapshot {
    * lesson, and the mentor card on Talk partners offers it. Null when she has
    * none, and when signed out. */
   lesson?: MentorLesson | null;
+  /** With no lesson ready, how many more successful talks until Ella has one:
+   * Home's "2 more talks to your lesson with Ella". Null while one is ready,
+   * and when signed out. */
+  talks_to_lesson?: number | null;
   /** Today's Word of the day, for Home's daily card under Today's talk. Null
    * once the learner has played it today, and when signed out. */
   word?: WordShown | null;
+  /** The learner's words, for Profile's "My words" card (`vocab.rs`). Null
+   * when signed out. */
+  words?: LearnerWords | null;
   engine_status: EngineStatus;
+}
+
+/** A learner's words, as Profile's "My words" card shows them (`vocab.rs`). */
+export interface LearnerWords {
+  /** Talks done, the placement aside. */
+  talks: number;
+  /** Shown once they have done three talks. */
+  unlocked: boolean;
+  /** Words said in two talks on two topics, and words said once so far. */
+  yours: number;
+  almost: number;
+  /** The words they say most, in the form they say most, at most three. */
+  most_said: string[];
+}
+
+/** What a talk did to the learner's words, for the recap's "New words" tile. */
+export interface TalkWords {
+  /** Words this talk made theirs. */
+  yours_now: string[];
+  /** Words first said in this talk, the rarest first. */
+  almost_now: string[];
 }
 
 /** The lesson Ella has ready, as Home's Today's talk and the mentor card
@@ -264,6 +316,12 @@ export interface LevelSkill {
   passed: boolean;
   /** Where it stands, as a level's page words it. */
   standing: SkillStanding;
+  /** How far towards passing, as a whole percent, for its bar: 100 once
+   * passed, else 90 at most (`progress::towards_passing`). */
+  towards_passing: number;
+  /** The skill Ella is working on now: her lesson's once she has one ready,
+   * else the one the next talk aims at. */
+  ellas_focus: boolean;
   /** The titles of the talks it showed in, in the order they came:
    * "Booking a cab". */
   topics: string[];
@@ -424,6 +482,10 @@ export interface SessionSummary {
   went_well?: string[];
   /** On a Word of the day talk, its word, for the recap's card. */
   word?: WordShown | null;
+  /** The words this talk made the learner's, and those it first said, for
+   * the recap's "New words" tile. Null before three talks, and when it made
+   * nothing new. */
+  new_words?: TalkWords | null;
 }
 
 /** How a ledger chore ended, for the recap's role-play band. */
@@ -568,7 +630,8 @@ export type BadgeStart =
 export interface BadgeGoal {
   have: number;
   of: number;
-  unit: "days" | "talks";
+  /** `%` for a level badge: how far through the level, out of 100. */
+  unit: "days" | "talks" | "%";
 }
 
 /** A badge as it stands for the learner. */
@@ -593,8 +656,11 @@ export interface LearnerBadge {
   minutes: number | null;
   start: BadgeStart;
   earned: boolean;
-  /** `YYYY-MM-DD` it was first earned; null until it is. */
+  /** `YYYY-MM-DD` it was first earned; null until it is, and for a level
+   * passed before levels kept the day. */
   earnedOn: string | null;
+  /** Not open yet: a level badge above the learner's level. */
+  locked: boolean;
   /** Finished talks of its scene, goal met or not. */
   tries: number;
   goal: BadgeGoal | null;

@@ -5,10 +5,11 @@ use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, Transact
 use crate::{
     curriculum::{self, Position},
     domain::{
-        find_chore, DayActivity, FinishedTalk, Learner, LearnerProgress, Message, Session, SessionListItem,
+        find_chore, DayActivity, FinishedTalk, Learner, LearnerProgress, LevelUp, Message, Session, SessionListItem,
         WinCondition,
     },
     error::{EllaError, EllaResult},
+    vocab::{self, SpokenTurn},
     lesson::LessonCadence,
     progress::SkillProgress,
 };
@@ -668,6 +669,29 @@ impl Database {
             |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?, row.get::<_, i64>(2)?)),
         )?;
 
+        // XP, from every answer said aloud (`crate::xp`). "Today" is the
+        // laptop's own day, as the streak's is.
+        let mut xp_statement = connection.prepare(
+            "SELECT spoken_ms, content,
+                    date(created_at, 'localtime') = date('now', 'localtime')
+             FROM messages WHERE speaker = 'learner' AND spoken_ms IS NOT NULL",
+        )?;
+        let spoken = xp_statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?.max(0) as u64,
+                    row.get::<_, String>(1)?,
+                    // A time SQLite cannot read has no day: not today.
+                    row.get::<_, Option<bool>>(2)?.unwrap_or(false),
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let xp = crate::xp::tally(
+            spoken
+                .iter()
+                .map(|(ms, text, today)| (Some(*ms), text.as_str(), *today)),
+        );
+
         // A finished talk is a completed session the learner said something
         // in. One that closed before they answered — a placement talk that
         // never heard them — earns nothing. Each is dated by the day it
@@ -726,6 +750,21 @@ impl Database {
         chores_met.sort();
         chores_met.dedup();
 
+        // The level badges' history: each placement, and each talk that
+        // finished a level, by the standing its kept assessment left them on.
+        let mut level_statement = connection.prepare(
+            "SELECT assessment,
+                    date(COALESCE(completed_at, started_at), 'localtime')
+             FROM sessions WHERE assessment IS NOT NULL
+             ORDER BY julianday(COALESCE(completed_at, started_at)), rowid",
+        )?;
+        let level_ups = level_statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(|(assessment, day)| level_up_of(&assessment, day?))
+            .collect();
+
         Ok(LearnerProgress {
             days,
             talks_finished,
@@ -735,7 +774,72 @@ impl Database {
             talks,
             spoken_ms: spoken_ms.max(0) as u64,
             spoken_answers,
+            xp,
+            level_ups,
         })
+    }
+
+    /// Talks done, as Ella Mobile's `talksDone` counts them for My words:
+    /// completed sessions the learner said something in, the placement aside.
+    /// Word of the day talks count, unlike the badges' finished talks.
+    pub fn talks_done(&self) -> EllaResult<u32> {
+        let connection = self.connection()?;
+        Ok(connection.query_row(
+            "SELECT COUNT(*) FROM sessions s
+             WHERE s.status = 'complete' AND s.topic_id <> 'placement'
+               AND COALESCE(s.kind, '') <> 'placement'
+               AND EXISTS (
+                 SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.speaker = 'learner'
+               )",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Every answer the learner said aloud, oldest first, with what counting
+    /// their words needs (`crate::vocab`): the talk and its topic, Ella's
+    /// line just before it, and a Word of the day talk's word. Every Word of
+    /// the day talk counts under one topic, `vocab::WORD_TOPIC`. Typed answers
+    /// have no spoken time, and are left out.
+    pub fn spoken_turns(&self) -> EllaResult<Vec<SpokenTurn>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT m.session_id, s.topic_id, s.kind, s.word_talk, m.content,
+                    (SELECT e.content FROM messages e
+                     WHERE e.session_id = m.session_id AND e.speaker = 'ella'
+                       AND e.turn_number < m.turn_number
+                     ORDER BY e.turn_number DESC, e.created_at DESC LIMIT 1)
+             FROM messages m JOIN sessions s ON s.id = m.session_id
+             WHERE m.speaker = 'learner' AND m.spoken_ms IS NOT NULL
+             ORDER BY julianday(s.started_at), s.rowid, m.turn_number, m.created_at",
+        )?;
+        let turns = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|(session, topic, kind, word_talk, text, before)| {
+                let word = (kind.as_deref() == Some("word"))
+                    .then(|| word_talk.as_deref().and_then(crate::words::read_word_talk))
+                    .flatten();
+                SpokenTurn {
+                    session,
+                    topic: if kind.as_deref() == Some("word") { vocab::WORD_TOPIC.into() } else { topic },
+                    text,
+                    before,
+                    target: word.map(|talk| talk.word),
+                }
+            })
+            .collect();
+        Ok(turns)
     }
 
     /// One exchange. `spoken_ms` is how long the learner's answer lasted when
@@ -1374,6 +1478,20 @@ fn add_curriculum(connection: &Connection) -> EllaResult<()> {
          );",
     )?;
     Ok(())
+}
+
+/// The level a kept assessment left the learner on, when it was a placement
+/// or a talk that finished a level; `None` for any other talk, and for one
+/// kept as `null`.
+fn level_up_of(assessment: &str, day: String) -> Option<LevelUp> {
+    let value: serde_json::Value = serde_json::from_str(assessment).ok()?;
+    let placement = value.get("kind")?.as_str() == Some("placement");
+    let levelled = value.get("advanced").and_then(|advanced| advanced.as_str()) == Some("level");
+    if !placement && !levelled {
+        return None;
+    }
+    let level_number = value.get("standing")?.get("level_number")?.as_u64()?;
+    Some(LevelUp { level_number: u8::try_from(level_number).ok()?, day, placement })
 }
 
 /// How long each spoken answer lasted, for the time the profile and Home say

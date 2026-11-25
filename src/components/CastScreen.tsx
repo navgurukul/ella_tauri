@@ -1,7 +1,7 @@
 import { EllaMascot, type EllaState } from "./EllaMascot";
 import { PartnerConversation } from "./PartnerConversation";
 import { MicGlyph } from "./HomeScreen";
-import { castFor } from "../lib/presentation";
+import { castFor, moreTalks } from "../lib/presentation";
 import type { CastGoal, CastId, Learner, MentorLesson } from "../types";
 
 /**
@@ -12,6 +12,7 @@ import type { CastGoal, CastId, Learner, MentorLesson } from "../types";
 export function CastScreen({
   learner,
   lesson,
+  talksToLesson = null,
   busy,
   onStartGoal,
   onLesson,
@@ -19,6 +20,8 @@ export function CastScreen({
   learner: Learner | null | undefined;
   /** The lesson Ella has ready, which her card offers; null when she has none. */
   lesson: MentorLesson | null;
+  /** With no lesson ready, the successful talks still to go until one is. */
+  talksToLesson?: number | null;
   busy: boolean;
   onStartGoal: (goal: CastGoal, partner: CastId) => void;
   onLesson: (lesson: MentorLesson) => void;
@@ -59,6 +62,9 @@ export function CastScreen({
           ) : (
             <p className="mentor__note">
               Nothing to fix yet. When Ella spots a pattern, she pops up on Home with a short lesson.
+              {talksToLesson !== null && talksToLesson > 0 && (
+                <> Your next lesson comes after {moreTalks(talksToLesson)}.</>
+              )}
             </p>
           )}
         </div>

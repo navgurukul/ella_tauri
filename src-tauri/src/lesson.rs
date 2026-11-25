@@ -97,12 +97,12 @@ pub fn plan(
             cleared: false,
         });
     }
-    let by_talks = cadence.talks >= LESSON_AFTER;
     // Not yet two talks, and nothing was ready: no lesson. Something was ready
     // (a stuck skill, since heard): it stays, on something new.
-    if !by_talks && !cadence.held {
+    if talks_left(cadence).is_some() {
         return None;
     }
+    let by_talks = cadence.talks >= LESSON_AFTER;
     let next = kept_for(position, progress, cadence.kept.as_deref())
         .or_else(|| progress::choose_target(position, progress, recent, today))?;
     // What she teaches is something new, so it is never also what she praises.
@@ -118,6 +118,24 @@ pub fn plan(
         overdue: cadence.overdue,
         cleared: !by_talks,
     })
+}
+
+/// The successful talks still to go before the cadence alone makes a lesson
+/// ready; `None` once it has, or once one is held ready anyway. The one rule
+/// [`plan`] waits on, so the countdown and the lesson never disagree.
+fn talks_left(cadence: &LessonCadence) -> Option<u32> {
+    (cadence.talks < LESSON_AFTER && !cadence.held).then(|| LESSON_AFTER - cadence.talks)
+}
+
+/// How many more successful talks until Ella has a lesson ready, for Home's
+/// "N more talks to your lesson with Ella" and the mentor card: `None` while
+/// one is ready (`plan`, the stuck skill's included), and when there is
+/// nothing to count down to. Ella Mobile's `lessonState(...).talksLeft`.
+pub fn talks_to_lesson(plan: Option<&LessonPlan>, cadence: &LessonCadence) -> Option<u32> {
+    if plan.is_some() {
+        return None;
+    }
+    talks_left(cadence)
 }
 
 /// The skill to keep for a lesson that builds on good talks, recorded with
@@ -204,6 +222,23 @@ mod tests {
         assert_eq!(ready.target.key, "A1:U1-GRA-01");
         assert!(ready.strengths.is_none(), "a lesson on something to improve praises nothing");
         assert_eq!(detail(&ready), STUCK_DETAIL);
+    }
+
+    #[test]
+    fn the_countdown_says_the_talks_left_until_a_lesson_and_nothing_once_one_is_ready() {
+        let none = by_key(&[]);
+        let countdown = |cadence: &LessonCadence, known: &ProgressMap| {
+            talks_to_lesson(plan(&a1s1(), known, cadence, &[], TODAY).as_ref(), cadence)
+        };
+        assert_eq!(countdown(&cadence(0), &none), Some(2));
+        assert_eq!(countdown(&cadence(1), &none), Some(1));
+        assert_eq!(countdown(&cadence(2), &none), None, "two talks: the lesson is ready");
+
+        let stuck = by_key(&[SkillProgress { misses: 2, ..at("A1:U1-GRA-01") }]);
+        assert_eq!(countdown(&cadence(0), &stuck), None, "a stuck skill's lesson is ready now");
+
+        let held = LessonCadence { held: true, ..cadence(1) };
+        assert_eq!(countdown(&held, &none), None, "a lesson held ready stays ready");
     }
 
     #[test]

@@ -437,6 +437,63 @@ button { font-family: inherit; }
 }
 .streak-pill b { font-family: var(--display); font-size: 16px; font-weight: 800; }
 
+/* XP beside the streak (Ella Mobile's XP pill): her violet, a button that
+   opens how it is earned. */
+.xp-pill {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 12px 14px;
+  border: none;
+  border-radius: 16px;
+  background: var(--lilac);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.xp-pill:hover { background: #e4d4f8; }
+.xp-pill:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; }
+.xp-pill b { font-family: var(--display); font-size: 16px; font-weight: 800; }
+.spark { flex: none; fill: var(--violet); }
+.xp-sheet__label { margin-top: 0; }
+/* Upper case as the badge sheet's labels are, kept as words for the reader. */
+.xp-sheet .badge-sheet__label { text-transform: uppercase; }
+.xp-sheet__total {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 0;
+  font-size: 52px;
+  line-height: 1;
+}
+.xp-rules { display: grid; gap: 8px; margin: 10px 0 0; padding: 0; list-style: none; }
+.xp-rules li {
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: var(--lilac);
+  font-size: 14px;
+  font-weight: 500;
+}
+.xp-rules li strong { color: var(--violet-deep); font-weight: 800; }
+.xp-rules li.is-muted { background: var(--ink-10); color: var(--ink-60); }
+.xp-sheet__done { width: 100%; height: 48px; margin-top: 18px; }
+
+/* My words on the profile: the words they say most, as chips. */
+.profile-words__list { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 0; padding: 0; list-style: none; }
+.profile-words__list li {
+  padding: 8px 14px;
+  border-radius: var(--r-pill);
+  background: var(--lilac);
+  font-size: 18px;
+  color: var(--violet-deep);
+}
+.profile-words__hint { margin: 12px 0 0; font-size: 12.5px; font-weight: 500; color: var(--ink-60); }
+
 .sidebar__me { padding-top: 10px; border-top: 1.5px solid var(--ink-10); }
 .profile {
   display: flex;
@@ -860,6 +917,13 @@ button { font-family: inherit; }
   line-height: 1.45;
   color: var(--ink-60);
   text-wrap: pretty;
+}
+/* How many more talks to Ella's next lesson (Ella Mobile's countdown). */
+.today__countdown {
+  margin: 12px 0 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--violet-deep);
 }
 .btn--talk { flex: none; }
 /* Ella's lesson in Today's talk's place: her lilac, as on the mentor card. */
@@ -2708,6 +2772,51 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 
 /* The tiles */
 
+/* What else this talk did: its new words and a new badge, one above the
+   other in one column, on white as Today's word is. */
+.recap-extras { display: flex; flex-direction: column; gap: 16px; min-width: 0; min-height: 0; }
+.recap-extras > .recap-tile { flex: 1; min-height: 0; }
+.recap-tile--words,
+.recap-tile--badge { background: var(--white); box-shadow: 0 14px 30px rgba(38, 38, 38, 0.08); }
+/* Both together: the words' hint gives way, so both fit. */
+.recap-extras:has(> :nth-child(2)) .recap-words__hint { display: none; }
+/* A badge this talk earned: its disc on the badge's own colour wash. */
+.recap-tile--badge { gap: 8px; text-align: center; }
+.recap-badge__label {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--violet-deep);
+}
+.recap-badge__name { margin: 4px 0 0; font-size: 20px; line-height: 1.1; }
+.recap-badge__line { margin: 0; font-size: 12.5px; font-weight: 600; color: var(--ink-60); }
+
+/* What a talk did to the learner's words: chips, green once theirs. */
+.recap-tile--words { gap: 8px; text-align: center; }
+.recap-words { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.recap-words__kind { margin: 0; font-size: 11.5px; font-weight: 700; color: var(--ink-60); }
+.recap-words__list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.recap-words__list li {
+  padding: 4px 10px;
+  border-radius: var(--r-pill);
+  background: var(--lilac);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--violet-deep);
+}
+.recap-words__list.is-yours li { background: #e7f4d6; color: #3f7a00; }
+
 .recap__tiles {
   display: grid;
   flex: 1;
@@ -3048,6 +3157,13 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   font-size: 14px;
 }
 .recap-week { display: flex; gap: 7px; margin: 18px 0 0; padding: 0; list-style: none; }
+/* A narrow streak tile, beside more tiles or in a narrow window: the week's
+   dots shrink so all seven days still show. */
+.recap-tile--streak { container-type: inline-size; }
+@container (max-width: 280px) {
+  .recap-week { gap: 3px; }
+  .recap-week__dot { width: 22px; height: 22px; }
+}
 .recap-week__day { display: flex; flex-direction: column; align-items: center; gap: 5px; }
 .recap-week__day small { font-size: 11px; font-weight: 700; }
 .recap-week__dot {
@@ -3631,6 +3747,29 @@ button.step-row__face:hover .step-row__chevron svg { stroke: var(--ink); }
 .skill-card.is-done .skill-card__state { color: #3f7a00; }
 .skill-card.is-shown .skill-card__state { color: var(--lv-deep); }
 .skill-card.is-practising .skill-card__state { color: var(--ink); }
+/* How far towards passing: the level's colour, green once passed. */
+.skill-card__bar {
+  display: block;
+  width: 100%;
+  height: 5px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--ink-10);
+}
+.skill-card__bar > span { display: block; height: 100%; border-radius: inherit; background: var(--lv); }
+.skill-card.is-done .skill-card__bar > span { background: #68b506; }
+/* The skill Ella is working on now: her lilac, as on her lesson card. */
+.skill-card.is-focus { box-shadow: inset 0 0 0 2px rgba(147, 71, 221, 0.35); background: var(--lilac); }
+.skill-card__focus {
+  margin-top: 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--violet-deep);
+}
 .skill-card__hint { margin-top: 2px; font-size: 12px; font-weight: 500; line-height: 1.35; color: var(--ink-72); }
 
 /* A skill's two circles: filled with a tick once earned, green once it has

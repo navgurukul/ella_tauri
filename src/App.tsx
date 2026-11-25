@@ -14,7 +14,7 @@ import { TalkScreen } from "./components/TalkScreen";
 import { TopicsScreen } from "./components/TopicsScreen";
 import { avatarColorFor, forgetLegacyAvatarColor, legacyAvatarColor } from "./lib/avatar";
 import { bridge } from "./lib/bridge";
-import { CAST, chorePartner, nextTopicLabel, recommendedTopicId, streak } from "./lib/presentation";
+import { CAST, chorePartner, newlyEarned, nextTopicLabel, recommendedTopicId, streak } from "./lib/presentation";
 import { useSetup } from "./lib/setup";
 import { catalogueTopic } from "./lib/topics";
 import {
@@ -34,6 +34,7 @@ import type {
   LearnerProgress,
   Session,
   SessionSummary,
+  Standing,
   Topic,
 } from "./types";
 
@@ -43,6 +44,8 @@ import type {
 interface Finished {
   result: SessionSummary;
   before: LearnerProgress;
+  /** Where they stood before it, which the level badges read with `before`. */
+  beforeStanding: Standing | null;
   topicId: string | null;
 }
 
@@ -401,7 +404,12 @@ export default function App() {
   function handleComplete(result: SessionSummary) {
     if (!snapshot) return;
     // Taken before the re-read below, which already counts this talk.
-    setFinished({ result, before: snapshot.progress, topicId: session?.topic_id ?? null });
+    setFinished({
+      result,
+      before: snapshot.progress,
+      beforeStanding: snapshot.standing ?? null,
+      topicId: session?.topic_id ?? null,
+    });
     // Drop the finished conversation. `session` is a frozen snapshot taken
     // before completion, so its status still reads "active" — leaving it set
     // let the sidebar's "Talk" reopen a session the backend had closed, and
@@ -584,6 +592,7 @@ export default function App() {
           profileActive={screen === "profile" || screen === "levels"}
           learnerName={snapshot.learner?.name ?? "friend"}
           streakDays={streak(snapshot.progress).days}
+          xp={snapshot.progress.xp}
           avatarColor={avatarColor}
           onNavigate={setScreen}
           onProfile={() => setScreen("profile")}
@@ -615,6 +624,7 @@ export default function App() {
           <CastScreen
             learner={snapshot.learner}
             lesson={snapshot.lesson ?? null}
+            talksToLesson={snapshot.talks_to_lesson ?? null}
             busy={busy}
             onStartGoal={(goal, partner) =>
               throughEllaFirst(partnerName(partner) ?? goal.title, () => void handleStartGoal(goal, partner))
@@ -686,6 +696,10 @@ export default function App() {
             fixPending={assessing?.sessionId === summary.session_id && !assessing.settled}
             assessError={assessing?.sessionId === summary.session_id ? assessing.error : null}
             before={finished.before}
+            badgesEarned={newlyEarned(
+              { ...snapshot, progress: finished.before, standing: finished.beforeStanding },
+              snapshot,
+            )}
             learnerName={snapshot.learner?.name ?? "friend"}
             standing={snapshot.standing ?? null}
             nextTopic={nextTopicLabel(snapshot, finished.topicId)}

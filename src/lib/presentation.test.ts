@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { addDays, dayKey } from "./days";
 import {
+  badgePercent,
   badgeStat,
   badgeStatus,
   castFor,
@@ -8,6 +9,7 @@ import {
   earnedBadges,
   goalFigure,
   learnerBadges,
+  newlyEarned,
   nextTopicLabel,
   openBadges,
   reachedGoal,
@@ -20,7 +22,19 @@ import {
   weeklyDigest,
 } from "./presentation";
 import { catalogueTopic } from "./topics";
-import type { AppSnapshot, ChoreRecap, DayActivity, FinishedTalk, LearnerBadge, LearnerProgress, Topic } from "../types";
+import type {
+  AppSnapshot,
+  ChoreRecap,
+  DayActivity,
+  FinishedTalk,
+  LearnerBadge,
+  LearnerProgress,
+  Standing,
+  Topic,
+} from "../types";
+
+/** The level badges, one for each of the six levels, after every other. */
+const LEVEL_BADGES = ["level-1", "level-2", "level-3", "level-4", "level-5", "level-6"];
 
 /** A topic as the backend sends it. */
 function topic(id: string): Topic {
@@ -176,9 +190,10 @@ describe("badges", () => {
       "streak-7",
       "streak-30",
       "talks-50",
+      ...LEVEL_BADGES,
     ]);
     expect(badges.filter((entry) => entry.earned)).toEqual([]);
-    expect(badges.map((entry) => entry.level)).toEqual([1, 1, 3, 3, null, null, null, null]);
+    expect(badges.map((entry) => entry.level)).toEqual([1, 1, 3, 3, null, null, null, null, 1, 2, 3, 4, 5, 6]);
     expect(badges.map((entry) => badgeStat(entry, today))).toEqual([
       "Not tried",
       "Not tried",
@@ -188,6 +203,8 @@ describe("badges", () => {
       "0 / 7",
       "0 / 30",
       "0 / 50",
+      // Nobody signed in stands anywhere, so no level is under way.
+      ...LEVEL_BADGES.map(() => "Not tried"),
     ]);
   });
 
@@ -297,7 +314,118 @@ describe("badges", () => {
       "streak-7",
       "streak-30",
       "talks-50",
+      ...LEVEL_BADGES,
     ]);
+  });
+});
+
+describe("level badges", () => {
+  /** Where the learner stands, on level `number` of 6. */
+  function at(number: number, percent: number, placed: boolean): Standing {
+    return {
+      level_number: number,
+      level_count: 6,
+      level_name: "",
+      step: 1,
+      step_count: 5,
+      step_title: "",
+      percent,
+      placed,
+    };
+  }
+
+  function levelBadges(progress: LearnerProgress, standing: Standing | null): LearnerBadge[] {
+    const snapshot = {
+      learner: { name: "Asha", age: 14, level_name: "", created_at: "" },
+      topics: [],
+      recent_sessions: [],
+      progress,
+      standing,
+    } as unknown as AppSnapshot;
+    return learnerBadges(snapshot, today).filter((entry) => entry.id.startsWith("level-"));
+  }
+
+  it("are earned on the day a talk or a placement first left the learner above the level", () => {
+    const progress = progressWith([], {
+      level_ups: [
+        { level_number: 2, day: "2026-09-20", placement: true },
+        { level_number: 4, day: "2026-09-24", placement: false },
+      ],
+    });
+    const badges = levelBadges(progress, at(4, 20, true));
+    expect(badges.map((entry) => [entry.id, entry.earnedOn])).toEqual([
+      ["level-1", "2026-09-20"],
+      ["level-2", "2026-09-24"],
+      ["level-3", "2026-09-24"],
+      ["level-4", null],
+      ["level-5", null],
+      ["level-6", null],
+    ]);
+    // Their own level shows how far through it they are; the rest are locked.
+    const own = badges[3];
+    expect([own.earned, badgeStat(own, today), badgeStatus(own, today), badgePercent(own)]).toEqual([
+      false,
+      "20%",
+      "20% complete",
+      20,
+    ]);
+    expect([badges[4].locked, badgeStat(badges[4], today), badgeStatus(badges[4], today)]).toEqual([
+      true,
+      "Locked",
+      "Unlocks at level 5",
+    ]);
+  });
+
+  it("leaves the levels under the start unearned until a placement reads the learner's level", () => {
+    // Started at level 3 without a placement: levels 1 and 2 are under them
+    // but not passed, and finding their level is how to earn them.
+    const unplaced = levelBadges(progressWith([]), at(3, 0, false));
+    expect(unplaced.slice(0, 2).map((entry) => [entry.earned, entry.start.kind])).toEqual([
+      [false, "placement"],
+      [false, "placement"],
+    ]);
+    // Placed at level 3, with no day kept: passed, without a day.
+    const placed = levelBadges(progressWith([]), at(3, 0, true));
+    expect(placed.slice(0, 2).map((entry) => [entry.earned, entry.earnedOn, badgeStat(entry, today)])).toEqual([
+      [true, null, "Earned"],
+      [true, null, "Earned"],
+    ]);
+    // Talked past the start without one: every level under is passed too.
+    const moved = levelBadges(progressWith([]), at(4, 0, false));
+    expect(moved.slice(0, 3).every((entry) => entry.earned)).toBe(true);
+  });
+
+  it("passes the last level once every step of it is", () => {
+    const badges = levelBadges(progressWith([]), at(6, 100, true));
+    expect(badges.every((entry) => entry.earned)).toBe(true);
+  });
+});
+
+describe("the recap's new badges", () => {
+  function snap(progress: LearnerProgress, standing: Standing | null = null): AppSnapshot {
+    return {
+      learner: { name: "Asha", age: 14, level_name: "", created_at: "" },
+      topics: [],
+      recent_sessions: [],
+      progress,
+      standing,
+    } as unknown as AppSnapshot;
+  }
+
+  it("are the ones this talk earned, leaving out a level's and a scene's", () => {
+    const before = snap(progressWith([day(1), day(2)]));
+    const after = snap(
+      progressWith([day(1), day(2), day(3)], {
+        talks: [ended("street-food", 3), ended("deposit-refund", 3, true)],
+        level_ups: [{ level_number: 4, day: dayKey(today), placement: false }],
+      }),
+    );
+    expect(newlyEarned(before, after, today).map((entry) => entry.id)).toEqual(["first-talk", "streak-3"]);
+  });
+
+  it("are none when the talk earned nothing new", () => {
+    const progress = progressWith([day(1)], { talks: [ended("street-food", 1)] });
+    expect(newlyEarned(snap(progress), snap(progress), today)).toEqual([]);
   });
 });
 

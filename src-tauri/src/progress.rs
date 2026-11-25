@@ -114,6 +114,25 @@ pub fn passed(skill: &Skill, progress: &SkillProgress) -> bool {
     }
 }
 
+/// The fullest a level-map bar is drawn for a skill that has not passed, so
+/// one strong on a single topic, still owed a second, never looks done.
+pub const NOT_YET: f64 = 0.9;
+
+/// How far a skill is towards passing, from 0 to 1, for the level map's bars:
+/// its mastery against the mark its strand needs (emerging for grammar, owned
+/// for the rest), held below full at [`NOT_YET`] until it passes. Ella
+/// Mobile's `towardsPassing`.
+pub fn towards_passing(skill: &Skill, progress: &SkillProgress) -> f64 {
+    if passed(skill, progress) {
+        return 1.0;
+    }
+    let mark = match skill.strand {
+        Strand::Grammar => EMERGING_MASTERY,
+        Strand::Vocabulary | Strand::Fluency => OWNED_MASTERY,
+    };
+    ((progress.mastery / mark).min(NOT_YET) * 100.0).round() / 100.0
+}
+
 /// Where a skill stands on a level's page. `passed` is whether it has done
 /// what its step asks, or sits in a step behind the learner; `aimed`, whether
 /// a talk the learner spoke in aimed at it. Shown means seen in a talk at
@@ -492,6 +511,21 @@ mod tests {
         assert!(passed(grammar, &emerging));
         assert!(!passed(vocabulary, &emerging));
         assert!(passed(vocabulary, &owned("x")));
+    }
+
+    #[test]
+    fn towards_passing_is_mastery_against_the_strands_mark_held_short_until_passed() {
+        let skills = step_skills(&a1s1());
+        let (vocabulary, grammar) = (skills[0].skill, skills[1].skill);
+        let at_mastery = |mastery: f64| SkillProgress { mastery, ..at("x") };
+
+        assert_eq!(towards_passing(vocabulary, &at("x")), 0.0);
+        assert_eq!(towards_passing(vocabulary, &at_mastery(0.375)), 0.5);
+        // Grammar passes at emerging: 0.125 is half way there.
+        assert_eq!(towards_passing(grammar, &at_mastery(0.125)), 0.5);
+        // Owned-level mastery on one topic has not passed: the bar stops short.
+        assert_eq!(towards_passing(vocabulary, &at_mastery(0.9)), NOT_YET);
+        assert_eq!(towards_passing(vocabulary, &owned("x")), 1.0);
     }
 
     #[test]

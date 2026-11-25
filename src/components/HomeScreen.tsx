@@ -4,6 +4,7 @@ import { LevelCard } from "./LevelCard";
 import { FlameGlyph } from "./Sidebar";
 import { DailyWordCard } from "./WordOfTheDay";
 import {
+  moreTalks,
   recommendedTopicId,
   spokenAmount,
   spokenTimeKnown,
@@ -58,6 +59,8 @@ export function HomeScreen({
   // Today's talk is Ella's lesson once she has one ready, as on Ella Mobile:
   // the skill it teaches, what she says of it, and "Start the lesson".
   const lesson = snapshot.lesson ?? null;
+  // Until then, how many more talks it takes (`lesson::talks_to_lesson`).
+  const countdown = lesson ? null : snapshot.talks_to_lesson ?? null;
   const recommended = lesson?.topic.id ?? recommendedTopicId(snapshot);
   const featured =
     snapshot.topics.find((topic) => topic.id === recommended) ?? lesson?.topic ?? snapshot.topics[0];
@@ -88,6 +91,9 @@ export function HomeScreen({
                   <p className="eyebrow">{lesson ? "Today’s lesson" : "Today’s talk"}</p>
                   <h2 className="today__title">{lesson?.title ?? featured.label}</h2>
                   <p className="today__blurb">{lesson?.detail ?? featured.blurb}</p>
+                  {countdown !== null && countdown > 0 && (
+                    <p className="today__countdown">{moreTalks(countdown)} to your lesson with Ella</p>
+                  )}
                 </div>
                 <button
                   className="btn btn--violet btn--talk"

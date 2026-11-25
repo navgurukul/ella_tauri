@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
+import { BadgeDisc } from "./Badges";
 import { PartnerFigure } from "./CastScreen";
 import { EllaMascot } from "./EllaMascot";
 import { FlameGlyph } from "./Sidebar";
@@ -20,11 +21,13 @@ import type {
   CastId,
   ChoreRecap,
   Fix,
+  LearnerBadge,
   LearnerProgress,
   SessionSummary,
   SkillAim,
   SkillGrowth,
   Standing,
+  TalkWords,
   WordShown,
 } from "../types";
 
@@ -52,6 +55,7 @@ export function SummaryScreen({
   fixPending = false,
   assessError,
   before,
+  badgesEarned = [],
   learnerName,
   standing: standingBefore,
   nextTopic,
@@ -70,6 +74,9 @@ export function SummaryScreen({
   assessError: string | null;
   /** The learner's figures from before this talk, which the streak counts on from. */
   before: LearnerProgress;
+  /** Badges this talk earned (`newlyEarned`): they fill in once the backend's
+   * figures with the talk in them arrive. */
+  badgesEarned?: LearnerBadge[];
   learnerName: string;
   /** Where the learner stood as the talk began, until the assessment says
    * where it left them. */
@@ -102,7 +109,11 @@ export function SummaryScreen({
   const standing = assessment?.standing ?? standingBefore;
   const tiles = tilesFor(summary, assessment, assessError, fixPending);
   const noticeSpan = Math.max(1, 4 - tiles.length);
-  const columns = tiles.reduce((sum, tile) => sum + (isNotice(tile) ? noticeSpan : 1), 1);
+  const newWords = summary.new_words ?? null;
+  const columns =
+    tiles.reduce((sum, tile) => sum + (isNotice(tile) ? noticeSpan : 1), 1) +
+    // The new words and a new badge share one column, so the streak keeps room.
+    (badgesEarned.length > 0 || newWords ? 1 : 0);
 
   return (
     <div className="screen screen--recap" data-screen="summary">
@@ -150,6 +161,12 @@ export function SummaryScreen({
               )}
             </Tile>
           ))}
+          {(newWords || badgesEarned.length > 0) && (
+            <div className="recap-extras">
+              {newWords && <NewWordsTile words={newWords} />}
+              {badgesEarned.length > 0 && <BadgeTile badges={badgesEarned} />}
+            </div>
+          )}
           <StreakTile run={streakRun} />
         </div>
 
@@ -692,6 +709,54 @@ function Failed({ message, onRetry }: { message: string; onRetry: () => void }) 
 }
 
 /** The streak as it stands now, today's day already counted. */
+/** What this talk did to the learner's words, as Ella Mobile's recap card
+ * says it: the words it made theirs, and those said for the first time. */
+function NewWordsTile({ words }: { words: TalkWords }) {
+  return (
+    <section className="recap-tile recap-tile--words" aria-label="New words">
+      <p className="recap-badge__label">New words</p>
+      {words.yours_now.length > 0 && (
+        <div className="recap-words">
+          <p className="recap-words__kind">Yours now</p>
+          <ul className="recap-words__list is-yours">
+            {words.yours_now.map((word) => (
+              <li key={word}>{word}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {words.almost_now.length > 0 && (
+        <div className="recap-words">
+          <p className="recap-words__kind">Almost yours</p>
+          <ul className="recap-words__list">
+            {words.almost_now.map((word) => (
+              <li key={word}>{word}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <p className="recap-badge__line recap-words__hint">Say a word in two talks to make it yours.</p>
+    </section>
+  );
+}
+
+/** A badge this talk earned, as Ella Mobile's recap card says it: "Badge
+ * earned", its disc and name, and how many more came with it. Saved to the
+ * profile already, since nothing stores a badge: it is read off the talks. */
+function BadgeTile({ badges }: { badges: LearnerBadge[] }) {
+  const [first, ...more] = badges;
+  return (
+    <section className="recap-tile recap-tile--badge" aria-label="Badge earned">
+      <p className="recap-badge__label">Badge earned</p>
+      <BadgeDisc badge={first} size={64} glyph={30} ring={0} className="badge-disc--pop" />
+      <p className="display recap-badge__name">{first.name}</p>
+      <p className="recap-badge__line">
+        {more.length > 0 ? `and ${more.length} more · ` : ""}Saved to your profile
+      </p>
+    </section>
+  );
+}
+
 function StreakTile({ run }: { run: StreakRecap }) {
   return (
     <section className="recap-tile recap-tile--streak" aria-label="Streak">
