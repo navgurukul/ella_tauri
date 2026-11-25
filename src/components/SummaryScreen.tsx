@@ -112,8 +112,8 @@ export function SummaryScreen({
   const newWords = summary.new_words ?? null;
   const columns =
     tiles.reduce((sum, tile) => sum + (isNotice(tile) ? noticeSpan : 1), 1) +
-    (badgesEarned.length > 0 ? 1 : 0) +
-    (newWords ? 1 : 0);
+    // The new words and a new badge share one column, so the streak keeps room.
+    (badgesEarned.length > 0 || newWords ? 1 : 0);
 
   return (
     <div className="screen screen--recap" data-screen="summary">
@@ -161,8 +161,12 @@ export function SummaryScreen({
               )}
             </Tile>
           ))}
-          {newWords && <NewWordsTile words={newWords} />}
-          {badgesEarned.length > 0 && <BadgeTile badges={badgesEarned} />}
+          {(newWords || badgesEarned.length > 0) && (
+            <div className="recap-extras">
+              {newWords && <NewWordsTile words={newWords} />}
+              {badgesEarned.length > 0 && <BadgeTile badges={badgesEarned} />}
+            </div>
+          )}
           <StreakTile run={streakRun} />
         </div>
 
@@ -731,7 +735,7 @@ function NewWordsTile({ words }: { words: TalkWords }) {
           </ul>
         </div>
       )}
-      <p className="recap-badge__line">Say a word in two talks to make it yours.</p>
+      <p className="recap-badge__line recap-words__hint">Say a word in two talks to make it yours.</p>
     </section>
   );
 }
@@ -744,7 +748,7 @@ function BadgeTile({ badges }: { badges: LearnerBadge[] }) {
   return (
     <section className="recap-tile recap-tile--badge" aria-label="Badge earned">
       <p className="recap-badge__label">Badge earned</p>
-      <BadgeDisc badge={first} size={84} glyph={40} ring={0} className="badge-disc--pop" />
+      <BadgeDisc badge={first} size={64} glyph={30} ring={0} className="badge-disc--pop" />
       <p className="display recap-badge__name">{first.name}</p>
       <p className="recap-badge__line">
         {more.length > 0 ? `and ${more.length} more · ` : ""}Saved to your profile

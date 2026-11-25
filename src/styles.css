@@ -2772,6 +2772,14 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
 
 /* The tiles */
 
+/* What else this talk did: its new words and a new badge, one above the
+   other in one column, on white as Today's word is. */
+.recap-extras { display: flex; flex-direction: column; gap: 16px; min-width: 0; min-height: 0; }
+.recap-extras > .recap-tile { flex: 1; min-height: 0; }
+.recap-tile--words,
+.recap-tile--badge { background: var(--white); box-shadow: 0 14px 30px rgba(38, 38, 38, 0.08); }
+/* Both together: the words' hint gives way, so both fit. */
+.recap-extras:has(> :nth-child(2)) .recap-words__hint { display: none; }
 /* A badge this talk earned: its disc on the badge's own colour wash. */
 .recap-tile--badge { gap: 8px; text-align: center; }
 .recap-badge__label {
@@ -3149,6 +3157,13 @@ button.settings__row--danger:not(:disabled):hover { color: var(--pink-deep); }
   font-size: 14px;
 }
 .recap-week { display: flex; gap: 7px; margin: 18px 0 0; padding: 0; list-style: none; }
+/* A narrow streak tile, beside more tiles or in a narrow window: the week's
+   dots shrink so all seven days still show. */
+.recap-tile--streak { container-type: inline-size; }
+@container (max-width: 280px) {
+  .recap-week { gap: 3px; }
+  .recap-week__dot { width: 22px; height: 22px; }
+}
 .recap-week__day { display: flex; flex-direction: column; align-items: center; gap: 5px; }
 .recap-week__day small { font-size: 11px; font-weight: 700; }
 .recap-week__dot {

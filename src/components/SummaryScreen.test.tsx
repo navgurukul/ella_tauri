@@ -446,4 +446,22 @@ describe("Word of the day's recap", () => {
     renderRecap();
     expect(screen.queryByRole("region", { name: "New words" })).not.toBeInTheDocument();
   });
+
+  it("stacks the new words and a new badge in one column, so the streak keeps its room", () => {
+    const first = renderRecap({
+      summary: summaryOf({ new_words: { yours_now: ["market"], almost_now: [] } }),
+      badgesEarned: [earnedBadge("streak-3", "3-day streak")],
+    });
+    const column = screen.getByRole("region", { name: "New words" }).parentElement!;
+    expect(column).toHaveClass("recap-extras");
+    expect(column).toContainElement(screen.getByRole("region", { name: "Badge earned" }));
+    const columns = (selector: string) => document.querySelector(selector)?.getAttribute("style");
+    // One more column than the recap without them: the pair, not each.
+    const withExtras = columns(".recap__tiles");
+    first.unmount();
+    renderRecap();
+    const without = columns(".recap__tiles");
+    const count = (style: string | null | undefined) => Number(/--columns: (\d+)/.exec(style ?? "")?.[1]);
+    expect(count(withExtras)).toBe(count(without) + 1);
+  });
 });
