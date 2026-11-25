@@ -27,7 +27,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
 };
 
 use serde::{Deserialize, Serialize};
@@ -367,6 +367,20 @@ fn known_words() -> &'static HashMap<&'static str, Known> {
     })
 }
 
+/// Whether a word of the list is one `safety` refuses, asked of rustrict once
+/// for each word and remembered: every view counts every answer ever given,
+/// and rustrict is far slower than a lookup.
+fn swear(word: &'static str) -> bool {
+    static SEEN: OnceLock<Mutex<HashMap<&'static str, bool>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(Default::default);
+    if let Some(&known) = seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(word) {
+        return known;
+    }
+    let flagged = safety::flagged(word);
+    seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(word, flagged);
+    flagged
+}
+
 fn little_words() -> &'static HashSet<&'static str> {
     static LITTLE: OnceLock<HashSet<&'static str>> = OnceLock::new();
     LITTLE.get_or_init(|| LITTLE_WORDS.iter().copied().collect())
@@ -388,9 +402,9 @@ fn tokens(text: &str) -> Vec<String> {
     let mut current = String::new();
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        if c.is_ascii_lowercase() {
-            current.push(c);
-        } else if c == '\'' && !current.is_empty() && chars.peek().is_some_and(char::is_ascii_lowercase) {
+        // A letter, or an apostrophe between letters ("don't").
+        let inside = c == '\'' && !current.is_empty() && chars.peek().is_some_and(char::is_ascii_lowercase);
+        if c.is_ascii_lowercase() || inside {
             current.push(c);
         } else if !current.is_empty() {
             tokens.push(std::mem::take(&mut current));
@@ -413,16 +427,16 @@ pub fn words_in(text: &str, name: &str) -> Vec<Said> {
         if token.contains('\'') || token.len() < SHORTEST || token == own {
             continue;
         }
-        let Some(entry) = known_words().get(token) else {
+        let Some((&form, entry)) = known_words().get_key_value(token) else {
             continue;
         };
         if little_words().contains(entry.word) || entry.word == own {
             continue;
         }
-        if safety::flagged(token) || safety::flagged(entry.word) {
+        if swear(form) || swear(entry.word) {
             continue;
         }
-        said.push(Said { word: entry.word, form: token.to_owned(), size: entry.size });
+        said.push(Said { word: entry.word, form: form.to_owned(), size: entry.size });
     }
     said
 }
@@ -593,7 +607,7 @@ pub fn talk_words(turns: &[SpokenTurn], session: &str, talks: u32, name: &str) -
     let mut yours_now: Vec<&WordState> = after
         .values()
         .filter(|state| state.yours_at.is_some() && state.talks.contains(session))
-        .filter(|state| before.get(state.word).map_or(true, |was| was.yours_at.is_none()))
+        .filter(|state| before.get(state.word).is_none_or(|was| was.yours_at.is_none()))
         .collect();
     yours_now.sort_by(|a, b| b.yours_at.cmp(&a.yours_at).then(b.first.cmp(&a.first)).then(a.order.cmp(&b.order)));
     let mut almost_now: Vec<&WordState> = after

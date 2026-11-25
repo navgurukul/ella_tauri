@@ -300,7 +300,7 @@ impl AppService {
         let mut talks_to_lesson = None;
         let mut words = None;
         if let Some(learner) = &learner {
-            words = self.learner_words(learner, &progress).map(Some).unwrap_or_else(|error| {
+            words = self.learner_words(learner).map(Some).unwrap_or_else(|error| {
                 eprintln!("[words] could not count the learner's words: {error}");
                 None
             });
@@ -430,6 +430,11 @@ impl AppService {
     /// Home and the mentor card (`lesson::talks_to_lesson`); `None` while one
     /// is ready.
     fn talks_to_lesson(&self) -> EllaResult<Option<u32>> {
+        // A lesson Ella cannot teach now is never offered (`lesson_now`), so
+        // counting down to one would promise what Home does not then show.
+        if !self.engine.teaches_lessons() {
+            return Ok(None);
+        }
         let (position, _) = self.placement()?;
         let (plan, cadence) = self.lesson_state(&position)?;
         Ok(lesson::talks_to_lesson(plan.as_ref(), &cadence))
@@ -2040,16 +2045,23 @@ impl AppService {
             chore,
             went_well,
             word: word.map(|talk| talk.shown()),
-            new_words: self.talk_words(session_id).unwrap_or_else(|error| {
-                eprintln!("[words] could not count this talk's words: {error}");
+            // As on Ella Mobile, a placement chat has no words card.
+            new_words: if placement {
                 None
-            }),
+            } else {
+                self.talk_words(session_id).unwrap_or_else(|error| {
+                    eprintln!("[words] could not count this talk's words: {error}");
+                    None
+                })
+            },
         })
     }
 
-    /// The learner's words for Profile's card (`vocab::words_view`).
-    fn learner_words(&self, learner: &Learner, progress: &LearnerProgress) -> EllaResult<vocab::LearnerWords> {
-        Ok(vocab::words_view(&self.database.spoken_turns()?, talks_done(progress), &learner.name))
+    /// The learner's words for Profile's card (`vocab::words_view`). Their
+    /// own first name never counts as one of them, as on Ella Mobile.
+    fn learner_words(&self, learner: &Learner) -> EllaResult<vocab::LearnerWords> {
+        let talks = self.database.talks_done()?;
+        Ok(vocab::words_view(&self.database.spoken_turns()?, talks, first_name(&learner.name)))
     }
 
     /// What talk `session_id` did to the learner's words (`vocab::talk_words`).
@@ -2057,8 +2069,9 @@ impl AppService {
         let Some(learner) = self.database.signed_in_learner()? else {
             return Ok(None);
         };
-        let talks = talks_done(&self.database.progress()?);
-        Ok(vocab::talk_words(&self.database.spoken_turns()?, session_id, talks, &learner.name))
+        let talks = self.database.talks_done()?;
+        let turns = self.database.spoken_turns()?;
+        Ok(vocab::talk_words(&turns, session_id, talks, first_name(&learner.name)))
     }
 
     /// How a ledger chore's talk ended, read off its ledger. Asked for once the
@@ -2828,12 +2841,6 @@ fn distinct(keys: Vec<String>) -> Vec<String> {
 }
 
 /// Today on the laptop's own calendar, the one the learner lives by.
-/// Talks done, as My words counts them before showing a learner theirs:
-/// finished talks, the placement aside, as on Ella Mobile.
-fn talks_done(progress: &LearnerProgress) -> u32 {
-    progress.talks.iter().filter(|talk| talk.topic_id != PLACEMENT_TOPIC_ID).count() as u32
-}
-
 fn today() -> String {
     Local::now().format("%Y-%m-%d").to_string()
 }
@@ -3641,6 +3648,50 @@ mod tests {
         assert_eq!((words.yours, words.almost), (1, 3), "market; busy, train and teacher (take is a little word)");
         assert_eq!(words.most_said[0], "market");
         assert!(!words.most_said.iter().any(|word| word.contains("elephant")), "typed words never count");
+    }
+
+    /// A talk on `topic` with one answer said aloud, ended.
+    fn spoken_talk(service: &AppService, topic: &str, said: &str) -> SessionSummary {
+        let session = service.start_session(topic).unwrap();
+        service
+            .send_voice_turn(&session.id, vec![0; 32_000], 16_000, Some(said.into()))
+            .unwrap();
+        service.complete_session(&session.id).unwrap()
+    }
+
+    #[test]
+    fn the_learners_first_name_is_never_one_of_their_words() {
+        let service = service();
+        service.save_learner("Sunny Kapoor", Some(14)).unwrap();
+        spoken_talk(&service, "street-food", "Sunny mornings at the market");
+        spoken_talk(&service, "booking-a-cab", "Sunny days and the market");
+        let third = spoken_talk(&service, "doctor-clinic", "A sunny morning");
+        let words = service.bootstrap().unwrap().words.unwrap();
+        assert!(words.unlocked);
+        assert!(words.most_said.contains(&"market".to_string()), "{:?}", words.most_said);
+        assert!(!words.most_said.iter().any(|word| word == "sunny"), "{:?}", words.most_said);
+        assert!(third.new_words.is_some_and(|new| !new.almost_now.iter().any(|word| word == "sunny")));
+    }
+
+    #[test]
+    fn word_of_the_day_talks_count_towards_showing_my_words_and_a_placement_has_no_words_card() {
+        let service = service();
+        service.save_learner("Asha", Some(14)).unwrap();
+        spoken_talk(&service, "street-food", "The market was busy");
+        spoken_talk(&service, "booking-a-cab", "We took a train");
+        let word = service.start_word().unwrap();
+        service.send_text_turn(&word.id, "I do not know it").unwrap();
+        service.complete_session(&word.id).unwrap();
+        // Three talks done, the word talk among them, as on Ella Mobile.
+        assert_eq!(service.database.talks_done().unwrap(), 3);
+        assert!(service.bootstrap().unwrap().words.unwrap().unlocked);
+
+        let placement = service.start_placement().unwrap();
+        service
+            .send_voice_turn(&placement.id, vec![0; 32_000], 16_000, Some("My teacher likes cricket".into()))
+            .unwrap();
+        assert_eq!(service.complete_session(&placement.id).unwrap().new_words, None);
+        assert_eq!(service.database.talks_done().unwrap(), 3, "the placement is no talk done");
     }
 
     #[test]
@@ -4856,6 +4907,20 @@ mod curriculum_flow_tests {
         let overdue = service.bootstrap().unwrap().lesson.unwrap();
         assert!(overdue.overdue);
         assert_eq!(overdue.title, waiting.title, "the skill Home named is kept");
+    }
+
+    #[test]
+    fn home_counts_down_to_a_lesson_only_while_ella_can_teach_one() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let judge = Judge::new(&heard);
+        let teaches = Arc::clone(&judge.teaches);
+        let service = judged(judge);
+        place_at(&service, "A1", 1);
+        counted_talk(&service, "street-food");
+        assert_eq!(service.bootstrap().unwrap().talks_to_lesson, Some(1));
+        // Offline, no lesson would follow the countdown: Home promises none.
+        teaches.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(service.bootstrap().unwrap().talks_to_lesson, None);
     }
 
     #[test]

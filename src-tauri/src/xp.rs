@@ -9,16 +9,23 @@
 //! Typed answers earn none: they have no spoken time (`messages.spoken_ms` is
 //! `NULL`), and neither do answers from before Ella kept it.
 //!
-//! **What "spoken time" is here, and how it differs from the phone.** The
+//! **What "spoken time" is here, and how it compares with the phone.** The
 //! phone pays for how long its mic listened to an answer (`turns.listening_ms`),
-//! pauses included. The laptop keeps only the speech its VAD kept
-//! (`messages.spoken_ms`, from `Trace::spoken_ms`, which is
-//! `audio_after_vad_ms`), so silence before, after and between words is
-//! already gone. The same answer therefore earns somewhat less here than on
-//! the phone. The rule is kept the same on purpose, so that a learner moving
-//! between the two sees XP grow at a comparable rate; if the laptop should
-//! earn more, [`MS_PER_XP`] is the one number to change. A streamed turn is
-//! not trimmed by the VAD, so for it the two measures agree.
+//! pauses included. The laptop pays `messages.spoken_ms` (`Trace::spoken_ms`,
+//! which is `audio_after_vad_ms`), and what that holds depends on the route
+//! the answer took:
+//! - With the native speech engine, answers are streamed
+//!   (`AppService::begin_voice_stream`), and it is the whole recording, mic
+//!   open to mic closed: the same measure as the phone's.
+//! - Otherwise the answer is sent whole (`send_voice_turn`), and it is the
+//!   recording with the silence before and after the speech trimmed off
+//!   (`audio::trim_to_speech`, keeping 120 ms before and 180 ms after); pauses
+//!   between words stay. When the VAD hears no speech at all, nothing is
+//!   trimmed. Only this route earns a little less than the phone would.
+//!
+//! Either way the cap of [`MOST_MS_PER_WORD`] for each word heard is what keeps
+//! a mic left open in silence from paying, as on the phone. If the laptop
+//! should earn faster or slower, [`MS_PER_XP`] is the one number to change.
 //!
 //! **What it does not leave out that the phone does.** The phone pays
 //! nothing for an answer its safety screen flagged, nor for one Ella asked to

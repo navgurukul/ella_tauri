@@ -681,7 +681,8 @@ impl Database {
                 Ok((
                     row.get::<_, i64>(0)?.max(0) as u64,
                     row.get::<_, String>(1)?,
-                    row.get::<_, bool>(2)?,
+                    // A time SQLite cannot read has no day: not today.
+                    row.get::<_, Option<bool>>(2)?.unwrap_or(false),
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -776,6 +777,23 @@ impl Database {
             xp,
             level_ups,
         })
+    }
+
+    /// Talks done, as Ella Mobile's `talksDone` counts them for My words:
+    /// completed sessions the learner said something in, the placement aside.
+    /// Word of the day talks count, unlike the badges' finished talks.
+    pub fn talks_done(&self) -> EllaResult<u32> {
+        let connection = self.connection()?;
+        Ok(connection.query_row(
+            "SELECT COUNT(*) FROM sessions s
+             WHERE s.status = 'complete' AND s.topic_id <> 'placement'
+               AND COALESCE(s.kind, '') <> 'placement'
+               AND EXISTS (
+                 SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.speaker = 'learner'
+               )",
+            [],
+            |row| row.get(0),
+        )?)
     }
 
     /// Every answer the learner said aloud, oldest first, with what counting

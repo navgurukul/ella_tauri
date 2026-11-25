@@ -13,7 +13,7 @@ Investigation only; no code was changed. Mobile paths are relative to the
 | How the UI gets it | REST: `GET /v1/learners/me`, `/v1/home`, `/v1/levels`, `/v1/learners/me/words`, `POST /v1/sessions/:id/end` (`app/lib/api/api_client.dart`, `app/lib/api/models.dart`) | Tauri IPC: `bootstrap` → `AppSnapshot`, `assess_session` → `Assessment`, `complete_session` → `SessionSummary`, `levels` → `LevelView[]` (`src-tauri/src/ipc.rs`, `src/lib/bridge.ts`, `src/types.ts`) |
 | Practice calendar | India time (`Asia/Kolkata`) | The laptop's local time (`src/lib/days.ts`, `date(created_at,'localtime')`) |
 | Rollout | Per-learner server flags: `ELLA_XP`, `ELLA_ISLAND_MAP`, `ELLA_PLACEMENT_RECHECK_BEFORE` (`supabase/functions/ella/config.ts`) | No flags. A release ships to everyone |
-| How answer time is measured | `turns.listening_ms`: how long the mic was open, as the app measured it | `messages.spoken_ms`: the speech the VAD kept (`telemetry.rs` `spoken_ms()` → `audio_after_vad_ms`). `None` for typed answers |
+| How answer time is measured | `turns.listening_ms`: how long the mic was open, as the app measured it | `messages.spoken_ms` (`telemetry.rs` `spoken_ms()` → `audio_after_vad_ms`). For a streamed answer (the native speech engine, the main route) this is the whole recording, which is mic-open time as on Mobile. For a buffered answer it is the recording with leading and trailing silence trimmed. `None` for typed answers. *(Corrected in review: the investigation first said "the speech the VAD kept" for every answer.)* |
 
 Desktop already says it ports Mobile's rules: the header of `src-tauri/src/progress.rs` reads "The same rules as Ella Mobile". So the core engine is shared, and the gaps are features built on top of it.
 
@@ -99,7 +99,7 @@ Status: ✅ at parity · 🟡 partial · ❌ absent.
 ### 4. Dependencies and blockers
 - The island map depends on words made theirs, the News talk and the Guess-it game, none of which Desktop has.
 - Level badges are best done after the level-up history is exposed (C.4). Placement recheck would make their earned dates more involved.
-- XP's meaning differs between the apps: Mobile measures mic time, Desktop measures VAD-trimmed speech. Desktop's measure is stricter, so the same talk earns somewhat less XP. Decide whether that is acceptable or whether to re-tune `MS_PER_XP`.
+- XP's time measure: on the main (streamed) route Desktop's `spoken_ms` is mic-open time, as on Mobile. Only buffered answers are trimmed of leading and trailing silence, and earn slightly less. *(Corrected in review.)*
 - Words made theirs needs `english_words.ts` (and `profanity_words.ts`) converted to JSON. Check the installer size and the licence or origin of the list.
 - Every new `LearnerProgress` / `AppSnapshot` field must change in three places: `domain.rs`, `src/types.ts`, and the test fixtures in `src/App.test.tsx` and `src/lib/presentation.test.ts`.
 
@@ -126,7 +126,7 @@ Status: ✅ at parity · 🟡 partial · ❌ absent.
 
 **Open questions for the team:**
 1. Should XP be shown to everyone at once, or behind a setting while it is tried out, as Mobile does?
-2. Is VAD-trimmed `spoken_ms` acceptable as XP time, or should Desktop also record the mic-open time?
+2. `spoken_ms` is mic-open time on the main route and edge-trimmed on the buffered fallback. Is that small difference acceptable, or should the fallback also record mic-open time?
 3. Placement recheck on Desktop: learner-initiated only? May it move a learner down?
 4. Is the island map a direction Desktop is meant to follow, or is it Mobile-only?
 5. Reminders: is an in-app-only reminder worth building on a desktop?
@@ -149,16 +149,28 @@ Branch `feature/progress-features-mobile-to-tauri`. P0 and P1 are implemented; P
 | 8 | Island map | ⏸ Not implemented | See below |
 
 ### Where the implementation deliberately differs from Mobile
-- **XP time.** Desktop pays for VAD-kept speech (`messages.spoken_ms`); Mobile pays for mic-open time (`turns.listening_ms`). The same answer earns somewhat less on Desktop. The rule is otherwise Mobile's (10 s per XP, at most 3 s per word heard). `xp::MS_PER_XP` is the one number to tune, and the window reads it from the backend.
+- **XP time.** Desktop pays `messages.spoken_ms`. With the native speech engine, answers are streamed and this is the whole recording, which is mic-open time, the same measure as Mobile's `turns.listening_ms`. On the buffered fallback, leading and trailing silence is trimmed (`audio::trim_to_speech`, keeping 120 ms before and 180 ms after), so those answers earn slightly less. The rule is Mobile's (10 s per XP, at most 3 s per word heard), and the per-word cap is what stops a mic left open in silence from paying. `xp::MS_PER_XP` is the one number to tune, and the window reads it from the backend. *(Corrected in review: this section first said every answer was VAD-trimmed.)*
 - **XP is derived, not kept.** Changing the rule changes past answers' XP too. Mobile keeps XP so that rule changes only apply forward.
 - **XP for flagged answers.** Mobile pays nothing for an answer its safety screen flagged, or one Ella asked to hear again. Desktop keeps no mark with an answer: a flagged answer is stored censored, with its spoken time, so it still earns. Excluding it would need a flag column on `messages`.
 - **XP placement.** The pill sits in the sidebar above the streak pill; Mobile puts it in Home's header. Desktop's streak lives in the sidebar, so the two stay together.
 - **Level badges with no day.** A level passed before assessments recorded the move (e.g. a placement saved as `null` by an older release) is earned with no date, as Mobile does for legacy progress.
 - **The recap's badge tile** leaves out level badges ("Level up!" shows those) and scene badges (the role-play band shows those), as Mobile's recap does.
 - **My Words swear filter.** Swear words are those `safety` (rustrict) already refuses, rather than Mobile's dsojevic list.
+- **My Words ordering.** A word's "first said" is its answer's place in the history, ordered by when each talk started, where Mobile uses the answer's timestamp. They differ only when an older talk is resumed after a newer one, and then only in tie-breaks.
+- **My Words false positives from rustrict.** Its "inappropriate" set is broader than Mobile's list: words like "breast" (chicken breast), "bloody", "hell", "naked" never count on Desktop.
 - **My Words scope.** Desktop shows counts plus the three words said most. Mobile's word cloud, "How you speak" card (`voiceOf`) and the "new words" glow are not ported.
 - **My Words in the recap.** The tile appears only when the talk made something new; Mobile sends an empty card in that case.
 - **The level map's "Done" for unplaced learners.** Desktop's level map marks levels under an unplaced learner's start level as done. The badges follow Mobile's stricter rule (not earned without a placement). The map was left unchanged; see follow-ups.
+
+### Fixed in review
+An engineering review of the branch found these, all fixed with tests:
+- **My Words used the learner's full name.** The own-name rule compared tokens with "Sunny Kapoor", so "sunny" could count as a word. It now uses the first name, as Mobile's `firstName` does. It uses Desktop's existing `first_name`, the first word. Mobile's also skips titles such as "Mr." and splits on `_` and `.`; Desktop's greeting does neither, and My Words now agrees with it.
+- **The lesson countdown could promise a lesson that never came.** While Ella can't teach (no model and no cloud), Home offers no lesson (`lesson_now`), but the countdown still counted down. It is now hidden whenever `teaches_lessons()` is false.
+- **A placement chat's summary carried a "New words" tile.** Mobile gives a placement no words card; neither does Desktop now.
+- **My Words' "after 3 talks" gate didn't count Word of the day talks.** Mobile's `talksDone` does. It is now `Database::talks_done`, a copy of Mobile's query (completed, spoken in, placement aside).
+- **The swear check ran rustrict for every word of every answer on every view.** Each word is now checked once and remembered. Over 2,000 answers a view went from about 80 ms to about 5 ms (release build).
+- **The XP query failed on an unreadable timestamp.** It now treats such an answer as not today, instead of failing Home.
+- **The XP documentation misdescribed `spoken_ms`.** Corrected above and in `xp.rs`.
 
 ### P2: product decisions needed
 
