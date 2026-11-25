@@ -1122,6 +1122,100 @@ describe("Ella levels", () => {
     }
   });
 
+  /** A learner placed at Step 2 of A2 who owes the level check until `owed`
+   * says otherwise, as a build with the check's cut-off sees them. */
+  function owingTheLevelCheck(owed: () => boolean) {
+    seedLearner({ level_code: "A2", step: 2, placed: true });
+    const read = bridge.bootstrap.bind(bridge);
+    return vi.spyOn(bridge, "bootstrap").mockImplementation(async () => {
+      const snapshot = await read();
+      return snapshot.learner ? { ...snapshot, placement_recheck_due: owed() } : snapshot;
+    });
+  }
+
+  it("invites a learner who owes the level check from Home, and every other talk waits for it", async () => {
+    const due = owingTheLevelCheck(() => true);
+    const talk = vi.spyOn(bridge, "startSession");
+    const check = vi.spyOn(bridge, "startPlacement");
+    try {
+      render(<App />);
+      await screen.findByText("Namaste, Asha!");
+      const invitation = screen.getByTestId("level-check-invitation");
+      expect(invitation).toHaveTextContent("I’ve updated how I choose your practice.");
+      expect(screen.queryByText("Today’s talk")).not.toBeInTheDocument();
+
+      // A topic picked from More topics opens the check's invitation instead.
+      fireEvent.click(document.querySelector(".topics button") as HTMLElement);
+      expect(await screen.findByTestId("level-check-intro")).toHaveTextContent("Let’s talk to see what fits");
+      expect(screen.getByText("Talk with Ella")).toBeInTheDocument();
+      expect(talk).not.toHaveBeenCalled();
+      expect(check).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Back to Home" }));
+      await screen.findByTestId("level-check-invitation");
+
+      // Home's own invitation opens the chat at once.
+      fireEvent.click(within(screen.getByTestId("level-check-invitation")).getByRole("button", { name: /start talking/i }));
+      await screen.findByRole("button", { name: "Skip" });
+      expect(check).toHaveBeenCalledTimes(1);
+      expect(talk).not.toHaveBeenCalled();
+    } finally {
+      due.mockRestore();
+      talk.mockRestore();
+      check.mockRestore();
+    }
+  });
+
+  it("asks for a full talk again when the check heard too little, and lands home once it reads a level", async () => {
+    let owed = true;
+    const due = owingTheLevelCheck(() => owed);
+    const real = bridge.assessSession.bind(bridge);
+    const assess = vi
+      .spyOn(bridge, "assessSession")
+      .mockImplementationOnce(async (sessionId) => ({ ...(await real(sessionId)), scored: false }))
+      .mockImplementation(async (sessionId) => {
+        owed = false;
+        return real(sessionId);
+      });
+    try {
+      render(<App />);
+      await screen.findByText("Namaste, Asha!");
+      fireEvent.click(within(screen.getByTestId("level-check-invitation")).getByRole("button", { name: /start talking/i }));
+      await typeAnswers(5);
+      expect(await screen.findByTestId("level-check-intro")).toHaveTextContent(
+        "Finish a full talk with Ella so she can check your level.",
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+      await typeAnswers(5);
+      expect(await screen.findByText(/Level \d of 6 · Step \d/)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /let’s go/i }));
+      await screen.findByText("Namaste, Asha!");
+      await waitFor(() => expect(screen.queryByTestId("level-check-invitation")).not.toBeInTheDocument());
+      expect(screen.getByText(/Today’s/)).toBeInTheDocument();
+      expect(assess).toHaveBeenCalledTimes(2);
+    } finally {
+      due.mockRestore();
+      assess.mockRestore();
+    }
+  });
+
+  it("reads a level check that was skipped part way, as on Ella Mobile", async () => {
+    const due = owingTheLevelCheck(() => true);
+    const assess = vi.spyOn(bridge, "assessSession");
+    try {
+      render(<App />);
+      await screen.findByText("Namaste, Asha!");
+      fireEvent.click(within(screen.getByTestId("level-check-invitation")).getByRole("button", { name: /start talking/i }));
+      await typeAnswers(2);
+      fireEvent.click(screen.getByRole("button", { name: "Skip" }));
+      // Two answers read no level, so a full talk is asked for again.
+      expect(await screen.findByTestId("level-check-intro")).toHaveTextContent("Finish a full talk");
+      expect(assess).toHaveBeenCalledTimes(1);
+    } finally {
+      due.mockRestore();
+      assess.mockRestore();
+    }
+  });
+
   it("shows where a talk left the learner, and opens the level map from there", async () => {
     await onboard("Meera");
     fireEvent.click(screen.getByRole("button", { name: /start talking/i }));

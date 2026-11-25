@@ -105,8 +105,12 @@ export default function App() {
   // asks them to talk to her first: what they picked, and how to open it.
   const [nudge, setNudge] = useState<{ instead: string; go: () => void } | null>(null);
   // Where a placement chat skipped part-way goes back to: the level map, or
-  // the profile when Hello, Ella's sheet started it.
-  const [placementBack, setPlacementBack] = useState<"levels" | "profile">("levels");
+  // the profile when Hello, Ella's sheet started it, or Home for the level
+  // check.
+  const [placementBack, setPlacementBack] = useState<"levels" | "profile" | "home">("levels");
+  // The placement chat is the level check while one is owed: from Home's
+  // invitation it opens at once, from anywhere else with Ella's invitation.
+  const [levelCheck, setLevelCheck] = useState<{ startImmediately: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [update, setUpdate] = useState<UpdateProgress | null>(null);
   const [applyUpdate, setApplyUpdate] = useState<ApplyUpdate | null>(null);
@@ -281,6 +285,7 @@ export default function App() {
    * one, the mentor card's "Start the lesson", or "Talk with Ella" when she
    * asks for a chat first. */
   async function handleLesson() {
+    if (checkFirst()) return;
     await run(async () => {
       const created = await bridge.startLesson();
       setSession(created);
@@ -294,6 +299,7 @@ export default function App() {
    * first, as on Ella Mobile: it is practice of another kind, and does not
    * count among the talks she keeps her lessons by. */
   async function handleWord() {
+    if (checkFirst()) return;
     await run(async () => {
       const created = await bridge.startWord();
       setSession(created);
@@ -310,6 +316,7 @@ export default function App() {
    * know it by: a topic's title, or a partner's.
    */
   function throughEllaFirst(instead: string, go: () => void) {
+    if (checkFirst()) return;
     if (snapshot?.lesson?.overdue) {
       setNudge({ instead, go });
       return;
@@ -324,6 +331,7 @@ export default function App() {
 
   /** A talk on a topic: Ella's, or `partner`'s when their card started it. */
   async function handleStart(topic: Topic, partner: CastId | null = null) {
+    if (checkFirst()) return;
     await run(async () => {
       const created = await bridge.startSession(topic.id);
       setSession(created);
@@ -356,6 +364,7 @@ export default function App() {
 
   /** A chore: from its partner's card, or again from the recap of one missed. */
   async function handleStartChore(choreId: string) {
+    if (checkFirst()) return;
     await run(async () => {
       const created = await bridge.startChore(choreId);
       setSession(created);
@@ -388,7 +397,24 @@ export default function App() {
 
   function openPlacement(from: "levels" | "profile") {
     setPlacementBack(from);
+    setLevelCheck(snapshot?.placement_recheck_due ? { startImmediately: false } : null);
     setScreen("placement");
+  }
+
+  /** The level check, which comes before every other talk while it is owed,
+   * as on Ella Mobile's `offerPlacementRecheck`. */
+  function openLevelCheck(startImmediately: boolean) {
+    setPlacementBack("home");
+    setLevelCheck({ startImmediately });
+    setScreen("placement");
+  }
+
+  /** Opens the level check in place of a talk while one is owed. True when
+   * it did, and the talk asked for waits. */
+  function checkFirst(): boolean {
+    if (!snapshot?.placement_recheck_due) return false;
+    openLevelCheck(false);
+    return true;
   }
 
   /** Reopens a conversation the learner left running, messages and all. */
@@ -610,6 +636,7 @@ export default function App() {
             onResume={(sessionId) => void handleResume(sessionId)}
             onLevels={openLevels}
             onAllTopics={() => setScreen("topics")}
+            onLevelCheck={() => openLevelCheck(true)}
           />
         )}
         {screen === "topics" && (
@@ -664,6 +691,8 @@ export default function App() {
         {screen === "placement" && (
           <PlacementTalk
             greetName={snapshot.learner?.name ?? "friend"}
+            recheck={levelCheck !== null}
+            startImmediately={levelCheck?.startImmediately ?? false}
             onRead={() => void refreshSnapshot()}
             onDone={(placed) => {
               // Placed, the new level is the next thing to see; skipped, back

@@ -144,9 +144,9 @@ Branch `feature/progress-features-mobile-to-tauri`. P0 and P1 are implemented; P
 | 3 | XP | ✅ Done | `src-tauri/src/xp.rs` (`earned_ms`, `tally`, `MS_PER_XP`, `MOST_MS_PER_WORD`), worked out in `Database::progress` into `LearnerProgress.xp`. `XpPill` / `XpSheet` (`src/components/Xp.tsx`) in the sidebar. No new storage |
 | 4 | Level badges and recap tile | ✅ Done | `LearnerProgress.level_ups` is read off each talk's kept assessment. `level-1…6` rules in `presentation.ts` (`levelPassed`). `newlyEarned` drives the recap's "Badge earned" tile. No "award once" records |
 | 5 | My Words | ✅ Done | `src-tauri/src/vocab.rs` (Mobile's `vocab.ts`), `shared/english_words.txt` (ESDB, with its notice), `Database::spoken_turns`. `AppSnapshot.words` feeds Profile's "My words" card. `SessionSummary.new_words` feeds the recap's "New words" tile |
-| 6 | Placement recheck | ⏸ Not implemented | See below |
-| 7 | Daily reminders | ⏸ Not implemented | See below |
-| 8 | Island map | ⏸ Not implemented | See below |
+| 6 | Placement recheck | ✅ Done in P2/P3, off by default | [progress-features-p2-p3.md](progress-features-p2-p3.md) |
+| 7 | Daily reminders | ⏸ Blocked on a platform decision | [progress-features-p2-p3.md](progress-features-p2-p3.md) |
+| 8 | Island map | ⏸ Blocked on a product decision | [progress-features-p2-p3.md](progress-features-p2-p3.md) |
 
 ### Where the implementation deliberately differs from Mobile
 - **XP time.** Desktop pays `messages.spoken_ms`. With the native speech engine, answers are streamed and this is the whole recording, which is mic-open time, the same measure as Mobile's `turns.listening_ms`. On the buffered fallback, leading and trailing silence is trimmed (`audio::trim_to_speech`, keeping 120 ms before and 180 ms after), so those answers earn slightly less. The rule is Mobile's (10 s per XP, at most 3 s per word heard), and the per-word cap is what stops a mic left open in silence from paying. `xp::MS_PER_XP` is the one number to tune, and the window reads it from the backend. *(Corrected in review: this section first said every answer was VAD-trimmed.)*

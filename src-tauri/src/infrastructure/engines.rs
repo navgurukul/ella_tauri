@@ -1689,15 +1689,31 @@ const PLACEMENT_WRAP: &str = "Thank you, I really enjoyed hearing about that!";
 /// Plain text, like every reply here, so it streams through Piper; whether it
 /// has heard enough is asked separately, by `placement_check_note`. Every word
 /// of this holds for the whole chat, so all of it sits in the cached prefix.
-fn placement_system_prompt(learner_name: &str, age: Option<u8>) -> String {
+///
+/// A `returning` learner's chat is the required level check
+/// (`crate::placement_recheck`): Ella already knows them, so she catches up
+/// rather than meets them, as Ella Mobile's `chat_context` says for a recheck.
+fn placement_system_prompt(learner_name: &str, age: Option<u8>, returning: bool) -> String {
     let age_line = age
         .map(|age| format!(" They are {age} years old, so pick questions that fit their age."))
         .unwrap_or_default();
+    let context = if returning {
+        format!(
+            "You are Ella, a warm and patient speaking buddy catching up with {learner_name}, \
+             a returning learner in India. You already know each other.{age_line} This chat \
+             finds out how well they speak English today, so their practice fits, but it \
+             must feel like a friendly conversation, never a test."
+        )
+    } else {
+        format!(
+            "You are Ella, a warm and patient speaking buddy meeting {learner_name}, a new \
+             learner in India, for the first time.{age_line} This first chat finds out how \
+             well they speak English, but it must feel like a friendly conversation, never a \
+             test."
+        )
+    };
     format!(
-        "You are Ella, a warm and patient speaking buddy meeting {learner_name}, a new \
-         learner in India, for the first time.{age_line} This first chat finds out how \
-         well they speak English, but it must feel like a friendly conversation, never a \
-         test.\n\n\
+        "{context}\n\n\
          Every reply is one or two short sentences and then exactly one question, with \
          nothing after the question. Say it the way a person says it out loud, in whole \
          sentences. Answer the thing they actually said before you ask anything new, ask \
@@ -2971,7 +2987,12 @@ pub enum NextTalk {
         level: String,
     },
     /// The placement chat that onboarding ends in.
-    Placement { learner_name: String, age: Option<u8> },
+    /// `returning` for the required level check (`crate::placement_recheck`).
+    Placement {
+        learner_name: String,
+        age: Option<u8>,
+        returning: bool,
+    },
 }
 
 /// The recap after the talk the learner is likely to open next, named by the
@@ -3019,7 +3040,9 @@ pub trait TutorEngine: Send + Sync {
     /// The placement chat's first line. Authored, like every opening: the
     /// default is what demo mode says, and `LocalEngine` warms the chat's
     /// prompt with it as well.
-    fn placement_opening(&self, learner_name: &str, _age: Option<u8>) -> EllaResult<String> {
+    /// The same line opens the level check (`returning`): it greets nobody
+    /// as new.
+    fn placement_opening(&self, learner_name: &str, _age: Option<u8>, _returning: bool) -> EllaResult<String> {
         Ok(placement_opening_line(learner_name))
     }
 
@@ -3058,6 +3081,7 @@ pub trait TutorEngine: Send + Sync {
         &self,
         _learner_name: &str,
         _age: Option<u8>,
+        _returning: bool,
         _messages: &[Message],
     ) -> EllaResult<Option<Readiness>> {
         Ok(None)
@@ -4795,9 +4819,9 @@ impl TutorEngine for LocalEngine {
         Ok(text)
     }
 
-    fn placement_opening(&self, learner_name: &str, age: Option<u8>) -> EllaResult<String> {
+    fn placement_opening(&self, learner_name: &str, age: Option<u8>, returning: bool) -> EllaResult<String> {
         let text = placement_opening_line(learner_name);
-        let system = placement_system_prompt(learner_name, age);
+        let system = placement_system_prompt(learner_name, age, returning);
         // All of it holds for the whole chat, so all of it can be kept.
         self.warm_prompt_cache(system.clone(), text.clone(), vec![("placement", system)]);
         Ok(text)
@@ -4811,9 +4835,11 @@ impl TutorEngine for LocalEngine {
                 topic_label,
                 level,
             } => self.prepare_prompt("topic", laptop_prompts::topic_prompt(learner_name, topic_id, topic_label, level)),
-            NextTalk::Placement { learner_name, age } => {
-                self.prepare_prompt("placement", placement_system_prompt(learner_name, *age))
-            }
+            NextTalk::Placement {
+                learner_name,
+                age,
+                returning,
+            } => self.prepare_prompt("placement", placement_system_prompt(learner_name, *age, *returning)),
         }
     }
 
@@ -4917,11 +4943,13 @@ impl TutorEngine for LocalEngine {
         &self,
         learner_name: &str,
         age: Option<u8>,
+        returning: bool,
         messages: &[Message],
     ) -> EllaResult<Option<Readiness>> {
         // The chat's own prompt and history, then the question aside: see
         // `PLACEMENT_CHECK_NOTE` for why it is asked this way.
-        let mut request = vec![json!({"role": "system", "content": placement_system_prompt(learner_name, age)})];
+        let system = placement_system_prompt(learner_name, age, returning);
+        let mut request = vec![json!({"role": "system", "content": system})];
         request.extend(chat_messages(messages));
         request.push(json!({"role": "system", "content": PLACEMENT_CHECK_NOTE}));
         // Part of the chat: the next turn reads it, and it reads the chat's own
@@ -5123,7 +5151,7 @@ impl TutorEngine for LocalEngine {
             return self.lesson_reply(request, &ask);
         }
         let system = match (&request.placement, &request.chore) {
-            (Some(brief), _) => placement_system_prompt(&request.learner_name, brief.age),
+            (Some(brief), _) => placement_system_prompt(&request.learner_name, brief.age, brief.returning),
             (None, Some(context)) => chore_system_prompt(&request.learner_name, context),
             (None, None) => ella_system_prompt(
                 &request.learner_name,
@@ -9035,7 +9063,7 @@ mod curriculum_prompt_tests {
 
     #[test]
     fn the_placement_chat_climbs_rungs_and_never_feels_like_a_test() {
-        let prompt = placement_system_prompt("Asha", Some(12));
+        let prompt = placement_system_prompt("Asha", Some(12), false);
         assert!(prompt.contains("meeting Asha, a new learner in India"));
         assert!(prompt.contains("They are 12 years old"));
         assert!(prompt.contains("never a test"));
@@ -9043,8 +9071,21 @@ mod curriculum_prompt_tests {
             assert!(prompt.contains(rung), "{rung}");
         }
         assert!(prompt.contains("Never correct them"));
-        assert!(!placement_system_prompt("Asha", None).contains("years old"));
+        assert!(!placement_system_prompt("Asha", None, false).contains("years old"));
         assert_eq!(placement_opening_line("Asha"), "So Asha, tell me about your day so far!");
+    }
+
+    #[test]
+    fn the_level_check_catches_up_with_a_learner_ella_knows_and_climbs_the_same_rungs() {
+        let first = placement_system_prompt("Asha", Some(12), false);
+        let check = placement_system_prompt("Asha", Some(12), true);
+        assert!(check.contains("catching up with Asha, a returning learner in India"));
+        assert!(check.contains("You already know each other."));
+        assert!(check.contains("They are 12 years old") && check.contains("never a test"));
+        assert!(!check.contains("for the first time") && !check.contains("This first chat"));
+        // Everything after who they are is the same chat.
+        let rules = |prompt: &str| prompt.split_once("\n\n").unwrap().1.to_owned();
+        assert_eq!(rules(&check), rules(&first));
     }
 
     #[test]
@@ -9229,7 +9270,7 @@ mod curriculum_prompt_tests {
             turn,
             chore: None,
             pitch: Pitch::at("A2"),
-            placement: Some(crate::domain::PlacementBrief { age: None, closing }),
+            placement: Some(crate::domain::PlacementBrief { age: None, closing, returning: false }),
             lesson: None,
         };
         let asked = DemoEngine.reply(&request(2, false)).unwrap().text;
@@ -9998,7 +10039,7 @@ mod errand_tests {
         let context = chore();
         let open: [(&str, Box<dyn Fn() -> String>); 2] = [
             ("ella-chore-", Box::new(|| engine.opening_in_chore(&context, "Asha").unwrap())),
-            ("ella-placement-", Box::new(|| engine.placement_opening("Asha", Some(16)).unwrap())),
+            ("ella-placement-", Box::new(|| engine.placement_opening("Asha", Some(16), false).unwrap())),
         ];
         for (kind, opening) in open {
             let before = fake.kept();
@@ -10302,7 +10343,7 @@ mod errand_tests {
         // Never in the placement chat, which asks its own questions.
         engine
             .reply(&TutorRequest {
-                placement: Some(crate::domain::PlacementBrief { age: None, closing: false }),
+                placement: Some(crate::domain::PlacementBrief { age: None, closing: false, returning: false }),
                 lesson: None,
                 ..at(2)
             })
@@ -10877,7 +10918,7 @@ mod errand_tests {
                 turn: exchanges.len() as u32 + 1,
                 chore: None,
                 pitch: Pitch::at("A2"),
-                placement: Some(crate::domain::PlacementBrief { age, closing }),
+                placement: Some(crate::domain::PlacementBrief { age, closing, returning: false }),
                 lesson: None,
             }
         }

@@ -60,6 +60,11 @@ pub struct LessonCadence {
     /// talk since the last lesson taken to keep one recorded it. `None` before
     /// any did.
     pub kept: Option<String>,
+    /// Once a level check has moved the learner to another level: the skills
+    /// of the lessons already taken at their level now, which a lesson on a
+    /// stuck skill does not teach again, as on Ella Mobile. `None` before any
+    /// check moved them.
+    pub completed_targets: Option<Vec<String>>,
 }
 
 /// The lesson Ella has ready.
@@ -89,7 +94,11 @@ pub fn plan(
     recent: &[String],
     today: &str,
 ) -> Option<LessonPlan> {
-    if let Some(stuck) = progress::stuck_skill(position, progress) {
+    let allows = |candidate: &Placed| match &cadence.completed_targets {
+        Some(completed) => candidate.position.level == position.level && !completed.contains(&candidate.key),
+        None => true,
+    };
+    if let Some(stuck) = progress::stuck_skill_where(position, progress, allows) {
         return Some(LessonPlan {
             target: stuck,
             strengths: None,
@@ -222,6 +231,28 @@ mod tests {
         assert_eq!(ready.target.key, "A1:U1-GRA-01");
         assert!(ready.strengths.is_none(), "a lesson on something to improve praises nothing");
         assert_eq!(detail(&ready), STUCK_DETAIL);
+    }
+
+    #[test]
+    fn after_a_check_moves_levels_a_stuck_skill_already_taught_there_is_not_taught_again() {
+        let stuck = by_key(&[
+            SkillProgress { misses: 3, ..at("A1:U1-GRA-01") },
+            SkillProgress { misses: 2, ..at("A1:U1-FLU-01") },
+        ]);
+        let moved = |completed: &[&str]| LessonCadence {
+            completed_targets: Some(completed.iter().map(|key| (*key).to_string()).collect()),
+            ..LessonCadence::default()
+        };
+        assert_eq!(plan(&a1s1(), &stuck, &moved(&[]), &[], TODAY).unwrap().target.key, "A1:U1-GRA-01");
+        assert_eq!(
+            plan(&a1s1(), &stuck, &moved(&["A1:U1-GRA-01"]), &[], TODAY).unwrap().target.key,
+            "A1:U1-FLU-01",
+            "the one already taught at this level is passed over"
+        );
+        assert!(
+            plan(&a1s1(), &stuck, &moved(&["A1:U1-GRA-01", "A1:U1-FLU-01"]), &[], TODAY).is_none(),
+            "no other stuck, and not yet two talks"
+        );
     }
 
     #[test]

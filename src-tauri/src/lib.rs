@@ -7,6 +7,7 @@ mod install;
 pub mod lesson;
 mod ipc;
 mod machine;
+pub mod placement_recheck;
 pub mod notes;
 pub mod progress;
 mod setup;

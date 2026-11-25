@@ -469,7 +469,7 @@ mod tests {
     fn a_talk_asked_for_before_the_engine_is_there_is_got_ready_once_it_is() {
         let deferred = DeferredEngine::new("waiting");
         let slot = deferred.slot();
-        let next = NextTalk::Placement { learner_name: "Asha".into(), age: Some(16) };
+        let next = NextTalk::Placement { learner_name: "Asha".into(), age: Some(16), returning: false };
         // The window reads Home as it opens, long before a first model loads.
         deferred.prepare(&next);
 
@@ -713,8 +713,8 @@ impl TutorEngine for DeferredEngine {
         self.with_engine(|engine| engine.opening(topic, learner_name, pitch))
     }
 
-    fn placement_opening(&self, learner_name: &str, age: Option<u8>) -> EllaResult<String> {
-        self.with_engine(|engine| engine.placement_opening(learner_name, age))
+    fn placement_opening(&self, learner_name: &str, age: Option<u8>, returning: bool) -> EllaResult<String> {
+        self.with_engine(|engine| engine.placement_opening(learner_name, age, returning))
     }
 
     /// Not while there is no engine to teach with.
@@ -750,9 +750,10 @@ impl TutorEngine for DeferredEngine {
         &self,
         learner_name: &str,
         age: Option<u8>,
+        returning: bool,
         messages: &[Message],
     ) -> EllaResult<Option<Readiness>> {
-        self.with_engine(|engine| engine.placement_readiness(learner_name, age, messages))
+        self.with_engine(|engine| engine.placement_readiness(learner_name, age, returning, messages))
     }
 
     fn place(&self, learner_name: &str, messages: &[Message]) -> EllaResult<Option<PlacementReading>> {

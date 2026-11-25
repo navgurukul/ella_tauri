@@ -104,12 +104,18 @@ const FOLLOW_UP_LINES: [&str; 2] = [
 /// From this age the adult line is said; younger, or not known, the child's.
 const ADULT_AGE: u8 = 18;
 
+/// Whether Ella has pointed the learner to help in a talk where she has said
+/// `said`: the talk has turned to support, as Ella Mobile's `inSupport` asks,
+/// and is no time to judge their English.
+pub fn in_support(said: &[&str]) -> bool {
+    said.iter().any(|line| *line == CONCERN_LINE || *line == ADULT_CONCERN_LINE)
+}
+
 /// Ella's fixed line for a concern the model heard, given what she has said
 /// in the talk so far, `said`: help the first time, for the learner's `age`,
 /// and after that a line that listens rather than the same help again.
 pub fn concern_line(said: &[&str], age: Option<u8>) -> String {
-    let helped = said.iter().any(|line| *line == CONCERN_LINE || *line == ADULT_CONCERN_LINE);
-    if helped {
+    if in_support(said) {
         let listened = said.iter().filter(|line| FOLLOW_UP_LINES.contains(line)).count();
         return FOLLOW_UP_LINES[listened % FOLLOW_UP_LINES.len()].to_owned();
     }

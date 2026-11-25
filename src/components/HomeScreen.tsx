@@ -14,6 +14,11 @@ import {
 } from "../lib/presentation";
 import type { AppSnapshot, MentorLesson, Tone, Topic } from "../types";
 
+/** What Ella says in Today's talk's place while the level check is owed: Ella
+ * Mobile's `placementInvitation`. */
+export const LEVEL_CHECK_INVITATION =
+  "I’ve updated how I choose your practice. Let’s talk to see what fits your English now.";
+
 /** The four cards under "More topics": one tall, two small, one wide, each in
  * its own colour. Topics fill them in the order the backend offers them. */
 const SLOTS: Array<{ slot: TopicSlot; tone: Tone }> = [
@@ -33,6 +38,7 @@ export function HomeScreen({
   onResume,
   onLevels,
   onAllTopics,
+  onLevelCheck,
 }: {
   snapshot: AppSnapshot;
   busy: boolean;
@@ -48,6 +54,8 @@ export function HomeScreen({
   onLevels: () => void;
   /** "View all": every topic at the learner's level, on a page of its own. */
   onAllTopics: () => void;
+  /** The level check, from its invitation in Today's talk's place. */
+  onLevelCheck: () => void;
 }) {
   const name = snapshot.learner?.name ?? "friend";
   const digest = weeklyDigest(snapshot.progress);
@@ -68,6 +76,8 @@ export function HomeScreen({
   const shown = others.slice(0, SLOTS.length);
 
   const unfinished = unfinishedSession(snapshot);
+  // While the level check is owed, it is Today's talk, as on Ella Mobile.
+  const recheckDue = snapshot.placement_recheck_due === true;
 
   return (
     <div className="screen screen--home" data-screen="home">
@@ -78,7 +88,21 @@ export function HomeScreen({
 
       <div className="home-body">
         <div className="home-main">
-          {featured && (
+          {recheckDue ? (
+            <section className="today">
+              <EllaMascot variant="home" className="ella--home-peek" expression="homeEager" decorative />
+              <div className="today__card" data-testid="level-check-invitation">
+                <div className="today__text">
+                  <p className="eyebrow">Talk with Ella</p>
+                  <p className="today__blurb">{LEVEL_CHECK_INVITATION}</p>
+                </div>
+                <button className="btn btn--violet btn--talk" disabled={busy} onClick={onLevelCheck}>
+                  <MicGlyph size={17} />
+                  Start talking
+                </button>
+              </div>
+            </section>
+          ) : featured && (
             <section className="today">
               <EllaMascot
                 variant="home"

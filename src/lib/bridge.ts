@@ -409,6 +409,9 @@ export function createBrowserBridge(storage: StorageLike = window.localStorage):
       word: null,
       // Nor does it hear anyone, so no word is ever said aloud in it.
       words: null,
+      // With no model to read a level, the backend never asks for the level
+      // check (`placement_recheck`), and nor does the preview.
+      placement_recheck_due: false,
       engine_status: {
         mode: "demo",
         label: "Browser demo",
