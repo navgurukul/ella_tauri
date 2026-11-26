@@ -2,11 +2,10 @@
 //! learner placed by a cut-off takes the placement chat again, once, before
 //! any other talk, and it can move them up or down.
 //!
-//! On the phone the cut-off is a server setting, `ELLA_PLACEMENT_RECHECK_BEFORE`,
-//! so a campaign starts without a release. Ella Desktop has no server and ships
-//! its rules in the app, so the same setting is read when the app is built:
-//! unset, as by default, there is no check, as on the phone. Whether a release
-//! runs one, and from when, is a product decision, not this module's.
+//! On the phone the cut-off is a server setting, so a campaign starts without
+//! a release. Ella Desktop has no server and ships its rules in the app, so
+//! the cut-off is a constant here, [`BRANCH_RECHECK_CUTOFF`], with the same
+//! meaning: learners placed by then owe one check once it has passed.
 //!
 //! Who owes one is read off the talks the laptop keeps
 //! (`Database::placement_recheck_due`); nothing new is stored. The check
@@ -20,10 +19,18 @@ use crate::{
     progress::{self, ProgressMap},
 };
 
-/// The cut-off this build was made with, if any: learners placed by then owe
-/// a check. Unset, or not a time, means none, as on the phone.
-pub fn cutoff() -> Option<DateTime<Utc>> {
-    option_env!("ELLA_PLACEMENT_RECHECK_BEFORE").and_then(parse_cutoff)
+/// FEATURE-BRANCH CUT-OFF — NOT A PRODUCTION DECISION.
+///
+/// The level check is on in this branch so its whole flow can be exercised:
+/// every learner whose placement read a level before this moment owes one
+/// check. It is the day the branch was started. Before this merges to
+/// production, product decides whether a campaign runs at all and, if so,
+/// from when; this constant is the one place that changes.
+pub const BRANCH_RECHECK_CUTOFF: &str = "2026-11-25T00:00:00Z";
+
+/// [`BRANCH_RECHECK_CUTOFF`] as a moment: learners placed by then owe a check.
+pub fn cutoff() -> DateTime<Utc> {
+    parse_cutoff(BRANCH_RECHECK_CUTOFF).expect("BRANCH_RECHECK_CUTOFF is RFC 3339, and a test reads it")
 }
 
 /// A cut-off in RFC 3339, `2026-12-01T00:00:00Z`. Anything else is no
@@ -75,6 +82,11 @@ mod tests {
                 ..SkillProgress::fresh(&placed.key)
             })
             .collect()
+    }
+
+    #[test]
+    fn the_branch_cut_off_is_a_moment() {
+        assert_eq!(label(&cutoff()), "2026-11-25T00:00:00.000Z");
     }
 
     #[test]

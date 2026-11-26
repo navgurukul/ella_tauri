@@ -19,7 +19,7 @@ at `94352a6`.
 - App: `placement_step.dart` (`_recheckIntro`, retry), `widgets/placement_invitation.dart`, `home_screen.dart`, `app_state.dart` (`offerPlacementRecheck`, `finishPlacementRecheck`).
 
 How it works:
-- It is a one-off campaign. Operators set a UTC cutoff, `ELLA_PLACEMENT_RECHECK_BEFORE`.
+- It is a one-off campaign. Operators set a UTC cutoff in the server's configuration (`config.ts`).
 - A learner owes one recheck when they finished a placement with a spoken answer by that cutoff, and no placement has yet recorded a recheck against the same cutoff. A learner who skipped the placement owes none.
 - While a recheck is due, every other talk and match is refused (`placement_recheck_required`). Home's Today's talk becomes an invitation: "I’ve updated how I choose your practice. Let’s talk to see what fits your English now." Every other practice button opens the level-check intro.
 - The chat is the placement chat, with a returning-learner prompt.
@@ -41,7 +41,7 @@ How it works:
 
 **Proposed Desktop implementation.**
 - `src-tauri/src/placement_recheck.rs`:
-  - The cutoff is a build-time setting: `option_env!("ELLA_PLACEMENT_RECHECK_BEFORE")`, read as RFC 3339. It is unset (off) by default, as Mobile's is.
+  - The cutoff is one named constant, `placement_recheck::BRANCH_RECHECK_CUTOFF`. It is not read from the environment or any configuration.
   - `rechecked_position` is ported as a pure function.
 - The due rule is a database query over what Desktop already keeps. A placement session with a learner answer, completed by the cutoff, whose assessment read a level (`scored`). No placement assessment may yet carry `recheck.before` equal to the cutoff. **No schema change.**
 - A placement started while a recheck is due *is* the recheck. Desktop starts a placement only for a placed learner in that case, so nothing new needs storing on the session.
@@ -59,7 +59,7 @@ How it works:
 - The outbox-replay guards.
 
 **Decisions.**
-- **Whether Desktop runs a recheck campaign at all, and its cutoff.** This is a product decision, as it is on Mobile, where operators set it. The mechanism ships off by default.
+- **Whether Desktop runs a recheck campaign at all, and its cutoff.** This is a product decision, as it is on Mobile, where operators set it. In this branch it is on, with a branch-only cutoff, so the flow can be exercised (section 2).
 - Desktop-specific: without a model nothing can read a level. The gate would then lock the learner out of every talk, so a recheck is due only while Ella can judge (`TutorEngine::judges`).
 
 **Tests.**
@@ -132,14 +132,15 @@ How it works:
 
 | # | Feature | Status | Where |
 |---|---|---|---|
-| 6 | Placement recheck | ✅ Done, **off by default** | See below |
+| 6 | Placement recheck | ✅ Done, **on in this branch** (branch-only cutoff) | See below |
 | 7 | Daily reminders | ⏸ Blocked on a platform decision | Section 3 |
 | 8 | Island map | ⏸ Blocked on a product decision | Section 3 |
 
 ### Placement recheck: what was built
 
 - **`src-tauri/src/placement_recheck.rs`.**
-  - The cut-off comes from `option_env!("ELLA_PLACEMENT_RECHECK_BEFORE")` and is read as RFC 3339. Unset or unreadable means no check.
+  - The cut-off is `BRANCH_RECHECK_CUTOFF = "2026-11-25T00:00:00Z"`, the day the branch was started. It is the only place the cut-off is set: there is no environment variable, build setting or other configuration for it.
+  - **It is a feature-branch value, not a production decision.** Before this merges to production, product decides whether a campaign runs and from when (section 3).
   - `label` keeps the cut-off in the phone's `toISOString` form.
   - `rechecked_position` is Mobile's `recheckedPosition`.
 - **Database (`infrastructure/database.rs`).** There is **no schema change**; everything reads columns that already exist.
@@ -173,11 +174,11 @@ How it works:
   - A check skipped part way is still read, as on Mobile.
   - The preview bridge reports `placement_recheck_due: false`, as the backend does without a model.
 
-To run a campaign, build with `ELLA_PLACEMENT_RECHECK_BEFORE=2026-12-15T00:00:00Z` (for example) in the environment of `cargo` / `tauri build`. Learners placed by then are asked once they run that build.
+With this branch's cutoff, every learner whose placement read a level before 25 November 2026 is asked for the check the next time they open Ella, provided a model can judge. That includes a laptop's existing learner.
 
 ### Where Desktop deliberately differs from Mobile
 
-- **Build-time cut-off, not a server flag.** Desktop has no server, so the cut-off is fixed in a release. Mobile's `x-ella-placement-recheck` header, its WeakMap of deps and its outbox-replay guards exist for Shorebird patches and phones on older builds, so they were not ported.
+- **A cut-off constant, not a server setting.** Desktop has no server, so the cut-off is fixed in a release. Mobile's `x-ella-placement-recheck` header, its WeakMap of deps and its outbox-replay guards exist for Shorebird patches and phones on older builds, so they were not ported.
 - **Not owed without a model.** Mobile's server always has one. On Desktop, demo mode, or a laptop whose model failed with no cloud, could never read a level, so the gate would lock the learner out of every talk. While Ella cannot judge (`TutorEngine::judges`), no check is owed.
 - **"Placed by the cut-off" means a placement that read a level.** On Mobile every placement with a learner turn places. On Desktop, a placement with fewer than 5 answers places nobody, so it does not count either.
 - **A recheck is recognised, not stored.** Mobile marks the session (`modeData`). On Desktop, a placement started by a placed learner while a check is owed *is* the check. Desktop only offers a placed learner the placement then, and this avoids a new column.
@@ -187,7 +188,7 @@ To run a campaign, build with `ELLA_PLACEMENT_RECHECK_BEFORE=2026-12-15T00:00:00
 
 ## 3. Product and platform decisions needed
 
-1. **Placement recheck: whether and when.** Should a Desktop release run a level-check campaign, and with what cut-off? Mobile's reason ("I’ve updated how I choose your practice") is about Mobile's placement changes, and Desktop's placement may not have changed the same way. The invitation copy is Mobile's verbatim; confirm it fits Desktop. The mechanism ships off.
+1. **Placement recheck: whether and when.** Should a Desktop release run a level-check campaign, and with what cut-off? Mobile's reason ("I’ve updated how I choose your practice") is about Mobile's placement changes, and Desktop's placement may not have changed the same way. The invitation copy is Mobile's verbatim; confirm it fits Desktop. In this branch the check is on with a branch-only cutoff (`BRANCH_RECHECK_CUTOFF`), which must be decided, or the campaign removed, before production.
 2. **Daily reminders: delivery.** Choose one:
    - (a) **In-app only.** Add `tauri-plugin-notification`, and notify only while Ella is open. Low cost, little value at 19:00.
    - (b) **OS-scheduled.** macOS `UNCalendarNotificationTrigger` and Windows `ScheduledToastNotification`, through platform code. They fire with Ella closed. This needs a notification-permission prompt, signing and an AUMID on Windows, plus per-OS code and tests.

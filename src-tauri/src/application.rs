@@ -212,9 +212,8 @@ pub struct AppService {
     speech: Mutex<Option<Arc<dyn SpeechBroadcast>>>,
     /// At most one per placement chat in progress, by session id.
     placement_checks: Mutex<HashMap<String, PendingCheck>>,
-    /// The level check's cut-off this build was made with
-    /// (`placement_recheck::cutoff`); `None`, as by default, for no check.
-    recheck_cutoff: Option<DateTime<Utc>>,
+    /// The level check's cut-off (`placement_recheck::cutoff`).
+    recheck_cutoff: DateTime<Utc>,
 }
 
 /// What a talk started while the learner owes the level check is refused
@@ -234,11 +233,10 @@ impl AppService {
         }
     }
 
-    /// The service with a level check from `cutoff`, as a build made with
-    /// that cut-off has.
+    /// The service with the level check's cut-off at `cutoff` instead.
     #[cfg(test)]
     fn with_recheck_cutoff(mut self, cutoff: &str) -> Self {
-        self.recheck_cutoff = placement_recheck::parse_cutoff(cutoff);
+        self.recheck_cutoff = placement_recheck::parse_cutoff(cutoff).expect("an RFC 3339 cut-off");
         self
     }
 
@@ -247,13 +245,10 @@ impl AppService {
     /// model the check could never finish, and every other talk would wait
     /// on it for good.
     fn recheck_due(&self) -> EllaResult<Option<String>> {
-        let Some(cutoff) = &self.recheck_cutoff else {
-            return Ok(None);
-        };
-        if Utc::now() < *cutoff || !self.engine.judges() {
+        if Utc::now() < self.recheck_cutoff || !self.engine.judges() {
             return Ok(None);
         }
-        let before = placement_recheck::label(cutoff);
+        let before = placement_recheck::label(&self.recheck_cutoff);
         Ok(self.database.placement_recheck_due(&before)?.then_some(before))
     }
 
@@ -4860,20 +4855,22 @@ mod curriculum_flow_tests {
         assert_eq!(level_ups, [crate::domain::LevelUp { level_number: 1, day: today(), placement: true }]);
     }
 
-    /// The cut-off of the level-check campaign the recheck tests run, a
-    /// moment that has passed.
-    const RECHECK_FROM: &str = "2026-01-01T00:00:00Z";
+    /// Moves a talk to a month before the level check's cut-off, whenever the
+    /// tests run.
+    fn before_the_cut_off(service: &AppService, session_id: &str) {
+        let days = (Utc::now() - placement_recheck::cutoff()).num_days() + 30;
+        service.database.backdate(session_id, days).unwrap();
+    }
 
-    /// A service whose build carries the level check from `RECHECK_FROM`,
-    /// with the judge's placement reading `level`, for a learner a placement
-    /// put at `placed` a year ago, before the cut-off.
+    /// A service as built, with its level check (`BRANCH_RECHECK_CUTOFF`) and
+    /// the judge's placement reading `level`, for a learner a placement put at
+    /// `placed` before the cut-off.
     fn placed_before_the_check(level: &str, placed: Position) -> (AppService, Arc<Mutex<Heard>>) {
         let heard: Arc<Mutex<Heard>> = Arc::default();
         let service = judged(Judge {
             reading: PlacementReading { level: level.into(), closing: Some("Great to catch up!".into()) },
             ..Judge::new(&heard)
-        })
-        .with_recheck_cutoff(RECHECK_FROM);
+        });
         let placement = service.start_placement().unwrap();
         service.send_text_turn(&placement.id, "I am from Pune").unwrap();
         service.complete_session(&placement.id).unwrap();
@@ -4891,7 +4888,7 @@ mod curriculum_flow_tests {
                 })
             })
             .unwrap();
-        service.database.backdate(&placement.id, 365).unwrap();
+        before_the_cut_off(&service, &placement.id);
         (service, heard)
     }
 
@@ -4943,17 +4940,9 @@ mod curriculum_flow_tests {
         assert!(!service.bootstrap().unwrap().placement_recheck_due);
         service.start_session("street-food").unwrap();
 
-        // Without the campaign in the build.
+        // Placed after the cut-off.
         let heard: Arc<Mutex<Heard>> = Arc::default();
         let service = judged(Judge::new(&heard));
-        let placement = service.start_placement().unwrap();
-        answer_placement(&service, &placement.id);
-        service.assess_session(&placement.id).unwrap();
-        service.database.backdate(&placement.id, 365).unwrap();
-        assert!(!service.bootstrap().unwrap().placement_recheck_due);
-
-        // Placed after the cut-off.
-        let service = judged(Judge::new(&heard)).with_recheck_cutoff(RECHECK_FROM);
         let placement = service.start_placement().unwrap();
         answer_placement(&service, &placement.id);
         service.assess_session(&placement.id).unwrap();
@@ -4961,20 +4950,19 @@ mod curriculum_flow_tests {
         service.start_session("street-food").unwrap();
 
         // Skipped the placement.
-        let service = judged(Judge::new(&heard)).with_recheck_cutoff(RECHECK_FROM);
+        let service = judged(Judge::new(&heard));
         let skipped = service.start_placement().unwrap();
         service.complete_session(&skipped.id).unwrap();
-        service.database.backdate(&skipped.id, 365).unwrap();
+        before_the_cut_off(&service, &skipped.id);
         assert!(!service.bootstrap().unwrap().placement_recheck_due);
 
         // No model to read a level with: the check could never finish.
-        let service = AppService::new(Database::in_memory().unwrap(), Box::new(DemoEngine))
-            .with_recheck_cutoff(RECHECK_FROM);
+        let service = AppService::new(Database::in_memory().unwrap(), Box::new(DemoEngine));
         service.save_learner("Asha", Some(14)).unwrap();
         let placement = service.start_placement().unwrap();
         service.send_text_turn(&placement.id, "I am from Pune").unwrap();
         service.complete_session(&placement.id).unwrap();
-        service.database.backdate(&placement.id, 365).unwrap();
+        before_the_cut_off(&service, &placement.id);
         assert!(!service.bootstrap().unwrap().placement_recheck_due);
         service.start_session("street-food").unwrap();
     }
@@ -4991,7 +4979,7 @@ mod curriculum_flow_tests {
         assert_eq!(
             assessment.recheck,
             Some(PlacementRecheck {
-                before: "2026-01-01T00:00:00.000Z".into(),
+                before: placement_recheck::label(&placement_recheck::cutoff()),
                 previous: Position::new("B1", 2),
                 position: Position::new("A1", 1),
             })
