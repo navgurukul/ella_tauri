@@ -307,9 +307,22 @@ pub fn choose_target(
 /// stuck. Home and the mentor card offer it and the lesson aims at it, so
 /// they agree. Ella Mobile's `stuckSkill`.
 pub fn stuck_skill(position: &Position, progress: &ProgressMap) -> Option<Placed> {
+    stuck_skill_where(position, progress, |_| true)
+}
+
+/// `stuck_skill` among the candidates `allows` lets through, as Ella Mobile's
+/// `stuckSkill` takes one after a level check has moved the learner.
+pub fn stuck_skill_where(
+    position: &Position,
+    progress: &ProgressMap,
+    allows: impl Fn(&Placed) -> bool,
+) -> Option<Placed> {
     let mut stuck = None;
     let mut most = 0;
     for candidate in candidates(position, progress) {
+        if !allows(&candidate) {
+            continue;
+        }
         let entry = lookup(progress, &candidate.key);
         if entry.misses < STUCK_AFTER || passed(candidate.skill, &entry) {
             continue;

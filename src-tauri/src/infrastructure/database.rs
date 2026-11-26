@@ -76,6 +76,16 @@ impl CurriculumReader<'_> {
     pub fn lesson_cadence(&self) -> EllaResult<LessonCadence> {
         read_lesson_cadence(self.connection)
     }
+
+    /// `Database::placement_recheck_due`, as the transaction sees it.
+    pub fn placement_recheck_due(&self, before: &str) -> EllaResult<bool> {
+        read_placement_recheck_due(self.connection, before)
+    }
+
+    /// `Database::highest_step_at`, as the transaction sees it.
+    pub fn highest_step_at(&self, level: &str) -> EllaResult<u8> {
+        read_highest_step_at(self.connection, level)
+    }
 }
 
 /// Everything one assessment writes, all at once.
@@ -363,6 +373,38 @@ impl Database {
     pub fn lesson_cadence(&self) -> EllaResult<LessonCadence> {
         let connection = self.connection()?;
         read_lesson_cadence(&connection)
+    }
+
+    /// Whether the learner owes the level check against the cut-off `before`
+    /// (`crate::placement_recheck`), as Ella Mobile's `placementRecheckDue`
+    /// asks: a placement chat they answered in read their level by then, and
+    /// no check has answered that cut-off since. A learner who skipped the
+    /// placement, or whose chat heard too little to read a level, owes none.
+    pub fn placement_recheck_due(&self, before: &str) -> EllaResult<bool> {
+        let connection = self.connection()?;
+        read_placement_recheck_due(&connection, before)
+    }
+
+    /// The ids of a talk's answers the learner said aloud: every answer with
+    /// a spoken time. Typed answers have none.
+    pub fn spoken_answer_ids(&self, session_id: &str) -> EllaResult<std::collections::HashSet<String>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id FROM messages
+             WHERE session_id = ?1 AND speaker = 'learner' AND spoken_ms IS NOT NULL",
+        )?;
+        let ids = statement
+            .query_map([session_id], |row| row.get(0))?
+            .collect::<Result<std::collections::HashSet<String>, _>>()?;
+        Ok(ids)
+    }
+
+    /// The highest step the learner has reached on `level`, as Ella Mobile's
+    /// `highestStepAt` reads it: where any talk left them on it, or where a
+    /// level check found them on it before moving them. 1 when never.
+    pub fn highest_step_at(&self, level: &str) -> EllaResult<u8> {
+        let connection = self.connection()?;
+        read_highest_step_at(&connection, level)
     }
 
     /// Ella's judgement of each answer in a lesson, by the answer's message
@@ -1618,31 +1660,53 @@ fn read_recent_targets(connection: &Connection) -> EllaResult<Vec<String>> {
 /// kept for the lesson they made ready. A lesson counts as taken once it is a
 /// successful talk itself. Talks are in the order they started, which is the
 /// order their rows were written in.
+/// Once a level check has moved the learner to another level, lessons count
+/// at the level where they were taken, as on Ella Mobile: the talks since the
+/// last lesson are the ones at their level now, and the lessons already
+/// taken there are kept in `completed_targets`. Before any check moved them,
+/// every talk counts, as it always has.
 fn read_lesson_cadence(connection: &Connection) -> EllaResult<LessonCadence> {
-    let last: i64 = connection.query_row(
-        "SELECT COALESCE(MAX(rowid), 0) FROM sessions WHERE counted = 1 AND kind = 'lesson'",
+    let moved: bool = connection.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sessions WHERE kind = 'placement'
+           AND json_extract(assessment, '$.recheck.previous.level')
+               <> json_extract(assessment, '$.recheck.position.level'))",
         [],
+        |row| row.get(0),
+    )?;
+    // Every talk keeps the level it was pitched at (`sessions.level_code`).
+    let level: Option<String> = if moved {
+        read_position(connection)?.map(|position| position.level)
+    } else {
+        None
+    };
+    let last: i64 = connection.query_row(
+        "SELECT COALESCE(MAX(rowid), 0) FROM sessions
+         WHERE counted = 1 AND kind = 'lesson' AND (?1 IS NULL OR level_code = ?1)",
+        [&level],
         |row| row.get(0),
     )?;
     let (talks, overdue): (u32, bool) = connection.query_row(
         "SELECT COUNT(*), COALESCE(MAX(lesson_ready), 0) FROM sessions
-         WHERE rowid > ?1 AND counted = 1 AND COALESCE(kind, '') <> 'lesson'",
-        [last],
+         WHERE rowid > ?1 AND counted = 1 AND COALESCE(kind, '') <> 'lesson'
+           AND (?2 IS NULL OR level_code = ?2)",
+        params![last, level],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let held: bool = connection.query_row(
-        "SELECT EXISTS (SELECT 1 FROM sessions WHERE rowid > ?1 AND lesson_ready = 1)",
-        [last],
+        "SELECT EXISTS (SELECT 1 FROM sessions WHERE rowid > ?1 AND lesson_ready = 1
+           AND (?2 IS NULL OR level_code = ?2))",
+        params![last, level],
         |row| row.get(0),
     )?;
     let latest = {
         let mut statement = connection.prepare(
             "SELECT assessment FROM sessions
              WHERE rowid > ?1 AND counted = 1 AND COALESCE(kind, '') <> 'lesson'
+               AND (?2 IS NULL OR level_code = ?2)
              ORDER BY rowid DESC LIMIT 2",
         )?;
         let rows = statement
-            .query_map([last], |row| row.get::<_, Option<String>>(0))?
+            .query_map(params![last, level], |row| row.get::<_, Option<String>>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         rows
     };
@@ -1662,18 +1726,69 @@ fn read_lesson_cadence(connection: &Connection) -> EllaResult<LessonCadence> {
     let kept = connection
         .query_row(
             "SELECT lesson_skill FROM sessions WHERE rowid > ?1 AND lesson_skill IS NOT NULL
+               AND (?2 IS NULL OR level_code = ?2)
              ORDER BY rowid DESC LIMIT 1",
-            [last],
+            params![last, level],
             |row| row.get(0),
         )
         .optional()?;
+    let completed_targets = match &level {
+        Some(level) => {
+            let mut statement = connection.prepare(
+                "SELECT DISTINCT target_skill FROM sessions
+                 WHERE level_code = ?1 AND counted = 1 AND kind = 'lesson' AND target_skill IS NOT NULL
+                 ORDER BY target_skill",
+            )?;
+            let targets = statement
+                .query_map([level], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Some(targets)
+        }
+        None => None,
+    };
     Ok(LessonCadence {
         talks,
         overdue,
         held,
         strengths,
         kept,
+        completed_targets,
     })
+}
+
+fn read_placement_recheck_due(connection: &Connection, before: &str) -> EllaResult<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS (
+           SELECT 1 FROM sessions s
+           WHERE s.kind = 'placement' AND s.status = 'complete'
+             AND julianday(s.completed_at) <= julianday(?1)
+             AND json_extract(s.assessment, '$.scored') = 1
+             AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.speaker = 'learner')
+         ) AND NOT EXISTS (
+           SELECT 1 FROM sessions s
+           WHERE s.kind = 'placement' AND json_extract(s.assessment, '$.recheck.before') = ?1
+         )",
+        [before],
+        |row| row.get(0),
+    )?)
+}
+
+fn read_highest_step_at(connection: &Connection, level: &str) -> EllaResult<u8> {
+    let Some(number) = curriculum::level_index(level).map(|index| index as i64 + 1) else {
+        return Ok(1);
+    };
+    let highest: Option<i64> = connection.query_row(
+        "SELECT MAX(step) FROM (
+           SELECT json_extract(assessment, '$.standing.step') AS step FROM sessions
+           WHERE json_extract(assessment, '$.standing.level_number') = ?1
+           UNION ALL
+           SELECT json_extract(assessment, '$.recheck.previous.step') FROM sessions
+           WHERE json_extract(assessment, '$.recheck.previous.level') = ?2
+         )",
+        params![number, level],
+        |row| row.get(0),
+    )?;
+    Ok(highest.and_then(|step| u8::try_from(step).ok()).unwrap_or(1).max(1))
 }
 
 /// A JSON array of skill labels, as `lesson_strengths` keeps it; strings
@@ -3241,6 +3356,148 @@ mod tests {
         database.sign_out().unwrap();
         database.sign_in().unwrap();
         assert_eq!(database.progress().unwrap(), open);
+    }
+
+    /// Keeps `assessment` on a talk, with its kind, level and lesson marks,
+    /// as an assessment and a start leave it.
+    fn keep(database: &Database, id: &str, kind: Option<&str>, level: Option<&str>, assessment: serde_json::Value) {
+        database
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET kind = ?2, level_code = ?3, assessment = ?4 WHERE id = ?1",
+                params![id, kind, level, assessment.to_string()],
+            )
+            .unwrap();
+    }
+
+    const CUTOFF: &str = "2026-02-01T00:00:00.000Z";
+
+    #[test]
+    fn a_level_check_is_owed_by_whoever_a_placement_read_by_the_cut_off_until_one_answers_it() {
+        let database = Database::in_memory().unwrap();
+        save_asha(&database);
+        assert!(!database.placement_recheck_due(CUTOFF).unwrap(), "never placed");
+
+        // Skipped: answered nothing, read nothing.
+        let skipped = talk(&database, "placement", noon_utc(2026, 1, 10), 0, true);
+        keep(&database, &skipped, Some("placement"), None, serde_json::json!({"kind": "placement", "scored": false}));
+        assert!(!database.placement_recheck_due(CUTOFF).unwrap(), "a skipped placement owes nothing");
+        // Too short to read a level.
+        let short = talk(&database, "placement", noon_utc(2026, 1, 11), 2, true);
+        keep(&database, &short, Some("placement"), None, serde_json::json!({"kind": "placement", "scored": false}));
+        assert!(!database.placement_recheck_due(CUTOFF).unwrap(), "nor one that read no level");
+
+        let placed = talk(&database, "placement", noon_utc(2026, 1, 12), 6, true);
+        keep(&database, &placed, Some("placement"), None, serde_json::json!({"kind": "placement", "scored": true}));
+        assert!(database.placement_recheck_due(CUTOFF).unwrap());
+        assert!(
+            !database.placement_recheck_due("2026-01-12T00:00:00.000Z").unwrap(),
+            "placed after that cut-off"
+        );
+
+        // A check that could not be read answers nothing.
+        let unread = talk(&database, "placement", noon_utc(2026, 2, 2), 3, true);
+        keep(&database, &unread, Some("placement"), None, serde_json::json!({"kind": "placement", "scored": false}));
+        assert!(database.placement_recheck_due(CUTOFF).unwrap());
+        // One that read a level answers it, and only it.
+        let check = talk(&database, "placement", noon_utc(2026, 2, 3), 6, true);
+        keep(
+            &database,
+            &check,
+            Some("placement"),
+            None,
+            serde_json::json!({"kind": "placement", "scored": true, "recheck": {
+                "before": CUTOFF,
+                "previous": {"level": "B1", "step": 2},
+                "position": {"level": "A2", "step": 4},
+            }}),
+        );
+        assert!(!database.placement_recheck_due(CUTOFF).unwrap());
+        assert!(database.placement_recheck_due("2026-03-01T00:00:00.000Z").unwrap(), "a later campaign asks again");
+    }
+
+    #[test]
+    fn the_highest_step_reached_on_a_level_counts_every_talk_and_where_a_check_found_them() {
+        let database = Database::in_memory().unwrap();
+        save_asha(&database);
+        assert_eq!(database.highest_step_at("A2").unwrap(), 1, "never there");
+        let a2 = curriculum::level_index("A2").unwrap() as u8 + 1;
+        for step in [2, 4, 3] {
+            let id = talk(&database, "street-food", noon_utc(2026, 1, 10), 3, true);
+            keep(&database, &id, None, Some("A2"), serde_json::json!({"standing": {"level_number": a2, "step": step}}));
+        }
+        assert_eq!(database.highest_step_at("A2").unwrap(), 4);
+        assert_eq!(database.highest_step_at("B1").unwrap(), 1);
+        let check = talk(&database, "placement", noon_utc(2026, 2, 3), 6, true);
+        keep(
+            &database,
+            &check,
+            Some("placement"),
+            None,
+            serde_json::json!({"kind": "placement", "standing": {"level_number": a2, "step": 4},
+                "recheck": {"before": CUTOFF, "previous": {"level": "B1", "step": 3}, "position": {"level": "A2", "step": 4}}}),
+        );
+        assert_eq!(database.highest_step_at("B1").unwrap(), 3, "where the check found them");
+        assert_eq!(database.highest_step_at("Z9").unwrap(), 1);
+    }
+
+    #[test]
+    fn after_a_check_moves_levels_lessons_count_at_the_level_they_were_taken() {
+        let database = Database::in_memory().unwrap();
+        save_asha(&database);
+        let mark = |id: &str, kind: Option<&str>, level: &str, counted: bool, target: Option<&str>| {
+            database
+                .connection()
+                .unwrap()
+                .execute(
+                    "UPDATE sessions SET kind = ?2, level_code = ?3, counted = ?4, target_skill = ?5,
+                       assessment = '{}' WHERE id = ?1",
+                    params![id, kind, level, counted, target],
+                )
+                .unwrap();
+        };
+        let set_level = |level: &str, step: u8| {
+            database
+                .connection()
+                .unwrap()
+                .execute("UPDATE learner SET level_code = ?1, step = ?2 WHERE id = 1", params![level, step])
+                .unwrap();
+        };
+        // At A2: a lesson on a skill, then two talks.
+        set_level("A2", 3);
+        let lesson = talk(&database, "street-food", noon_utc(2026, 1, 10), 4, true);
+        mark(&lesson, Some("lesson"), "A2", true, Some("A2:U3-GRA-01"));
+        for day in [11, 12] {
+            let id = talk(&database, "street-food", noon_utc(2026, 1, day), 3, true);
+            mark(&id, None, "A2", true, None);
+        }
+        assert_eq!(database.lesson_cadence().unwrap().talks, 2);
+        assert_eq!(database.lesson_cadence().unwrap().completed_targets, None, "no check has moved them");
+
+        // A check that keeps them at their level changes nothing.
+        let same = talk(&database, "placement", noon_utc(2026, 2, 2), 6, true);
+        keep(&database, &same, Some("placement"), None, serde_json::json!({"recheck": {
+            "before": CUTOFF, "previous": {"level": "A2", "step": 3}, "position": {"level": "A2", "step": 3}}}));
+        assert_eq!(database.lesson_cadence().unwrap().completed_targets, None);
+
+        // A check that moves them to B1: only B1's talks and lessons count.
+        let moved = talk(&database, "placement", noon_utc(2026, 2, 3), 6, true);
+        keep(&database, &moved, Some("placement"), None, serde_json::json!({"recheck": {
+            "before": "2026-03-01T00:00:00.000Z", "previous": {"level": "A2", "step": 3},
+            "position": {"level": "B1", "step": 1}}}));
+        set_level("B1", 1);
+        let cadence = database.lesson_cadence().unwrap();
+        assert_eq!((cadence.talks, cadence.completed_targets.clone()), (0, Some(Vec::new())));
+        let b1 = talk(&database, "street-food", noon_utc(2026, 2, 4), 3, true);
+        mark(&b1, None, "B1", true, None);
+        assert_eq!(database.lesson_cadence().unwrap().talks, 1);
+
+        // Back at A2, its own talks since its last lesson, and that lesson's skill.
+        set_level("A2", 3);
+        let cadence = database.lesson_cadence().unwrap();
+        assert_eq!(cadence.talks, 2);
+        assert_eq!(cadence.completed_targets, Some(vec!["A2:U3-GRA-01".to_string()]));
     }
 
     #[test]

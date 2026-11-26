@@ -262,6 +262,10 @@ pub struct AppSnapshot {
     /// `None` when signed out.
     #[serde(default)]
     pub words: Option<crate::vocab::LearnerWords>,
+    /// The learner owes the required level check (`crate::placement_recheck`):
+    /// Home invites them to it, and every other talk waits for it.
+    #[serde(default)]
+    pub placement_recheck_due: bool,
     pub engine_status: EngineStatus,
 }
 
@@ -355,6 +359,27 @@ pub struct Assessment {
     /// before the recap had notes read as `None`.
     #[serde(default)]
     pub notes: Option<TalkNotes>,
+    /// On a placement chat that was the required level check
+    /// (`crate::placement_recheck`) and read a level: the cut-off it answered,
+    /// and where the learner was before it. `None` for every other talk, a
+    /// check that heard too little to read one, and assessments kept before
+    /// there was a check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recheck: Option<PlacementRecheck>,
+}
+
+/// A level check's record, kept with its assessment as Ella Mobile keeps
+/// `placementRecheck` with the talk's completion.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlacementRecheck {
+    /// The cut-off it answered (`placement_recheck::label`). A learner owes no
+    /// other check against the same one.
+    pub before: String,
+    /// Where they were before it, which a later check back on that level
+    /// resumes from.
+    pub previous: crate::curriculum::Position,
+    /// Where it put them.
+    pub position: crate::curriculum::Position,
 }
 
 /// What the recap says about a talk: what went well, and a thing or three to
@@ -484,6 +509,9 @@ pub struct PlacementBrief {
     pub age: Option<u8>,
     /// This reply ends the chat: a goodbye, not another question.
     pub closing: bool,
+    /// The chat is the required level check (`crate::placement_recheck`):
+    /// Ella and the learner already know each other.
+    pub returning: bool,
 }
 
 /// How sure the judge would be of the learner's level, if asked now.

@@ -11,9 +11,17 @@ import type { Assessment, Session, SessionSummary } from "../types";
  * `starting` until the backend has opened the chat; `talking` through it;
  * `reading` while the level is read after Ella's goodbye; `placed` with the
  * result. `unstarted` and `unread` are the two ways it can fail, each with a
- * way to try again and a way past.
+ * way to try again and a way past. The level check alone has `intro`, Ella's
+ * invitation before it opens, and `retry`, when it heard too little to read a
+ * level and asks for a full talk.
  */
-type Phase = "starting" | "talking" | "reading" | "placed" | "unstarted" | "unread";
+type Phase = "intro" | "starting" | "talking" | "reading" | "placed" | "retry" | "unstarted" | "unread";
+
+/** What the level check says before it opens: Ella Mobile's `placementInvitation`. */
+const INVITATION =
+  "I’ve updated how I choose your practice. Let’s talk to see what fits your English now.";
+/** And after one that heard too little to read a level. */
+const FINISH_A_FULL_TALK = "Finish a full talk with Ella so she can check your level.";
 
 /**
  * The placement chat, as on Ella Mobile: a friendly first talk that climbs from
@@ -25,24 +33,36 @@ type Phase = "starting" | "talking" | "reading" | "placed" | "unstarted" | "unre
  * last turn closes the session, and the level is read while Ella is still
  * saying goodbye, so the result is usually ready the moment she finishes.
  * Skip leaves at any point before that, and places nobody.
+ *
+ * As the level check (`recheck`), owed by a learner placed before the check's
+ * cut-off, it is the same chat, as on Ella Mobile: Ella's invitation first,
+ * unless they came from the one on Home (`startImmediately`). The check is read
+ * however it ends, Skip included, and one that heard too little asks for a
+ * full talk again.
  */
 export function PlacementTalk({
   greetName,
+  recheck = false,
+  startImmediately = false,
   onRead,
   onDone,
 }: {
   greetName: string;
+  recheck?: boolean;
+  startImmediately?: boolean;
   /** The level has been read and kept. Told even when the learner skipped
    * past the wait and this screen is gone, so the app can catch up. */
   onRead: () => void;
   /** With the assessment once placed; with null when skipped. */
   onDone: (placed: Assessment | null) => void;
 }) {
-  const [phase, setPhase] = useState<Phase>("starting");
+  const invited = recheck && !startImmediately;
+  const [phase, setPhase] = useState<Phase>(invited ? "intro" : "starting");
   const [session, setSession] = useState<Session | null>(null);
   const [assessment, setAssessment] = useState<Assessment | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [attempt, setAttempt] = useState(0);
+  // -1 while the level check's invitation waits for "Start talking".
+  const [attempt, setAttempt] = useState(invited ? -1 : 0);
   // Survive StrictMode's rehearsal unmount, so the chat is opened once.
   const started = useRef(-1);
   const mounted = useRef(false);
@@ -53,7 +73,7 @@ export function PlacementTalk({
 
   useEffect(() => {
     mounted.current = true;
-    if (started.current !== attempt) {
+    if (attempt >= 0 && started.current !== attempt) {
       started.current = attempt;
       bridge
         .startPlacement()
@@ -95,9 +115,11 @@ export function PlacementTalk({
     void readLevel(summary.session_id).catch(() => undefined);
   }
 
-  /** Ella has finished — or the learner pressed Skip, which closed nothing. */
+  /** Ella has finished — or the learner pressed Skip, which closed nothing.
+   * A level check is read either way, as on Ella Mobile: what they said still
+   * counts. */
   async function handleComplete(summary: SessionSummary) {
-    if (!closed.current) {
+    if (!closed.current && !recheck) {
       onDone(null);
       return;
     }
@@ -106,13 +128,24 @@ export function PlacementTalk({
       const result = await readLevel(summary.session_id);
       if (!mounted.current) return;
       setAssessment(result);
-      setPhase("placed");
+      setPhase(recheck && !result.scored ? "retry" : "placed");
     } catch (reason) {
       reading.current = null;
       if (!mounted.current) return;
       setError(message(reason));
       setPhase("unread");
     }
+  }
+
+  /** The level check again, from its invitation or after one too short. */
+  function begin() {
+    setError(null);
+    setSession(null);
+    setAssessment(null);
+    reading.current = null;
+    closed.current = false;
+    setPhase("starting");
+    setAttempt((count) => count + 1);
   }
 
   function retry() {
@@ -147,7 +180,8 @@ export function PlacementTalk({
     <div className="screen screen--talk ob-placement" data-screen="onboarding-placement">
       <header className="talk-head">
         <span className="pill pill--white">
-          First talk<span className="talk-head__tag">Your level</span>
+          {recheck ? "Talk with Ella" : "First talk"}
+          <span className="talk-head__tag">Your level</span>
         </span>
         {/* Reading the level can take a while on a slow laptop; leaving lets
             it finish in the background, and the level lands when it does. */}
@@ -159,7 +193,21 @@ export function PlacementTalk({
       </header>
 
       <div className="talk-stage">
-        {phase === "placed" && standing ? (
+        {phase === "intro" || phase === "retry" ? (
+          <>
+            <p className="talk-prompt" data-testid="level-check-intro">
+              {phase === "retry" ? FINISH_A_FULL_TALK : INVITATION}
+            </p>
+            <div className="placement-actions">
+              <button className="btn btn--green ob-placement__go" onClick={begin} autoFocus>
+                {phase === "retry" ? "Try again" : "Start talking"}
+              </button>
+              <button className="link-button link-button--muted" onClick={() => onDone(null)}>
+                Back to Home
+              </button>
+            </div>
+          </>
+        ) : phase === "placed" && standing ? (
           <>
             <p className="talk-prompt">{assessment?.closing}</p>
             <p className={`level-reveal ladder-${levelTone(standing.level_number)}`}>
@@ -220,9 +268,11 @@ export function PlacementTalk({
                 )}
               </button>
             </div>
-            <p className="mic-hint mic-hint--soft">
-              {phase === "placed" ? "Talk finished" : phase === "reading" ? "Ella is thinking…" : "One moment…"}
-            </p>
+            {phase !== "intro" && phase !== "retry" && (
+              <p className="mic-hint mic-hint--soft">
+                {phase === "placed" ? "Talk finished" : phase === "reading" ? "Ella is thinking…" : "One moment…"}
+              </p>
+            )}
           </div>
         </EllaMascot>
       </div>

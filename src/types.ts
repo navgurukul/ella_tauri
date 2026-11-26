@@ -182,6 +182,9 @@ export interface AppSnapshot {
    * Home's "2 more talks to your lesson with Ella". Null while one is ready,
    * and when signed out. */
   talks_to_lesson?: number | null;
+  /** The learner owes the level check (`placement_recheck`): Home invites
+   * them to it, and every other talk waits for it. */
+  placement_recheck_due?: boolean;
   /** Today's Word of the day, for Home's daily card under Today's talk. Null
    * once the learner has played it today, and when signed out. */
   word?: WordShown | null;
@@ -286,6 +289,17 @@ export interface Assessment {
   /** Ella's notes for the recap; null for a placement, and for a talk too
    * short to say anything about (`SessionSummary.short`). */
   notes?: TalkNotes | null;
+  /** On a level check that read a level: the cut-off it answered, where the
+   * learner was before it, and where it put them. Absent for every other
+   * talk. */
+  recheck?: PlacementRecheck | null;
+}
+
+/** A level check's record, kept with its assessment. */
+export interface PlacementRecheck {
+  before: string;
+  previous: { level: string; step: number };
+  position: { level: string; step: number };
 }
 
 /** What the recap says about a talk. */

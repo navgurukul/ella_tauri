@@ -14,7 +14,7 @@ use crate::{
         chores, find_character, find_chore, topics, Advance, AppSnapshot, Assessment,
         ChoreContext, ChoreRecap, Fix, Focus, LedgerTurn, AudioPayload, LedgerView, Learner, LearnerProfile,
         LearnerProgress, LessonTurn, LevelSkillView, LevelState, LevelView, MentorLesson, Message, PhonemeSpan,
-        Pitch, PlacementBrief, PlacementReading, Readiness, Scorable, Session, SessionSummary, SkillAim,
+        Pitch, PlacementBrief, PlacementReading, PlacementRecheck, Readiness, Scorable, Session, SessionSummary, SkillAim,
         SpeechStreamEvent, SpokenLine, Standing, StepView, TalkNotes, TurnSignal, WinCondition,
         Speaker, Topic, TurnResult, TutorRequest, WordShown, WordSpan,
     },
@@ -31,6 +31,7 @@ use crate::{
         word_prompt::{self, Knowing, Reaction},
     },
     lesson::{self, LessonCadence, LessonPlan},
+    placement_recheck,
     vocab,
     notes,
     progress::{self, ProgressMap, SkillProgress},
@@ -47,6 +48,8 @@ const LESSON_KIND: &str = "lesson";
 const WORD_KIND: &str = "word";
 pub const PLACEMENT_TOPIC_ID: &str = "placement";
 const PLACEMENT_LABEL: &str = "First talk";
+/// What the level check is called, as on Ella Mobile: it is no first talk.
+const RECHECK_LABEL: &str = "Talk with Ella";
 
 /// How the shell delivers a finished sentence to the window mid-turn.
 ///
@@ -209,7 +212,14 @@ pub struct AppService {
     speech: Mutex<Option<Arc<dyn SpeechBroadcast>>>,
     /// At most one per placement chat in progress, by session id.
     placement_checks: Mutex<HashMap<String, PendingCheck>>,
+    /// The level check's cut-off (`placement_recheck::cutoff`).
+    recheck_cutoff: DateTime<Utc>,
 }
+
+/// What a talk started while the learner owes the level check is refused
+/// with, as Ella Mobile's `placement_recheck_required`. The window opens the
+/// check instead, so this is only seen by a start it did not route there.
+const RECHECK_REQUIRED: &str = "Talk with Ella first so she can check your level.";
 
 impl AppService {
     pub fn new(database: Database, engine: Box<dyn TutorEngine>) -> Self {
@@ -219,7 +229,42 @@ impl AppService {
             streams: Mutex::new(HashMap::new()),
             speech: Mutex::new(None),
             placement_checks: Mutex::new(HashMap::new()),
+            recheck_cutoff: placement_recheck::cutoff(),
         }
+    }
+
+    /// The service with the level check's cut-off at `cutoff` instead.
+    #[cfg(test)]
+    fn with_recheck_cutoff(mut self, cutoff: &str) -> Self {
+        self.recheck_cutoff = placement_recheck::parse_cutoff(cutoff).expect("an RFC 3339 cut-off");
+        self
+    }
+
+    /// The cut-off of the level check the learner owes now, if they owe one
+    /// (`placement_recheck`). Only while Ella can read a level: without a
+    /// model the check could never finish, and every other talk would wait
+    /// on it for good.
+    fn recheck_due(&self) -> EllaResult<Option<String>> {
+        if Utc::now() < self.recheck_cutoff || !self.engine.judges() {
+            return Ok(None);
+        }
+        let before = placement_recheck::label(&self.recheck_cutoff);
+        Ok(self.database.placement_recheck_due(&before)?.then_some(before))
+    }
+
+    /// Refuses a talk while the level check is owed: it comes first.
+    fn check_first(&self) -> EllaResult<()> {
+        match self.recheck_due()? {
+            Some(_) => Err(EllaError::Conflict(RECHECK_REQUIRED.into())),
+            None => Ok(()),
+        }
+    }
+
+    /// Whether a placement chat for a learner placed already is the level
+    /// check: it is while one is owed, the only time a placed learner is
+    /// offered the placement chat.
+    fn placement_is_recheck(&self) -> EllaResult<bool> {
+        Ok(self.database.placed()? && self.recheck_due()?.is_some())
     }
 
     /// Called from the app's exit event: Tauri never drops managed state, so
@@ -299,7 +344,12 @@ impl AppService {
         let mut lesson = None;
         let mut talks_to_lesson = None;
         let mut words = None;
+        let mut placement_recheck_due = false;
         if let Some(learner) = &learner {
+            placement_recheck_due = self.recheck_due().map(|due| due.is_some()).unwrap_or_else(|error| {
+                eprintln!("[placement] could not tell whether a level check is owed: {error}");
+                false
+            });
             words = self.learner_words(learner).map(Some).unwrap_or_else(|error| {
                 eprintln!("[words] could not count the learner's words: {error}");
                 None
@@ -316,6 +366,7 @@ impl AppService {
             if let Err(error) = self.prepare_next_talk(
                 learner,
                 recent_sessions.is_empty(),
+                placement_recheck_due,
                 topics.first(),
                 ready.as_ref().map(|(_, ask)| ask),
             ) {
@@ -340,6 +391,7 @@ impl AppService {
             talks_to_lesson,
             word,
             words,
+            placement_recheck_due,
             engine_status: self.engine.status(),
         })
     }
@@ -477,18 +529,22 @@ impl AppService {
     ///
     /// Once Ella has a lesson ready, Today's talk is that lesson (`lesson`),
     /// and it is the lesson that is got ready: its instructions, and the line
-    /// it opens with.
+    /// it opens with. While the level check is owed (`recheck`), it is the
+    /// check, since nothing else opens until it is done.
     fn prepare_next_talk(
         &self,
         learner: &Learner,
         never_talked: bool,
+        recheck: bool,
         today: Option<&Topic>,
         lesson: Option<&LessonAsk>,
     ) -> EllaResult<()> {
-        let (next, recap) = if never_talked && !self.database.placed()? {
+        let placed = self.database.placed()?;
+        let (next, recap) = if (never_talked && !placed) || (recheck && placed) {
             let next = NextTalk::Placement {
                 learner_name: learner.name.clone(),
                 age: learner.age,
+                returning: recheck && placed,
             };
             (Some(next), NextRecap::Placement)
         } else {
@@ -693,6 +749,7 @@ impl AppService {
         let learner = self.database.signed_in_learner()?.ok_or_else(|| {
             EllaError::Conflict("Tell Ella your name before starting a conversation.".into())
         })?;
+        self.check_first()?;
         let (position, _) = self.placement()?;
         let target = self.choose_target(&position)?;
         let pitch = Pitch {
@@ -744,6 +801,7 @@ impl AppService {
         let learner = self.database.signed_in_learner()?.ok_or_else(|| {
             EllaError::Conflict("Tell Ella your name before starting a conversation.".into())
         })?;
+        self.check_first()?;
         let (topics, _) = self.offering(Some(&learner))?;
         let topic = topics
             .into_iter()
@@ -797,6 +855,7 @@ impl AppService {
         let learner = self.database.signed_in_learner()?.ok_or_else(|| {
             EllaError::Conflict("Tell Ella your name before starting a conversation.".into())
         })?;
+        self.check_first()?;
         let (position, _) = self.placement()?;
         let talk = words::plan_word(&position.level, &self.database.words_before(&today())?);
         let started_at = now();
@@ -826,23 +885,26 @@ impl AppService {
     /// The placement chat: a friendly first talk that climbs from easy
     /// questions to harder ones until it has heard enough to read a level,
     /// between five answers and twelve. Onboarding opens it, and so does the
-    /// level map for a learner who never had one.
+    /// level map for a learner who never had one. For a placed learner who
+    /// owes the level check (`placement_recheck`), it is that check, and Ella
+    /// talks to them as someone she knows.
     pub fn start_placement(&self) -> EllaResult<Session> {
         let learner = self.database.signed_in_learner()?.ok_or_else(|| {
             EllaError::Conflict("Tell Ella your name before starting a conversation.".into())
         })?;
+        let returning = self.placement_is_recheck()?;
         let started_at = now();
         let opening = Message {
             id: Uuid::new_v4().to_string(),
             speaker: Speaker::Ella,
-            content: self.engine.placement_opening(&learner.name, learner.age)?,
+            content: self.engine.placement_opening(&learner.name, learner.age, returning)?,
             turn: 0,
             created_at: started_at.clone(),
         };
         let session = Session {
             id: Uuid::new_v4().to_string(),
             topic_id: PLACEMENT_TOPIC_ID.into(),
-            topic_label: PLACEMENT_LABEL.into(),
+            topic_label: if returning { RECHECK_LABEL } else { PLACEMENT_LABEL }.into(),
             status: "active".into(),
             started_at,
             completed_at: None,
@@ -887,6 +949,7 @@ impl AppService {
         let learner = self.database.signed_in_learner()?.ok_or_else(|| {
             EllaError::Conflict("Tell Ella your name before starting a conversation.".into())
         })?;
+        self.check_first()?;
 
         let ledger_opening = match &chore.win {
             WinCondition::Ledger(spec) => Some(spec.opening),
@@ -1465,12 +1528,14 @@ impl AppService {
         // A placement answer the filter flagged never ends the chat: the reply
         // to it asks the dodged question again, which only makes sense if the
         // chat carries on. The pending check is left for the next answer.
-        let brief = (curriculum_meta.kind.as_deref() == Some(PLACEMENT_KIND)).then(|| {
-            PlacementBrief {
+        let brief = match curriculum_meta.kind.as_deref() == Some(PLACEMENT_KIND) {
+            true => Some(PlacementBrief {
                 age: learner.age,
                 closing: !flagged && self.placement_closes(session_id, turn),
-            }
-        });
+                returning: self.placement_is_recheck()?,
+            }),
+            false => None,
+        };
         let (talk, topic) = match (&brief, &chore_context) {
             (Some(_), _) => ("placement", session.topic_id.as_str()),
             (None, Some(context)) => ("chore", context.chore_id.as_str()),
@@ -1707,8 +1772,8 @@ impl AppService {
         let session_summary = if conversation_over {
             Some(self.complete_session(session_id)?)
         } else {
-            if brief.is_some() {
-                self.schedule_placement_check(session_id, &learner_name, learner_age, turn);
+            if let Some(brief) = &brief {
+                self.schedule_placement_check(session_id, &learner_name, learner_age, brief.returning, turn);
             }
             None
         };
@@ -2219,6 +2284,7 @@ impl AppService {
         session_id: &str,
         learner_name: &str,
         age: Option<u8>,
+        returning: bool,
         answers: u32,
     ) {
         if !self.engine.judges() || answers + 1 < progress::PLACEMENT_MIN_TURNS {
@@ -2230,7 +2296,7 @@ impl AppService {
         let engine = Arc::clone(&self.engine);
         let name = learner_name.to_owned();
         let handle = thread::spawn(move || {
-            match engine.placement_readiness(&name, age, &session.messages) {
+            match engine.placement_readiness(&name, age, returning, &session.messages) {
                 Ok(readiness) => readiness,
                 Err(error) => {
                     eprintln!("[placement] the check after {answers} answers failed: {error}");
@@ -2322,6 +2388,13 @@ impl AppService {
     }
 
     fn assess_placement(&self, learner: &Learner, session: &Session) -> EllaResult<String> {
+        // A placed learner's placement chat, while the check is owed, is the
+        // check: see `assess_recheck`.
+        if self.database.placed()? {
+            if let Some(before) = self.recheck_due()? {
+                return self.assess_recheck(learner, session, before);
+            }
+        }
         let answers: Vec<&str> = session
             .messages
             .iter()
@@ -2334,13 +2407,7 @@ impl AppService {
         // read before the transaction opens: the model takes a while, and the
         // database is not held while it does.
         let reading = if answers.len() as u32 >= progress::PLACEMENT_MIN_TURNS {
-            let read = self.engine.place(&learner.name, &session.messages).map_err(|error| {
-                eprintln!("[curriculum] placement {}: {error}", session.id);
-                // Shown as it is, so it says what to do.
-                EllaError::Conflict(
-                    "Ella could not work out your level just now. Try again in a moment.".into(),
-                )
-            })?;
+            let read = self.read_level(learner, session, &session.messages)?;
             // Without a model the chat still ends somewhere: where everyone
             // starts, as on the phone.
             let read = read.unwrap_or_else(|| PlacementReading {
@@ -2355,10 +2422,7 @@ impl AppService {
         } else {
             None
         };
-        let closing = reading
-            .as_ref()
-            .and_then(|reading| reading.closing.clone())
-            .unwrap_or_else(|| format!("That was lovely, {}!", first_name(&learner.name)));
+        let closing = placement_closing(learner, reading.as_ref());
         let session_id = session.id.clone();
         self.database.commit_assessment(&session.id, move |store| {
             let stored = store.position()?.and_then(known_position);
@@ -2371,18 +2435,7 @@ impl AppService {
             };
             let placed = store.placed()? || reading.is_some();
             let position = moved.clone().or(stored).unwrap_or_else(curriculum::start);
-            let known = progress::by_key(&store.skill_progress(&keys_of(&progress::step_skills(&position)))?);
-            let assessment = Assessment {
-                session_id,
-                kind: PLACEMENT_KIND.into(),
-                standing: standing_at(&position, placed, &known),
-                closing: Some(closing),
-                advanced: None,
-                skills: Vec::new(),
-                aim: None,
-                scored: reading.is_some(),
-                notes: None,
-            };
+            let assessment = placement_assessment(store, session_id, &position, placed, closing, reading.is_some(), None)?;
             Ok(AssessmentWrite {
                 skills: Vec::new(),
                 position: moved,
@@ -2390,6 +2443,104 @@ impl AppService {
                 assessment: to_json(&assessment)?,
                 counted: false,
             })
+        })
+    }
+
+    /// The level check (`placement_recheck`), as Ella Mobile ends one: read
+    /// only off what the learner said aloud, and only once they have said as
+    /// much as the shortest placement hears, in a chat that did not turn to
+    /// support. Then it can move them up or down: the same level keeps their
+    /// step, and another resumes the work already earned there
+    /// (`placement_recheck::rechecked_position`). Talks, streaks, badges and
+    /// skills are all kept.
+    ///
+    /// A check that could not be read places nobody and leaves it owed, so
+    /// the window asks for a full talk again.
+    fn assess_recheck(&self, learner: &Learner, session: &Session, before: String) -> EllaResult<String> {
+        let spoken_ids = self.database.spoken_answer_ids(&session.id)?;
+        // Typed or pasted answers, some written by AI, are not their English.
+        let heard: Vec<Message> = session
+            .messages
+            .iter()
+            .filter(|message| message.speaker != Speaker::Learner || spoken_ids.contains(&message.id))
+            .cloned()
+            .collect();
+        let answers: Vec<&str> = heard
+            .iter()
+            .filter(|message| message.speaker == Speaker::Learner)
+            .map(|message| message.content.as_str())
+            .collect();
+        let said: Vec<&str> = session
+            .messages
+            .iter()
+            .filter(|message| message.speaker == Speaker::Ella)
+            .map(|message| message.content.as_str())
+            .collect();
+        let reading = if answers.len() as u32 >= progress::PLACEMENT_MIN_TURNS && !safety::in_support(&said) {
+            self.read_level(learner, session, &heard)?.map(|read| PlacementReading {
+                level: progress::at_most(&read.level, progress::level_ceiling(&answers)),
+                ..read
+            })
+        } else {
+            None
+        };
+        let closing = placement_closing(learner, reading.as_ref());
+        let session_id = session.id.clone();
+        self.database.commit_assessment(&session.id, move |store| {
+            let current = store.position()?.and_then(known_position).unwrap_or_else(curriculum::start);
+            // Another check may have answered the cut-off while this one was read.
+            let reading = if store.placement_recheck_due(&before)? { reading } else { None };
+            let Some(reading) = reading else {
+                let assessment = placement_assessment(store, session_id, &current, true, closing, false, None)?;
+                return Ok(AssessmentWrite {
+                    skills: Vec::new(),
+                    position: None,
+                    placed: false,
+                    assessment: to_json(&assessment)?,
+                    counted: false,
+                });
+            };
+            let level_keys: Vec<String> = curriculum::level(&reading.level)
+                .map(|level| {
+                    level
+                        .steps
+                        .iter()
+                        .flat_map(|step| keys_of(&progress::step_skills(&Position::new(&reading.level, step.number))))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let known = progress::by_key(&store.skill_progress(&level_keys)?);
+            let highest = store.highest_step_at(&reading.level)?;
+            let position = placement_recheck::rechecked_position(&current, &reading.level, highest, &known);
+            let recheck = PlacementRecheck {
+                before,
+                previous: current,
+                position: position.clone(),
+            };
+            let assessment =
+                placement_assessment(store, session_id, &position, true, closing, true, Some(recheck))?;
+            Ok(AssessmentWrite {
+                skills: Vec::new(),
+                position: Some(position),
+                placed: true,
+                assessment: to_json(&assessment)?,
+                counted: false,
+            })
+        })
+    }
+
+    /// The level a finished placement chat shows, read off `messages`; `None`
+    /// without a model. An answer that cannot be read is said as it is, so
+    /// it says what to do.
+    fn read_level(
+        &self,
+        learner: &Learner,
+        session: &Session,
+        messages: &[Message],
+    ) -> EllaResult<Option<PlacementReading>> {
+        self.engine.place(&learner.name, messages).map_err(|error| {
+            eprintln!("[curriculum] placement {}: {error}", session.id);
+            EllaError::Conflict("Ella could not work out your level just now. Try again in a moment.".into())
         })
     }
 
@@ -2437,6 +2588,7 @@ impl AppService {
                 aim: None,
                 scored: false,
                 notes,
+                recheck: None,
             };
             Ok(AssessmentWrite {
                 skills: Vec::new(),
@@ -2598,6 +2750,7 @@ impl AppService {
                 aim,
                 scored: scores.is_some(),
                 notes,
+                recheck: None,
             };
             write.assessment = to_json(&assessment)?;
             Ok(write)
@@ -2843,6 +2996,39 @@ fn distinct(keys: Vec<String>) -> Vec<String> {
 /// Today on the laptop's own calendar, the one the learner lives by.
 fn today() -> String {
     Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// What Ella ends a placement chat on: the model's own closing when it read
+/// a level and gave one, else a warm line of her own.
+fn placement_closing(learner: &Learner, reading: Option<&PlacementReading>) -> String {
+    reading
+        .and_then(|reading| reading.closing.clone())
+        .unwrap_or_else(|| format!("That was lovely, {}!", first_name(&learner.name)))
+}
+
+/// A placement chat's assessment, with the learner at `position`.
+fn placement_assessment(
+    store: &CurriculumReader<'_>,
+    session_id: String,
+    position: &Position,
+    placed: bool,
+    closing: String,
+    scored: bool,
+    recheck: Option<PlacementRecheck>,
+) -> EllaResult<Assessment> {
+    let known = progress::by_key(&store.skill_progress(&keys_of(&progress::step_skills(position)))?);
+    Ok(Assessment {
+        session_id,
+        kind: PLACEMENT_KIND.into(),
+        standing: standing_at(position, placed, &known),
+        closing: Some(closing),
+        advanced: None,
+        skills: Vec::new(),
+        aim: None,
+        scored,
+        notes: None,
+        recheck,
+    })
 }
 
 fn first_name(name: &str) -> &str {
@@ -3462,6 +3648,7 @@ mod tests {
             "engine_status",
             "learner",
             "lesson",
+            "placement_recheck_due",
             "progress",
             "recent_sessions",
             "saved_learner",
@@ -3479,6 +3666,7 @@ mod tests {
         assert_eq!(fresh["lesson"], serde_json::Value::Null);
         assert_eq!(fresh["talks_to_lesson"], serde_json::Value::Null, "signed out: nothing to count down");
         assert_eq!(fresh["saved_learner"], serde_json::Value::Null);
+        assert_eq!(fresh["placement_recheck_due"], false, "signed out: no level check owed");
         assert_eq!(fresh["standing"], serde_json::Value::Null);
         assert_eq!(fresh["word"], serde_json::Value::Null, "signed out: no word of the day");
         assert_eq!(
@@ -3937,7 +4125,7 @@ mod curriculum_flow_tests {
         fn judges(&self) -> bool {
             true
         }
-        fn placement_readiness(&self, _: &str, _: Option<u8>, messages: &[Message]) -> EllaResult<Option<Readiness>> {
+        fn placement_readiness(&self, _: &str, _: Option<u8>, _: bool, messages: &[Message]) -> EllaResult<Option<Readiness>> {
             let answers = messages.iter().filter(|message| message.speaker == Speaker::Learner).count();
             self.heard.lock().unwrap().checks.push(answers);
             Ok(Some(self.readiness))
@@ -4176,7 +4364,7 @@ mod curriculum_flow_tests {
         service.bootstrap().unwrap();
         assert_eq!(
             heard.lock().unwrap().prepared.last(),
-            Some(&NextTalk::Placement { learner_name: "Asha".into(), age: Some(14) }),
+            Some(&NextTalk::Placement { learner_name: "Asha".into(), age: Some(14), returning: false }),
             "onboarding ends in the placement chat"
         );
 
@@ -4665,6 +4853,197 @@ mod curriculum_flow_tests {
         );
         let level_ups = service.bootstrap().unwrap().progress.level_ups;
         assert_eq!(level_ups, [crate::domain::LevelUp { level_number: 1, day: today(), placement: true }]);
+    }
+
+    /// Moves a talk to a month before the level check's cut-off, whenever the
+    /// tests run.
+    fn before_the_cut_off(service: &AppService, session_id: &str) {
+        let days = (Utc::now() - placement_recheck::cutoff()).num_days() + 30;
+        service.database.backdate(session_id, days).unwrap();
+    }
+
+    /// A service as built, with its level check (`BRANCH_RECHECK_CUTOFF`) and
+    /// the judge's placement reading `level`, for a learner a placement put at
+    /// `placed` before the cut-off.
+    fn placed_before_the_check(level: &str, placed: Position) -> (AppService, Arc<Mutex<Heard>>) {
+        let heard: Arc<Mutex<Heard>> = Arc::default();
+        let service = judged(Judge {
+            reading: PlacementReading { level: level.into(), closing: Some("Great to catch up!".into()) },
+            ..Judge::new(&heard)
+        });
+        let placement = service.start_placement().unwrap();
+        service.send_text_turn(&placement.id, "I am from Pune").unwrap();
+        service.complete_session(&placement.id).unwrap();
+        service
+            .database
+            .commit_assessment(&placement.id, |store| {
+                let assessment =
+                    placement_assessment(store, placement.id.clone(), &placed, true, "Hi".into(), true, None)?;
+                Ok(AssessmentWrite {
+                    skills: Vec::new(),
+                    position: Some(placed.clone()),
+                    placed: true,
+                    assessment: to_json(&assessment)?,
+                    counted: false,
+                })
+            })
+            .unwrap();
+        before_the_cut_off(&service, &placement.id);
+        (service, heard)
+    }
+
+    /// Says `answers` answers aloud in the chat, ending it when it has not
+    /// closed itself by then.
+    fn speak_placement(service: &AppService, session_id: &str, answers: u32) {
+        for _ in 0..answers {
+            let result = service
+                .send_voice_turn(session_id, vec![0; 16_000], 16_000, Some("I work at a bank in Pune".into()))
+                .unwrap();
+            if result.session_summary.is_some() {
+                return;
+            }
+        }
+        service.complete_session(session_id).unwrap();
+    }
+
+    #[test]
+    fn a_learner_placed_before_the_cut_off_owes_the_level_check_before_any_other_talk() {
+        let (service, heard) = placed_before_the_check("B1", Position::new("B1", 2));
+        let snapshot = service.bootstrap().unwrap();
+        assert!(snapshot.placement_recheck_due);
+        assert_eq!(
+            heard.lock().unwrap().prepared.last(),
+            Some(&NextTalk::Placement { learner_name: "Asha".into(), age: Some(14), returning: true }),
+            "the check is what is got ready"
+        );
+        let refused = |result: EllaResult<Session>| match result {
+            Err(EllaError::Conflict(message)) => assert_eq!(message, RECHECK_REQUIRED),
+            other => panic!("expected the check first, got {other:?}"),
+        };
+        refused(service.start_session("street-food"));
+        refused(service.start_word());
+        refused(service.start_lesson());
+        refused(service.start_chore(&chores()[0].id));
+
+        let check = service.start_placement().unwrap();
+        assert_eq!(check.topic_label, "Talk with Ella");
+        service.send_text_turn(&check.id, "Hello again").unwrap();
+        let brief = heard.lock().unwrap().requests.last().unwrap().placement.clone().unwrap();
+        assert!(brief.returning, "Ella talks to them as someone she knows");
+    }
+
+    #[test]
+    fn nobody_else_owes_the_check() {
+        // Not before the cut-off has come.
+        let (service, _) = placed_before_the_check("B1", Position::new("B1", 2));
+        let service = service.with_recheck_cutoff("2099-01-01T00:00:00Z");
+        assert!(!service.bootstrap().unwrap().placement_recheck_due);
+        service.start_session("street-food").unwrap();
+
+        // Placed after the cut-off.
+        let heard: Arc<Mutex<Heard>> = Arc::default();
+        let service = judged(Judge::new(&heard));
+        let placement = service.start_placement().unwrap();
+        answer_placement(&service, &placement.id);
+        service.assess_session(&placement.id).unwrap();
+        assert!(!service.bootstrap().unwrap().placement_recheck_due);
+        service.start_session("street-food").unwrap();
+
+        // Skipped the placement.
+        let service = judged(Judge::new(&heard));
+        let skipped = service.start_placement().unwrap();
+        service.complete_session(&skipped.id).unwrap();
+        before_the_cut_off(&service, &skipped.id);
+        assert!(!service.bootstrap().unwrap().placement_recheck_due);
+
+        // No model to read a level with: the check could never finish.
+        let service = AppService::new(Database::in_memory().unwrap(), Box::new(DemoEngine));
+        service.save_learner("Asha", Some(14)).unwrap();
+        let placement = service.start_placement().unwrap();
+        service.send_text_turn(&placement.id, "I am from Pune").unwrap();
+        service.complete_session(&placement.id).unwrap();
+        before_the_cut_off(&service, &placement.id);
+        assert!(!service.bootstrap().unwrap().placement_recheck_due);
+        service.start_session("street-food").unwrap();
+    }
+
+    #[test]
+    fn the_check_can_move_a_learner_down_and_keeps_what_they_earned() {
+        let (service, _) = placed_before_the_check("A1", Position::new("B1", 2));
+        let before = service.bootstrap().unwrap().progress.level_ups;
+        let check = service.start_placement().unwrap();
+        speak_placement(&service, &check.id, progress::PLACEMENT_MAX_TURNS);
+        let assessment = service.assess_session(&check.id).unwrap();
+        assert!(assessment.scored);
+        assert_eq!((assessment.standing.level_number, assessment.standing.step), (1 + curriculum::level_index("A1").unwrap() as u8, 1));
+        assert_eq!(
+            assessment.recheck,
+            Some(PlacementRecheck {
+                before: placement_recheck::label(&placement_recheck::cutoff()),
+                previous: Position::new("B1", 2),
+                position: Position::new("A1", 1),
+            })
+        );
+        assert_eq!(service.database.position().unwrap(), Some(Position::new("A1", 1)));
+        let snapshot = service.bootstrap().unwrap();
+        assert!(!snapshot.placement_recheck_due, "answered");
+        assert!(snapshot.standing.unwrap().placed);
+        // The level reached before still earns its badges: it is in the history.
+        assert!(before.iter().all(|up| snapshot.progress.level_ups.contains(up)));
+        service.start_session("street-food").unwrap();
+        // Asked again, it answers the same and moves nobody twice.
+        assert_eq!(service.assess_session(&check.id).unwrap(), assessment);
+    }
+
+    #[test]
+    fn the_check_back_on_a_level_resumes_the_step_they_had_reached() {
+        let (service, _) = placed_before_the_check("A2", Position::new("B1", 1));
+        // Earlier, they had reached Step 4 of A2.
+        let earlier = service.start_placement().unwrap();
+        service.complete_session(&earlier.id).unwrap();
+        let a2 = curriculum::level_index("A2").unwrap() as u8 + 1;
+        service
+            .database
+            .commit_assessment(&earlier.id, |_| {
+                Ok(AssessmentWrite {
+                    skills: Vec::new(),
+                    position: None,
+                    placed: false,
+                    assessment: serde_json::json!({"standing": {"level_number": a2, "step": 4}}).to_string(),
+                    counted: false,
+                })
+            })
+            .unwrap();
+        let check = service.start_placement().unwrap();
+        speak_placement(&service, &check.id, progress::PLACEMENT_MAX_TURNS);
+        service.assess_session(&check.id).unwrap();
+        assert_eq!(service.database.position().unwrap(), Some(Position::new("A2", 4)));
+    }
+
+    #[test]
+    fn a_check_that_heard_too_little_aloud_places_nobody_and_is_still_owed() {
+        let (service, _) = placed_before_the_check("A1", Position::new("B1", 2));
+        // Ended after three spoken answers.
+        let short = service.start_placement().unwrap();
+        speak_placement(&service, &short.id, 3);
+        let assessment = service.assess_session(&short.id).unwrap();
+        assert!(!assessment.scored && assessment.recheck.is_none());
+        assert_eq!(service.database.position().unwrap(), Some(Position::new("B1", 2)));
+        assert!(service.bootstrap().unwrap().placement_recheck_due, "a full talk is still owed");
+
+        // Typed answers, however many, are not their English.
+        let typed = service.start_placement().unwrap();
+        answer_placement(&service, &typed.id);
+        let assessment = service.assess_session(&typed.id).unwrap();
+        assert!(!assessment.scored);
+        assert_eq!(service.database.position().unwrap(), Some(Position::new("B1", 2)));
+        assert!(service.bootstrap().unwrap().placement_recheck_due);
+
+        // Then a full one answers it.
+        let full = service.start_placement().unwrap();
+        speak_placement(&service, &full.id, progress::PLACEMENT_MAX_TURNS);
+        assert!(service.assess_session(&full.id).unwrap().scored);
+        assert!(!service.bootstrap().unwrap().placement_recheck_due);
     }
 
     #[test]
