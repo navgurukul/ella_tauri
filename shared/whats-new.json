@@ -1,4 +1,7 @@
 {
+  "0.1.29": [
+    "Small improvements to make Ella faster and more reliable."
+  ],
   "0.1.28": [
     "Ella remembers what you already answered, so she doesn't ask you the same question again.",
     "Ella answers faster when you talk without the internet."
