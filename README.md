@@ -698,12 +698,14 @@ The report reads a file saved through PowerShell's `>`, which is UTF-16.
 
 ### Weekly latency report
 
-Once a week the team gets one report across every tester's laptop: the
+Once a week the team gets one report across every laptop that sent: the
 latency KPIs, volume and errors, against the week before. The events go
 from the laptops to a private repository, `navgurukul/ella-telemetry`, never
 to this public one, and the scripts that make the report live here.
 
-1. **Upload.** Each tester names their laptop once (`lab-win-hp-02`,
+1. **Upload.** An installed copy of Ella sends its batches itself, through
+   the relay ([The upload queue](#the-upload-queue-on-by-default)). By
+   hand, for a laptop that does not send: each tester names their laptop once (`lab-win-hp-02`,
    `akshat-m1pro`: never a learner's name) and, every week before Monday
    11:00 IST, makes a batch of their whole `latency.jsonl`, renamed
    `<label>.jsonl`, and uploads it to that repository's `inbox/` on GitHub
@@ -946,8 +948,8 @@ committed to `inbox/` stays in Git history after it leaves the tree. Its
 
 #### The telemetry relay
 
-A laptop set to `ELLA_TELEMETRY_SEND=1` sends its batches to the
-`ella-telemetry` Edge Function in the Supabase project *Ella
+An installed copy of Ella (or any laptop set to `ELLA_TELEMETRY_SEND=1`)
+sends its batches to the `ella-telemetry` Edge Function in the Supabase project *Ella
 Desktop* ([`supabase/functions/ella-telemetry`](supabase/functions/ella-telemetry)),
 apart from the chat proxy so neither can take the other down. It stores each
 batch once in the project's private Storage bucket `telemetry`, as
@@ -1055,27 +1057,42 @@ in and is tested against the vectors). The one difference: the app leaves
 out, and counts (`policy_excluded_count`), an event with no `launch_id` as
 text, from a build before 2026-10-07; `--batch-out` sends those by hand.
 
-#### The upload queue (off by default)
+#### The upload queue (on by default)
 
-The app batches its own log (`src-tauri/src/telemetry_queue.rs`) only when
-asked to, and each batch goes one of two ways:
+The app batches its own log (`src-tauri/src/telemetry_queue.rs`), and an
+installed copy of Ella sends the batches without being asked. What runs is
+decided in one place, [`telemetry_switch.rs`](src-tauri/src/telemetry_switch.rs),
+by the first of these that holds:
 
-- **`ELLA_TELEMETRY_SEND=1`** sends it over HTTPS to the telemetry relay
-  ([The telemetry relay](#the-telemetry-relay)), from where `telemetry:repo
-  pull` takes it in. The laptop asks the relay for its own telemetry token
-  once and keeps it in `telemetry/send-token` (readable by the user only);
-  it is not the cloud's install token, and `ELLA_CLOUD` does not change it.
-  `ELLA_TELEMETRY_URL` names another relay, for a test.
-- **`ELLA_TELEMETRY_EXPORT=1`**, without `SEND`, writes it to
-  `telemetry/export/<batch_id>.jsonl` beside the log. A tester hands those
-  files over, and they go in with `--validate --data`; delete them once
-  they're handed over. Nothing is sent over a network.
+1. **`TELEMETRY_ENABLED = false`** in that file: no telemetry at all, no log
+   and no queue, whatever the environment says. It is `true`; setting it to
+   `false` is the one change that turns telemetry off in a build.
+2. **`ELLA_TELEMETRY_SEND=1`** sends the batches over HTTPS to the telemetry
+   relay ([The telemetry relay](#the-telemetry-relay)), from where
+   `telemetry:repo pull` takes them in. The laptop asks the relay for its own
+   telemetry token once and keeps it in `telemetry/send-token` (readable by
+   the user only); it is not the cloud's install token, and `ELLA_CLOUD` does
+   not change it. `ELLA_TELEMETRY_URL` names another relay, for a test.
+3. **`ELLA_TELEMETRY_EXPORT=1`** writes them to
+   `telemetry/export/<batch_id>.jsonl` beside the log instead. A tester hands
+   those files over, and they go in with `--validate --data`; delete them
+   once they're handed over. Nothing is sent over a network.
+4. **`ELLA_TELEMETRY_SEND=0`** keeps them on the laptop: the log is written,
+   nothing is sent or exported. For a developer or tester whose runs should
+   stay out of the fleet's data.
+5. **A release build** (an installed copy) sends them, as `SEND=1` does: the
+   default.
+6. **A development build** (`npm run tauri dev`) keeps them, as `SEND=0`
+   does: a developer's runs reach the relay only with `SEND=1`.
 
-With neither, nothing runs. With both, `SEND` wins and nothing is exported.
-The queue runs on a thread of its own, never in a talk's way: a request to
+Any other value of either variable counts as unset. With `SEND=1` and
+`EXPORT=1`, `SEND` wins and nothing is exported. What each event holds, and
+what of it may leave, is the same whichever way it goes. A laptop that
+updates to a sending build sends only what it logs from then on: the queue
+starts at the end of the log it finds. The queue runs on a thread of its own, never in a talk's way: a request to
 the relay waits at most 10 s to connect and 30 s in all.
 
-- **Only finished talks, when sending.** With `SEND`, a talk's turns leave
+- **Only finished talks, when sending.** Sending, a talk's turns leave
   once it has ended: a turn saying so, or its recap. The turns of a talk not
   yet ended are copied to `upload/held/<generation>.jsonl` and wait there,
   and the cursor goes past them, so the talks after it are not held up.
@@ -1590,9 +1607,11 @@ used, under an install token that names nobody; and from there to DeepSeek,
 whose privacy policy says it stores what it is sent in China and may use it to
 improve its models. Recordings never leave the laptop, nor do the database, the
 avatar, or the progress and badges. A laptop set to `ELLA_CLOUD=off` sends none
-of it. The timing telemetry leaves only from a laptop set to
-`ELLA_TELEMETRY_SEND=1`, as batches the telemetry policy allows, which name
-nobody ([The upload queue](#the-upload-queue-off-by-default)).
+of it. The timing telemetry (how long each step of a talk took, errors as
+codes, and the laptop's class: its OS, CPU and memory) leaves every installed
+copy, from 0.1.29, as batches the telemetry policy allows, which name nobody
+and hold nothing the learner said. A laptop set to `ELLA_TELEMETRY_SEND=0`
+keeps it ([The upload queue](#the-upload-queue-on-by-default)).
 
 `models/llm-slots/` beside it holds llama.cpp's saved slots: the evaluated
 instructions of the last six talks' topics, chores and placement chat, and of

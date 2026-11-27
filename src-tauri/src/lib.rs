@@ -15,6 +15,7 @@ pub mod skill_forms;
 mod telemetry;
 mod telemetry_policy;
 mod telemetry_queue;
+mod telemetry_switch;
 pub mod topics;
 pub mod vocab;
 pub mod words;
@@ -112,12 +113,11 @@ pub fn run() {
                 .map(|directory| directory.join("engines"));
             std::fs::create_dir_all(&data_dir)?;
             // Latency/error events and Canary failure audio outlive the
-            // session so improvements can be reviewed over time.
-            telemetry::persist_to(data_dir.join("telemetry"));
-            // Batches of it: sent to the telemetry relay only with
-            // ELLA_TELEMETRY_SEND=1, else exported for a tester to hand
-            // over only with ELLA_TELEMETRY_EXPORT=1; else nothing.
-            telemetry_queue::start(data_dir.join("telemetry"));
+            // session so improvements can be reviewed over time. The events
+            // leave in batches the telemetry policy allows: what runs, and
+            // where the batches go, is decided in one place, telemetry_switch
+            // (on, and sent, in an installed copy).
+            telemetry_switch::start(data_dir.join("telemetry"));
             if std::env::var_os("ELLA_STT_DEBUG_DIR").is_none() {
                 std::env::set_var("ELLA_STT_DEBUG_DIR", data_dir.join("stt-failures"));
             }
