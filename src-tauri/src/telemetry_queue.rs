@@ -12,11 +12,12 @@
 //! the team's store, which keeps each `batch_id` and `event_id` once, counts
 //! it once.
 //!
-//! Off unless asked for. `ELLA_TELEMETRY_SEND=1` sends each batch over
-//! HTTPS to the telemetry relay (`supabase/functions/ella-telemetry`), with
-//! a token of its own kept in `telemetry/send-token`. Else
-//! `ELLA_TELEMETRY_EXPORT=1` writes each batch to `telemetry/export/`, for a
-//! tester to hand over, and nothing leaves over a network.
+//! Whether it runs, and where its batches go, `telemetry_switch` decides:
+//! an installed copy sends each batch over HTTPS to the telemetry relay
+//! (`supabase/functions/ella-telemetry`), with a token of its own kept in
+//! `telemetry/send-token`; `ELLA_TELEMETRY_EXPORT=1` writes each batch to
+//! `telemetry/export/` instead, for a tester to hand over, and nothing
+//! leaves over a network.
 //!
 //! Sending, only finished talks leave: the turns of a talk that has not
 //! ended are copied out of the log to `upload/held/<generation>.jsonl`, and
@@ -54,6 +55,7 @@ use crate::{
     infrastructure::cloud_llm::{is_token, keep_token, read_token},
     telemetry,
     telemetry_policy::{self as policy, Body, Reasons, Sanitizer, SendFields},
+    telemetry_switch::Upload,
 };
 
 /// When the queue looks at the log, and how much it sends at a time. The app
@@ -1348,26 +1350,15 @@ pub fn nudge(why: Nudge) {
     }
 }
 
-fn switched_on(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|value| value == "1")
-}
-
-/// `ELLA_TELEMETRY_SEND=1`: batches go to the relay.
-fn sending() -> bool {
-    switched_on("ELLA_TELEMETRY_SEND")
-}
-
-pub fn enabled() -> bool {
-    sending() || switched_on("ELLA_TELEMETRY_EXPORT")
-}
-
-/// Starts the queue of the log in `telemetry_dir`: sending to the relay when
-/// `ELLA_TELEMETRY_SEND=1` (`ELLA_TELEMETRY_URL` names another), else
-/// exporting to `export/` beside it when `ELLA_TELEMETRY_EXPORT=1`.
-pub fn start(telemetry_dir: PathBuf) {
-    if !enabled() {
-        return;
-    }
+/// Starts the queue of the log in `telemetry_dir`, as `telemetry_switch`
+/// decided: sending to the relay (`ELLA_TELEMETRY_URL` names another), or
+/// exporting to `export/` beside it. `Upload::Off` starts nothing.
+pub fn start(telemetry_dir: PathBuf, upload: Upload) {
+    let sending = match upload {
+        Upload::Send => true,
+        Upload::Export => false,
+        Upload::Off => return,
+    };
     let (sender, receiver) = mpsc::sync_channel(1);
     if NUDGES.set(sender).is_err() {
         return;
@@ -1377,7 +1368,7 @@ pub fn start(telemetry_dir: PathBuf) {
         .map(|url| url.trim().to_owned())
         .filter(|url| !url.is_empty())
         .unwrap_or_else(|| DEFAULT_RELAY.to_owned());
-    if sending() {
+    if sending {
         eprintln!("[TELEMETRY] sending batches to {relay}");
     } else {
         eprintln!("[TELEMETRY] exporting batches to {}", telemetry_dir.join("export").display());
@@ -1385,13 +1376,13 @@ pub fn start(telemetry_dir: PathBuf) {
     let spawned = thread::Builder::new().name("telemetry-queue".into()).spawn(move || {
         // Made on this thread: a blocking client may not be dropped where
         // an async runtime runs.
-        let transport: Box<dyn Transport> = if sending() {
+        let transport: Box<dyn Transport> = if sending {
             Box::new(HttpTransport::new(&relay, telemetry_dir.join("send-token")))
         } else {
             Box::new(ExportTransport { dir: telemetry_dir.join("export") })
         };
         // Only finished talks are sent; an export is as it always was.
-        let config = Config { finished_talks_only: sending(), ..Config::default() };
+        let config = Config { finished_talks_only: sending, ..Config::default() };
         let queue = Queue::new(&telemetry_dir, config, transport);
         work(&queue, &receiver);
     });
